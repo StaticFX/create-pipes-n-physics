@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "de.devin.pipesnphysics.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "refmap": "pipesnphysics.refmap.json",
+  "mixins": [],
+  "client": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

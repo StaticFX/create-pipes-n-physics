@@ -1,0 +1,42 @@
+# IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Kotlin
+.kotlin/
+
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Run directories
+run/
+runs/
+
+# Generated resources cache
+/src/generated/resources/.cache/
+/src/generated/.cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Compiled files
+*.class
+*.log
+
+# Package files
+*.jar
+*.war
+*.zip
+*.tar.gz
+!gradle-wrapper.jar
+
+# Extracted assets
+/assets/
+/data/
+/META-INF/
