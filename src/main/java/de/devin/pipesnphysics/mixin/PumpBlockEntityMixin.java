@@ -14,6 +14,9 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
 
+import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import org.spongepowered.asm.mixin.Unique;
+
 import java.util.*;
 
 /**
@@ -37,14 +40,16 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
             boolean pull
     );
 
-    private static int nextDistance(int current, Direction face, BlockPos connectedPos, int pumpY) {
+    @Unique
+    private static int create_pipes_n_physics$nextDistance(int current, Direction face, BlockPos connectedPos, int pumpY) {
         if (face == Direction.DOWN) return current;
         if (face == Direction.UP && connectedPos.getY() <= pumpY) return current;
-        if (face == Direction.UP) return current + 2;
+        if (face == Direction.UP) return current + PipesNPhysicsConfig.UPWARD_PIPE_COST.get();
         return current + 1;
     }
 
-    private static boolean hasReachedValidEndpoint(net.minecraft.world.level.LevelAccessor world, BlockFace face, boolean pull) {
+    @Unique
+    private static boolean create_pipes_n_physics$hasReachedValidEndpoint(net.minecraft.world.level.LevelAccessor world, BlockFace face, boolean pull) {
         BlockPos connectedPos = face.getConnectedPos();
         BlockState connectedState = world.getBlockState(connectedPos);
         FluidTransportBehaviour pipe = FluidPropagator.getPipe(world, connectedPos);
@@ -95,7 +100,7 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
         if (!pull)
             FluidPropagator.resetAffectedFluidNetworks(self.getLevel(), worldPosition, side.getOpposite());
 
-        if (!hasReachedValidEndpoint(self.getLevel(), start, pull)) {
+        if (!create_pipes_n_physics$hasReachedValidEndpoint(self.getLevel(), start, pull)) {
 
             pipeGraph.computeIfAbsent(worldPosition, $ -> Pair.of(0, new IdentityHashMap<>()))
                     .getSecond()
@@ -132,7 +137,7 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
                         continue;
                     if (blockFace.isEquivalent(start))
                         continue;
-                    if (hasReachedValidEndpoint(self.getLevel(), blockFace, pull)) {
+                    if (create_pipes_n_physics$hasReachedValidEndpoint(self.getLevel(), blockFace, pull)) {
                         pipeGraph.computeIfAbsent(currentPos, $ -> Pair.of(distance, new IdentityHashMap<>()))
                                 .getSecond()
                                 .put(face, pull);
@@ -148,7 +153,7 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
                     if (visited.contains(connectedPos))
                         continue;
 
-                    int next = nextDistance(distance, face, connectedPos, pumpY);
+                    int next = create_pipes_n_physics$nextDistance(distance, face, connectedPos, pumpY);
                     if (next >= maxDistance) {
                         pipeGraph.computeIfAbsent(currentPos, $ -> Pair.of(distance, new IdentityHashMap<>()))
                                 .getSecond()
@@ -173,25 +178,70 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
         searchForEndpointRecursively(pipeGraph, targets, validFaces,
                 new BlockFace(start.getPos(), start.getOppositeFace()), pull);
 
-        float pressure = Math.abs(self.getSpeed());
+        // Collect all valid faces and count exit faces per pipe
+        Set<BlockFace> allValidFaces = new HashSet<>();
+        Map<BlockPos, Integer> exitCount = new HashMap<>();
+        Set<BlockPos> validPipes = new HashSet<>();
+
         for (Set<BlockFace> set : validFaces.values()) {
-            int parallelBranches = Math.max(1, set.size() - 1);
             for (BlockFace face : set) {
-                BlockPos pipePos = face.getPos();
-                Direction pipeSide = face.getFace();
-
-                if (pipePos.equals(worldPosition))
-                    continue;
-
-                boolean inbound = pipeGraph.get(pipePos)
-                        .getSecond()
-                        .get(pipeSide);
-                FluidTransportBehaviour pipeBehaviour = FluidPropagator.getPipe(self.getLevel(), pipePos);
-                if (pipeBehaviour == null)
-                    continue;
-
-                pipeBehaviour.addPressure(pipeSide, inbound, pressure / parallelBranches);
+                BlockPos pos = face.getPos();
+                if (pos.equals(worldPosition)) continue;
+                allValidFaces.add(face);
+                validPipes.add(pos);
+                // Exit faces point away from the pump (value == pull in the pipe graph)
+                if (pipeGraph.get(pos).getSecond().get(face.getFace()) == pull)
+                    exitCount.merge(pos, 1, Integer::sum);
             }
+        }
+
+        // BFS from pump through valid pipes, propagating pressure splits
+        float pressure = Math.abs(self.getSpeed());
+        Map<BlockPos, Float> pipePressure = new LinkedHashMap<>();
+        Queue<BlockPos> pressureFrontier = new ArrayDeque<>();
+
+
+        
+        BlockPos firstPipe = start.getConnectedPos();
+        if (validPipes.contains(firstPipe)) {
+            pipePressure.put(firstPipe, pressure);
+            pressureFrontier.add(firstPipe);
+        }
+
+        while (!pressureFrontier.isEmpty()) {
+            BlockPos pos = pressureFrontier.poll();
+            float incoming = pipePressure.get(pos);
+            int exits = exitCount.getOrDefault(pos, 1);
+            float split = incoming / Math.max(1, exits);
+
+            // If this pipe branches, its own pressure becomes the split value
+            if (exits > 1)
+                pipePressure.put(pos, split);
+
+            // Propagate split pressure to downstream pipes via exit faces
+            for (Map.Entry<Direction, Boolean> e : pipeGraph.get(pos).getSecond().entrySet()) {
+                if (e.getValue() == pull) { // exit face
+                    BlockPos next = pos.relative(e.getKey());
+                    if (validPipes.contains(next) && !pipePressure.containsKey(next)) {
+                        pipePressure.put(next, split);
+                        pressureFrontier.add(next);
+                    }
+                }
+            }
+        }
+
+        // Apply pressure to all valid faces
+        for (BlockFace face : allValidFaces) {
+            BlockPos pipePos = face.getPos();
+            Direction pipeSide = face.getFace();
+            boolean inbound = pipeGraph.get(pipePos).getSecond().get(pipeSide);
+            float p = pipePressure.getOrDefault(pipePos, pressure);
+
+            FluidTransportBehaviour pipeBehaviour = FluidPropagator.getPipe(self.getLevel(), pipePos);
+            if (pipeBehaviour == null)
+                continue;
+
+            pipeBehaviour.addPressure(pipeSide, inbound, p);
         }
     }
 }

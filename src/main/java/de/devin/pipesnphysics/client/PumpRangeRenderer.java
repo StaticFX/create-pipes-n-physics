@@ -23,6 +23,7 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.SubscribeEvent;
+import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 
 import java.util.*;
@@ -48,11 +49,15 @@ public class PumpRangeRenderer {
 
     @SubscribeEvent
     public static void onRenderLevel(RenderLevelStageEvent event) {
-        if (true) return; // DEBUG: disabled to test if mixin causes pipe fluid issue
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) return;
 
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.level == null) return;
+        if (!PipesNPhysicsConfig.SHOW_PUMP_RANGE_ARROWS.get()) {
+            cachedPaths = Collections.emptyList();
+            cachedPumpPos = null;
+            return;
+        }
         if (!GogglesItem.isWearingGoggles(mc.player)) {
             cachedPaths = Collections.emptyList();
             cachedPumpPos = null;
@@ -115,7 +120,9 @@ public class PumpRangeRenderer {
             Queue<int[]> frontier = new ArrayDeque<>(); // [distance, x, y, z]
             Set<BlockPos> visited = new HashSet<>();
             Map<BlockPos, BlockPos> parentMap = new LinkedHashMap<>();
+            Map<BlockPos, Integer> distanceMap = new HashMap<>();
 
+            distanceMap.put(pumpPos, 0);
             frontier.add(new int[]{1, startPos.getX(), startPos.getY(), startPos.getZ()});
             visited.add(pumpPos);
             parentMap.put(startPos, pumpPos);
@@ -133,6 +140,7 @@ public class PumpRangeRenderer {
                 if (pipe == null) continue;
 
                 orderedPositions.add(current);
+                distanceMap.put(current, distance);
                 if (distance >= maxDistance) continue;
 
                 for (Direction face : FluidPropagator.getPipeConnections(currentState, pipe)) {
@@ -149,7 +157,11 @@ public class PumpRangeRenderer {
                 // Build linear paths by following branches
                 List<List<BlockPos>> branches = extractBranches(orderedPositions, parentMap, pumpPos);
                 for (List<BlockPos> branch : branches) {
-                    allPaths.add(new PipePath(branch, isPull));
+                    List<Integer> distances = new ArrayList<>();
+                    for (BlockPos pos : branch) {
+                        distances.add(distanceMap.getOrDefault(pos, 0));
+                    }
+                    allPaths.add(new PipePath(branch, distances, maxDistance, isPull));
                 }
             }
         }
@@ -160,7 +172,7 @@ public class PumpRangeRenderer {
     private static int nextDistance(int current, Direction face, BlockPos connectedPos, int pumpY) {
         if (face == Direction.DOWN) return current;
         if (face == Direction.UP && connectedPos.getY() <= pumpY) return current;
-        if (face == Direction.UP) return current + 2;
+        if (face == Direction.UP) return current + PipesNPhysicsConfig.UPWARD_PIPE_COST.get();
         return current + 1;
     }
 
@@ -249,8 +261,21 @@ public class PumpRangeRenderer {
                 applyDirectionRotation(poseStack, dir);
                 poseStack.translate(-0.5, -0.5, -0.5);
 
+                // Hue shift: green near pump → red at max pump range
+                float t = Math.min(1.0f, (float) path.distances.get(i + 1) / Math.max(1, path.maxDistance));
+                float r = t;
+                float g = 1.0f - t;
+                float b = 0.0f;
+
+                // Fade in where arrows spawn, fade out where they despawn
+                int spawnSegment = path.isPull ? path.positions.size() - 2 : 0;
+                int despawnSegment = path.isPull ? 0 : path.positions.size() - 2;
+                float alpha = 1.0f;
+                if (i == spawnSegment) alpha = Math.clamp(slide / 0.2f, 0.0f, 1.0f);
+                else if (i == despawnSegment) alpha = Math.clamp((1.0f - slide) / 0.2f, 0.0f, 1.0f);
+
                 for (BakedQuad quad : model.getQuads(null, null, mc.level.random)) {
-                    consumer.putBulkData(poseStack.last(), quad, 0.4f, 0.9f, 1.0f, 1.0f,
+                    consumer.putBulkData(poseStack.last(), quad, r, g, b, alpha,
                             0xF000F0, OverlayTexture.NO_OVERLAY);
                 }
 
@@ -266,12 +291,14 @@ public class PumpRangeRenderer {
             case NORTH -> poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(180));
             case WEST -> poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(-90));
             case EAST -> poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(90));
-            case UP -> poseStack.mulPose(com.mojang.math.Axis.XP.rotationDegrees(90));
-            case DOWN -> poseStack.mulPose(com.mojang.math.Axis.XP.rotationDegrees(-90));
-            default -> {} // SOUTH is default facing
+            case UP -> poseStack.mulPose(com.mojang.math.Axis.XP.rotationDegrees(-90));
+            case DOWN -> poseStack.mulPose(com.mojang.math.Axis.XP.rotationDegrees(90));
+            default -> {
+                // SOUTH is default facing
+            }
         }
     }
 
-    /** A traced pipe path with direction information. */
-    private record PipePath(List<BlockPos> positions, boolean isPull) {}
+    /** A traced pipe path with direction and distance information. */
+    private record PipePath(List<BlockPos> positions, List<Integer> distances, int maxDistance, boolean isPull) {}
 }
