@@ -8,7 +8,9 @@ import net.createmod.catnip.lang.FontHelper;
 import net.minecraft.resources.ResourceLocation;
 import de.devin.pipesnphysics.client.PumpRangeRenderer;
 import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.fml.loading.FMLEnvironment;
@@ -27,8 +29,10 @@ public class PipesNPhysics {
                             .andThen(TooltipModifier.mapNull(KineticStats.create(item)))
             );
 
-    public PipesNPhysics(IEventBus modBus) {
+    public PipesNPhysics(IEventBus modBus, ModContainer container) {
         REGISTRATE.registerEventListeners(modBus);
+        container.registerConfig(ModConfig.Type.SERVER, PipesNPhysicsConfig.SERVER_SPEC);
+        container.registerConfig(ModConfig.Type.CLIENT, PipesNPhysicsConfig.CLIENT_SPEC);
 
         modBus.addListener(this::onCommonSetup);
         modBus.addListener(this::onClientSetup);

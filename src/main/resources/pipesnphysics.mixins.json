@@ -4,7 +4,10 @@
   "package": "de.devin.pipesnphysics.mixin",
   "compatibilityLevel": "JAVA_21",
   "refmap": "pipesnphysics.refmap.json",
-  "mixins": [],
+  "mixins": [
+    "PumpBlockEntityMixin",
+    "PipeGoggleInfoMixin"
+  ],
   "client": [],
   "injectors": {
     "defaultRequire": 1
