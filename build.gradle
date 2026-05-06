@@ -14,6 +14,18 @@ repositories {
     maven { url = "https://maven.createmod.net" }
     maven { url = "https://mvn.devos.one/snapshots" }
     maven { url = "https://maven.blamejared.com/" }
+    exclusiveContent {
+        forRepository {
+            maven {
+                url = "https://maven.ryanhcode.dev/releases"
+                name = "RyanHCode Maven"
+            }
+        }
+        filter {
+            includeGroup("dev.ryanhcode.sable")
+            includeGroup("dev.ryanhcode.sable-companion")
+        }
+    }
 }
 
 base {
@@ -75,6 +87,13 @@ dependencies {
     compileOnly("dev.engine-room.flywheel:flywheel-neoforge-api-${minecraft_version}:${flywheel_version}")
     runtimeOnly("dev.engine-room.flywheel:flywheel-neoforge-${minecraft_version}:${flywheel_version}")
     implementation("com.tterrag.registrate:Registrate:${registrate_version}")
+
+    // Sable Companion (optional — sub-level physics compat)
+    jarJar(api("dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:[${sable_companion_version},)")) {
+        version {
+            prefer sable_companion_version
+        }
+    }
 
     // JEI (optional — for recipe integration)
     compileOnly "mezz.jei:jei-${minecraft_version}-common-api:${jei_version}"

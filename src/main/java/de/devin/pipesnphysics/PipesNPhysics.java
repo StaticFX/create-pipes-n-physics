@@ -37,6 +37,9 @@ public class PipesNPhysics {
         modBus.addListener(this::onCommonSetup);
         modBus.addListener(this::onClientSetup);
 
+        NeoForge.EVENT_BUS.register(GravityFlowHandler.class);
+        NeoForge.EVENT_BUS.register(PipeSwapHandler.class);
+
         if (FMLEnvironment.dist.isClient()) {
             NeoForge.EVENT_BUS.register(PumpRangeRenderer.class);
             modBus.register(de.devin.pipesnphysics.client.ClientEvents.class);

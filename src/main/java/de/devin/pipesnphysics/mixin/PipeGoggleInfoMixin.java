@@ -8,6 +8,7 @@ import com.simibubi.create.content.fluids.pipes.FluidPipeBlockEntity;
 import com.simibubi.create.content.fluids.pipes.SmartFluidPipeBlockEntity;
 import com.simibubi.create.content.fluids.pipes.StraightPipeBlockEntity;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
+import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import com.simibubi.create.foundation.utility.CreateLang;
 import de.devin.pipesnphysics.PipesNPhysics;
@@ -19,6 +20,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import org.spongepowered.asm.mixin.Mixin;
 
@@ -90,6 +92,11 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
             return true;
         }
 
+        // Fluid name
+        lang()
+                .text(ChatFormatting.AQUA, fluid.getHoverName().getString())
+                .forGoggles(tooltip, 1);
+
         int transferRate = (int) Math.max(1, inboundPressure / 2f);
 
         langTranslate("gui.goggles.flow")
@@ -114,7 +121,7 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                     .forGoggles(tooltip, 1);
         }
 
-        // Remaining pump range
+        // Remaining pump range or gravity indicator
         int remainingRange = computeRemainingRange();
         if (remainingRange >= 0) {
             langTranslate("gui.goggles.pressure_left")
@@ -126,6 +133,13 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                             .style(ChatFormatting.AQUA))
                     .add(langTranslate("gui.goggles.blocks")
                             .style(ChatFormatting.AQUA))
+                    .forGoggles(tooltip, 1);
+        } else if (inboundPressure > 0) {
+            // No pump found but pipe has pressure — gravity flow
+            lang()
+                    .text(ChatFormatting.DARK_GREEN, "\u2193 ")
+                    .add(langTranslate("gui.goggles.gravity_driven")
+                            .style(ChatFormatting.DARK_GREEN))
                     .forGoggles(tooltip, 1);
         }
 
@@ -162,8 +176,12 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                 BlockPos neighbor = current.relative(face);
                 if (visited.contains(neighbor)) continue;
                 if (level.getBlockState(neighbor).getBlock() instanceof PumpBlock) {
-                    pumpPos = neighbor;
-                    break;
+                    // Only consider active pumps (speed != 0)
+                    BlockEntity be = level.getBlockEntity(neighbor);
+                    if (be instanceof KineticBlockEntity kbe && kbe.getSpeed() != 0) {
+                        pumpPos = neighbor;
+                        break;
+                    }
                 }
                 if (FluidPropagator.getPipe(level, neighbor) != null)
                     queue.add(neighbor);
