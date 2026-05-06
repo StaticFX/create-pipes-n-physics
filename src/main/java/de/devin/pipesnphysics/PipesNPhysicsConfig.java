@@ -9,10 +9,18 @@ public class PipesNPhysicsConfig {
 
     // Server
     public static final ModConfigSpec.IntValue UPWARD_PIPE_COST;
+    public static final ModConfigSpec.BooleanValue ENABLE_GRAVITY_FLOW;
+    public static final ModConfigSpec.DoubleValue GRAVITY_PRESSURE_PER_BLOCK;
+    public static final ModConfigSpec.DoubleValue PIPE_FRICTION_PER_BLOCK;
+    public static final ModConfigSpec.DoubleValue MAX_GRAVITY_PRESSURE;
 
     // Client
     public static final ModConfigSpec.BooleanValue SHOW_PUMP_RANGE_ARROWS;
     public static final ModConfigSpec.BooleanValue SHOW_PIPE_GOGGLE_INFO;
+    public static final ModConfigSpec.IntValue FLUID_TILT_MODE;
+    public static final ModConfigSpec.BooleanValue FLUID_WAVE_MESH;
+    public static final ModConfigSpec.IntValue FLUID_SURFACE_RESOLUTION;
+    public static final ModConfigSpec.BooleanValue FLUID_DEBUG_RENDER;
 
     static {
         // Server config
@@ -24,6 +32,28 @@ public class PipesNPhysicsConfig {
                         "Higher values mean upward pipes consume more pump range.",
                         "Downward pipes always cost 0. Horizontal pipes always cost 1.")
                 .defineInRange("upwardPipeCost", 2, 1, 16);
+        server.pop();
+
+        server.push("gravity");
+        ENABLE_GRAVITY_FLOW = server
+                .comment("Enable gravity-driven fluid flow through pipes without a pump.",
+                        "Fluid will flow from a higher source to a lower sink based on height difference.")
+                .define("enableGravityFlow", true);
+        GRAVITY_PRESSURE_PER_BLOCK = server
+                .comment("Pressure gained per block of height difference between source and sink.",
+                        "This is the driving force — taller drops create more pressure.",
+                        "Formula: effectivePressure = (height × this) - (pipeLength × friction)")
+                .defineInRange("gravityPressurePerBlock", 3.0, 0.1, 10.0);
+        PIPE_FRICTION_PER_BLOCK = server
+                .comment("Pressure lost per pipe segment due to friction.",
+                        "Longer pipe runs reduce flow. If friction exceeds gravity, flow stops.",
+                        "Set to 0 for frictionless pipes (only height matters).")
+                .defineInRange("pipeFrictionPerBlock", 0.5, 0.0, 5.0);
+        MAX_GRAVITY_PRESSURE = server
+                .comment("Maximum gravity pressure regardless of height difference.",
+                        "Caps the flow rate for very tall drops.",
+                        "Transfer rate = (pressure / 2) mB/t.")
+                .defineInRange("maxGravityPressure", 64.0, 1.0, 256.0);
         server.pop();
 
         SERVER_SPEC = server.build();
@@ -38,6 +68,23 @@ public class PipesNPhysicsConfig {
         SHOW_PIPE_GOGGLE_INFO = client
                 .comment("Show fluid transport info when looking at a pipe with goggles.")
                 .define("showPipeGoggleInfo", true);
+        client.pop();
+
+        client.push("fluidPhysics");
+        FLUID_TILT_MODE = client
+                .comment("Fluid tilt rendering on Sable sub-levels. 0 = off, 1 = enabled. No restart needed.")
+                .defineInRange("fluidTiltMode", 1, 0, 10);
+        FLUID_WAVE_MESH = client
+                .comment("Enable wavy fluid surface mesh on Sable sub-levels.",
+                        "When disabled, the surface is a flat plane (less GPU cost).")
+                .define("fluidWaveMesh", true);
+        FLUID_SURFACE_RESOLUTION = client
+                .comment("Grid resolution for the fluid surface mesh. Higher = smoother waves, more GPU cost.",
+                        "4 = low, 8 = medium, 16 = high, 32 = ultra. Only used when fluidWaveMesh is true.")
+                .defineInRange("fluidSurfaceResolution", 64, 2, 128);
+        FLUID_DEBUG_RENDER = client
+                .comment("Show debug wireframe, corner dots, and grid lines on fluid surfaces.")
+                .define("fluidDebugRender", false);
         client.pop();
 
         CLIENT_SPEC = client.build();
