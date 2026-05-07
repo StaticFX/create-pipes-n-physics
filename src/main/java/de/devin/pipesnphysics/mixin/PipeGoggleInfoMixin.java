@@ -135,12 +135,44 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                             .style(ChatFormatting.AQUA))
                     .forGoggles(tooltip, 1);
         } else if (inboundPressure > 0) {
-            // No pump found but pipe has pressure — gravity flow
+            // Gravity flow — compute pipe's elevation angle relative to horizontal
+            float angle = 0;
+            Direction pipeDir = !pulling.isEmpty() ? pulling.get(0) : (!pushing.isEmpty() ? pushing.get(0) : null);
+            if (pipeDir != null) {
+                try {
+                    dev.ryanhcode.sable.companion.ClientSubLevelAccess sub =
+                            dev.ryanhcode.sable.companion.SableCompanion.INSTANCE.getContainingClient(getBlockPos());
+                    if (sub != null) {
+                        dev.ryanhcode.sable.companion.math.Pose3dc pose = sub.renderPose();
+                        if (pose != null) {
+                            // Transform pipe's flow direction from local → world space
+                            org.joml.Vector3d worldDir = pose.transformNormal(
+                                    new org.joml.Vector3d(pipeDir.getStepX(), pipeDir.getStepY(), pipeDir.getStepZ()),
+                                    new org.joml.Vector3d());
+                            double len = Math.sqrt(worldDir.x*worldDir.x + worldDir.y*worldDir.y + worldDir.z*worldDir.z);
+                            if (len > 0.001) {
+                                // Elevation = angle between direction and XZ plane
+                                angle = (float) Math.toDegrees(Math.asin(
+                                        Math.min(1, Math.max(-1, Math.abs(worldDir.y) / len))));
+                            }
+                        }
+                    } else {
+                        // Not on sub-level — use raw direction
+                        angle = (float) Math.toDegrees(Math.asin(Math.abs(pipeDir.getStepY())));
+                    }
+                } catch (Exception ignored) {}
+            }
+
             lang()
                     .text(ChatFormatting.DARK_GREEN, "\u2193 ")
                     .add(langTranslate("gui.goggles.gravity_driven")
                             .style(ChatFormatting.DARK_GREEN))
                     .forGoggles(tooltip, 1);
+            if (angle > 0.5f) {
+                lang()
+                        .text(ChatFormatting.DARK_GREEN, "  " + String.format("%.1f", angle) + "\u00B0")
+                        .forGoggles(tooltip, 1);
+            }
         }
 
         return true;

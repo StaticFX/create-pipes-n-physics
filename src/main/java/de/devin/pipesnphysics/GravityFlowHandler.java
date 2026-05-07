@@ -5,6 +5,7 @@ import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import net.minecraft.core.BlockPos;
+import net.minecraft.util.Mth;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -186,6 +187,14 @@ public class GravityFlowHandler {
         float frictionPerBlock = PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue();
         float maxPressure = PipesNPhysicsConfig.MAX_GRAVITY_PRESSURE.get().floatValue();
 
+        float deadZone = PipesNPhysicsConfig.GRAVITY_DEAD_ZONE.get().floatValue();
+
+        // Choose strategy: angle-based for Sable sub-levels, height-based otherwise
+        boolean onSubLevel = dev.ryanhcode.sable.companion.SableCompanion.INSTANCE.getContaining(level, source.pipePos) != null;
+        GravityFlowStrategy strategy = onSubLevel
+                ? new GravityFlowStrategy.AngleBased(gravityPerBlock, frictionPerBlock, maxPressure, deadZone)
+                : new GravityFlowStrategy.HeightBased(gravityPerBlock, frictionPerBlock, maxPressure, deadZone);
+
         // Step 2: BFS from source to build flow graph
         Map<BlockPos, Direction> parentDir = new LinkedHashMap<>();
         Map<BlockPos, Integer> pathLength = new HashMap<>();
@@ -224,10 +233,9 @@ public class GravityFlowHandler {
         for (FluidEndpoint sink : potentialSinks) {
             if (!pathLength.containsKey(sink.pipePos)) continue;
 
-            double pipeWorldY = SableCompat.getWorldY(level, sink.pipePos);
-            float localHead = (float) (sourceWorldY - pipeWorldY) * gravityPerBlock;
-            float friction = pathLength.get(sink.pipePos) * frictionPerBlock;
-            if (localHead - friction > 0) {
+            float sinkPressure = strategy.computeSinkPressure(level, sourceWorldY, sink.pipePos,
+                    pathLength.get(sink.pipePos), parentDir.get(sink.pipePos));
+            if (sinkPressure > 0) {
                 validSinks.add(sink);
             }
         }
@@ -268,7 +276,8 @@ public class GravityFlowHandler {
         Map<BlockPos, Float> carriedPressure = new HashMap<>();
         Queue<BlockPos> pressureBFS = new ArrayDeque<>();
 
-        carriedPressure.put(source.pipePos, Float.MAX_VALUE);
+        // Angle strategy uses maxPressure as initial carry (each node computes its own pressure)
+        carriedPressure.put(source.pipePos, onSubLevel ? maxPressure : Float.MAX_VALUE);
         pressureBFS.add(source.pipePos);
 
         while (!pressureBFS.isEmpty()) {
@@ -276,13 +285,9 @@ public class GravityFlowHandler {
             if (!validPipes.contains(pos)) continue;
             if (pipePressure.containsKey(pos)) continue;
 
-            double nodeWorldY = SableCompat.getWorldY(level, pos);
-            float localHead = (float) (sourceWorldY - nodeWorldY) * gravityPerBlock
-                    - pathLength.get(pos) * frictionPerBlock;
-
             float carried = carriedPressure.getOrDefault(pos, 0f);
-            float effective = Math.min(localHead, carried);
-            effective = Math.min(effective, maxPressure);
+            float effective = strategy.computeNodePressure(level, sourceWorldY, pos,
+                    pathLength.get(pos), parentDir.get(pos), carried);
 
             if (effective <= 0) continue;
 
@@ -295,7 +300,9 @@ public class GravityFlowHandler {
             for (Direction d : outs) {
                 BlockPos next = pos.relative(d);
                 if (validPipes.contains(next) && !pipePressure.containsKey(next)) {
-                    carriedPressure.put(next, split);
+                    // Per-segment contribution (angle strategy accumulates, height passes through)
+                    float segmentCarry = strategy.computeSegmentContribution(level, pos, next, d, split);
+                    carriedPressure.put(next, segmentCarry);
                     pressureBFS.add(next);
                 }
             }

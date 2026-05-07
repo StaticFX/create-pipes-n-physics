@@ -39,6 +39,12 @@ import java.util.Map;
 @Mixin(value = FluidTankRenderer.class, remap = false)
 public class FluidTankRendererMixin {
 
+    // Wave simulation state per tank
+    @Unique private static final Map<BlockPos, float[]> WAVE_CUR = new HashMap<>();
+    @Unique private static final Map<BlockPos, float[]> WAVE_PREV = new HashMap<>();
+    @Unique private static final Map<BlockPos, Long> WAVE_TICK = new HashMap<>();
+    @Unique private static final Map<BlockPos, float[]> WAVE_LAST_UP = new HashMap<>();
+
     @Unique private static final int[][] EDGES = {
             {0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}
     };
@@ -46,7 +52,7 @@ public class FluidTankRendererMixin {
     @Inject(method = "renderSafe", at = @At("HEAD"), cancellable = true)
     private void renderTiltedFluid(FluidTankBlockEntity be, float partialTicks, PoseStack ms,
                                     MultiBufferSource buffer, int light, int overlay, CallbackInfo ci) {
-        if (PipesNPhysicsConfig.FLUID_TILT_MODE.get() == 0) return;
+        if (!PipesNPhysicsConfig.FLUID_TILT_ENABLED.get()) return;
         FluidTankAccessor acc = (FluidTankAccessor) be;
         if (!be.isController() || !acc.pipesnphysics$isWindow()) return;
 
@@ -172,6 +178,82 @@ public class FluidTankRendererMixin {
         int stride = gridRes + 1;
         int gridSize = stride * stride;
 
+        // === 2D WAVE SIMULATION ===
+        boolean wavesEnabled = PipesNPhysicsConfig.FLUID_WAVE_MESH.get();
+        BlockPos waveKey = be.getBlockPos().immutable();
+        float[] waveCur = WAVE_CUR.get(waveKey);
+        float[] wavePrev = WAVE_PREV.get(waveKey);
+        if (waveCur == null || waveCur.length != gridSize) {
+            waveCur = new float[gridSize];
+            wavePrev = new float[gridSize];
+            WAVE_CUR.put(waveKey, waveCur);
+            WAVE_PREV.put(waveKey, wavePrev);
+        }
+
+        // Step simulation at ~20hz
+        long now = System.currentTimeMillis();
+        Long lastTick = WAVE_TICK.get(waveKey);
+        if (wavesEnabled && (lastTick == null || now - lastTick >= 50)) {
+            WAVE_TICK.put(waveKey, now);
+
+            // Get fluid viscosity for wave parameters
+            int viscosity = fluidStack.getFluid().getFluidType().getViscosity();
+            float viscRatio = viscosity / 1000f;
+            float waveSpeed = 0.4f / viscRatio;
+            float waveDamp = 1.0f - 0.04f / viscRatio;
+            waveDamp = Mth.clamp(waveDamp, 0.88f, 0.998f);
+            float c2 = waveSpeed * waveSpeed;
+
+            // Compute disturbance from orientation change
+            float[] lastUp = WAVE_LAST_UP.get(waveKey);
+            float[] curUp = {nxf, nyf, nzf};
+            float disturbance = 0;
+            if (lastUp != null) {
+                float dx = curUp[0]-lastUp[0], dy = curUp[1]-lastUp[1], dz = curUp[2]-lastUp[2];
+                disturbance = (float)Math.sqrt(dx*dx+dy*dy+dz*dz);
+            }
+            WAVE_LAST_UP.put(waveKey, curUp);
+
+            // Wave equation step
+            float[] waveNext = new float[gridSize];
+            for (int g1=0;g1<=gridRes;g1++) {
+                for (int g2=0;g2<=gridRes;g2++) {
+                    int idx = g1*stride+g2;
+                    float cur = waveCur[idx];
+                    float left  = (g1>0)?waveCur[(g1-1)*stride+g2]:cur;
+                    float right = (g1<gridRes)?waveCur[(g1+1)*stride+g2]:cur;
+                    float down  = (g2>0)?waveCur[g1*stride+g2-1]:cur;
+                    float up    = (g2<gridRes)?waveCur[g1*stride+g2+1]:cur;
+                    float avg = (left+right+down+up)/4f;
+                    waveNext[idx] = (2*cur - wavePrev[idx] + c2*(avg-cur)) * waveDamp;
+                }
+            }
+
+            // Add disturbance from rotation
+            if (disturbance > 0.001f && lastUp != null) {
+                float str = Math.min(0.06f, disturbance * 3f) / viscRatio;
+                float dx = curUp[0]-lastUp[0], dz = curUp[2]-lastUp[2];
+                for (int g1=0;g1<=gridRes;g1++) {
+                    for (int g2=0;g2<=gridRes;g2++) {
+                        float fx = (g1/(float)gridRes-0.5f)*2;
+                        float fz = (g2/(float)gridRes-0.5f)*2;
+                        waveNext[g1*stride+g2] += (fx*dx+fz*dz)*str;
+                    }
+                }
+            }
+
+            // Ambient ripple
+            float ambStr = 0.002f / (float)Math.sqrt(viscRatio);
+            int rg1 = (int)((now/17)%(gridRes+1));
+            int rg2 = (int)((now/31)%(gridRes+1));
+            waveNext[rg1*stride+rg2] += ambStr*((now%2==0)?1:-1);
+
+            // Swap
+            WAVE_PREV.put(waveKey, waveCur);
+            WAVE_CUR.put(waveKey, waveNext);
+            waveCur = waveNext;
+        }
+
         // Build grid
         float[][] gridPos = new float[gridSize][3];
         float[][] gridRaw = new float[gridSize][3];
@@ -183,7 +265,13 @@ public class FluidTankRendererMixin {
                 p[axis2] = mins[axis2]+(g2/(float)gridRes)*(maxs[axis2]-mins[axis2]);
                 float otherDot = normal[axis1]*(p[axis1]-centers[axis1])+normal[axis2]*(p[axis2]-centers[axis2]);
                 p[dominant] = centers[dominant]+(planeOffset-otherDot)/normal[dominant];
+                // Check outside on FLAT position (before wave) so waves don't cause flicker
                 boolean outside = p[0]<xMin||p[0]>xMax||p[1]<yMin||p[1]>yMax||p[2]<zMin||p[2]>zMax;
+                // Apply wave displacement along surface normal
+                if (wavesEnabled) {
+                    float w = waveCur[g1*stride+g2];
+                    p[0]+=nxf*w; p[1]+=nyf*w; p[2]+=nzf*w;
+                }
                 gridOutside[g1*stride+g2] = outside;
                 gridRaw[g1*stride+g2] = new float[]{p[0], p[1], p[2]};
                 gridPos[g1*stride+g2] = new float[]{
@@ -192,6 +280,9 @@ public class FluidTankRendererMixin {
             }
         }
 
+        boolean hideTexture = PipesNPhysicsConfig.FLUID_HIDE_TEXTURE.get();
+
+        if (!hideTexture) {
         // Surface mesh — clip boundary cells to exact tank edge
         for (int g1=0;g1<gridRes;g1++) { for (int g2=0;g2<gridRes;g2++) {
             boolean o00=gridOutside[g1*stride+g2], o10=gridOutside[(g1+1)*stride+g2];
@@ -205,18 +296,17 @@ public class FluidTankRendererMixin {
             float uSize = maxs[axis1]-mins[axis1], vSize = maxs[axis2]-mins[axis2];
             float u0f = ((g1/(float)gridRes)*uSize) % 1.0f, u1f = (((g1+1)/(float)gridRes)*uSize) % 1.0f;
             float v0f = ((g2/(float)gridRes)*vSize) % 1.0f, v1f = (((g2+1)/(float)gridRes)*vSize) % 1.0f;
-            // Fix wrap: if u1f < u0f, we crossed a boundary — shouldn't happen with aligned grid
             if (u1f < u0f) u1f = 1.0f;
             if (v1f < v0f) v1f = 1.0f;
             float qu0 = Mth.lerp(u0f, su0, su1), qu1 = Mth.lerp(u1f, su0, su1);
             float qv0 = Mth.lerp(v0f, sv0, sv1), qv1 = Mth.lerp(v1f, sv0, sv1);
 
             if (outsideCount==0) {
-                // All inside — single-sided quad (reversed winding → faces localUp direction)
-                qvc.addVertex(mat,r01[0],r01[1],r01[2]).setColor(cr,cg,cb,ca).setUv(qu0,qv1).setOverlay(0).setLight(light).setNormal(0,1,0);
-                qvc.addVertex(mat,r11[0],r11[1],r11[2]).setColor(cr,cg,cb,ca).setUv(qu1,qv1).setOverlay(0).setLight(light).setNormal(0,1,0);
-                qvc.addVertex(mat,r10[0],r10[1],r10[2]).setColor(cr,cg,cb,ca).setUv(qu1,qv0).setOverlay(0).setLight(light).setNormal(0,1,0);
-                qvc.addVertex(mat,r00[0],r00[1],r00[2]).setColor(cr,cg,cb,ca).setUv(qu0,qv0).setOverlay(0).setLight(light).setNormal(0,1,0);
+                // Single-sided quad — faces outward (toward localUp / air side)
+                qvc.addVertex(mat,r00[0],r00[1],r00[2]).setColor(cr,cg,cb,ca).setUv(qu0,qv0).setOverlay(0).setLight(light).setNormal(nxf,nyf,nzf);
+                qvc.addVertex(mat,r10[0],r10[1],r10[2]).setColor(cr,cg,cb,ca).setUv(qu1,qv0).setOverlay(0).setLight(light).setNormal(nxf,nyf,nzf);
+                qvc.addVertex(mat,r11[0],r11[1],r11[2]).setColor(cr,cg,cb,ca).setUv(qu1,qv1).setOverlay(0).setLight(light).setNormal(nxf,nyf,nzf);
+                qvc.addVertex(mat,r01[0],r01[1],r01[2]).setColor(cr,cg,cb,ca).setUv(qu0,qv1).setOverlay(0).setLight(light).setNormal(nxf,nyf,nzf);
             } else {
                 // Mixed — clip to tank boundary
                 float[][] rawC = {r00, r10, r11, r01};
@@ -240,21 +330,25 @@ public class FluidTankRendererMixin {
                 }
                 if (cv.size()>=3) {
                     float[] f=cv.get(0); float[] fuv=cuv.get(0);
-                    // Single-sided triangle fan (reversed winding → faces localUp)
+                    // Single-sided triangle fan — faces outward
                     for (int ti=1;ti<cv.size()-1;ti++) {
                         float[] a=cv.get(ti),b=cv.get(ti+1);
                         float[] auv=cuv.get(ti),buv=cuv.get(ti+1);
-                        qvc.addVertex(mat,b[0],b[1],b[2]).setColor(cr,cg,cb,ca).setUv(buv[0],buv[1]).setOverlay(0).setLight(light).setNormal(0,1,0);
-                        qvc.addVertex(mat,a[0],a[1],a[2]).setColor(cr,cg,cb,ca).setUv(auv[0],auv[1]).setOverlay(0).setLight(light).setNormal(0,1,0);
-                        qvc.addVertex(mat,f[0],f[1],f[2]).setColor(cr,cg,cb,ca).setUv(fuv[0],fuv[1]).setOverlay(0).setLight(light).setNormal(0,1,0);
-                        qvc.addVertex(mat,f[0],f[1],f[2]).setColor(cr,cg,cb,ca).setUv(fuv[0],fuv[1]).setOverlay(0).setLight(light).setNormal(0,1,0);
+                        qvc.addVertex(mat,f[0],f[1],f[2]).setColor(cr,cg,cb,ca).setUv(fuv[0],fuv[1]).setOverlay(0).setLight(light).setNormal(nxf,nyf,nzf);
+                        qvc.addVertex(mat,a[0],a[1],a[2]).setColor(cr,cg,cb,ca).setUv(auv[0],auv[1]).setOverlay(0).setLight(light).setNormal(nxf,nyf,nzf);
+                        qvc.addVertex(mat,b[0],b[1],b[2]).setColor(cr,cg,cb,ca).setUv(buv[0],buv[1]).setOverlay(0).setLight(light).setNormal(nxf,nyf,nzf);
+                        qvc.addVertex(mat,b[0],b[1],b[2]).setColor(cr,cg,cb,ca).setUv(buv[0],buv[1]).setOverlay(0).setLight(light).setNormal(nxf,nyf,nzf);
                     }
                 }
             }
         }}
 
-        // === WALL FACES: only partially-clipped faces (where surface crosses the wall) ===
-        // Debug colors: -Y=red, +Y=green, -Z=blue, +Z=yellow, -X=cyan, +X=magenta
+        // === WALL FACES: clip slightly below surface to avoid wave overlap ===
+        // Offset dist values inward so wall edge sits below the wave troughs
+        float waveMargin = wavesEnabled ? 0.02f : 0;
+        float[] wallDist = new float[8];
+        for (int i = 0; i < 8; i++) wallDist[i] = dist[i] + waveMargin;
+
         boolean debugWalls = PipesNPhysicsConfig.FLUID_DEBUG_RENDER.get();
         float[][] wallDbgColors = {{1,0.3f,0.3f},{0.3f,1,0.3f},{0.3f,0.3f,1},{1,1,0.3f},{0.3f,1,1},{1,0.3f,1}};
         int[][] wallFaces = {
@@ -265,11 +359,11 @@ public class FluidTankRendererMixin {
         for (int f = 0; f < 6; f++) {
             int[] face = wallFaces[f];
             boolean anyAbove = false, anyBelow = false;
-            for (int fi : face) { if (dist[fi] > 0) anyAbove = true; if (dist[fi] <= 0) anyBelow = true; }
-            if (!anyBelow) continue; // fully above surface — skip
+            for (int fi : face) { if (wallDist[fi] > 0) anyAbove = true; if (wallDist[fi] <= 0) anyBelow = true; }
+            if (!anyBelow) continue;
 
-            List<float[]> clipped = pipesnphysics$clipFace(corners, face, dist);
-            boolean fullySubmerged = !anyAbove; // all corners below surface
+            List<float[]> clipped = pipesnphysics$clipFace(corners, face, wallDist);
+            boolean fullySubmerged = !anyAbove;
             if (clipped.size() < 3) continue;
             float[] fn = wallNormals[f];
             int uAx = wallUvAxes[f][0], vAx = wallUvAxes[f][1];
@@ -298,6 +392,8 @@ public class FluidTankRendererMixin {
         }
 
         if (!PipesNPhysicsConfig.FLUID_DEBUG_RENDER.get()) return;
+
+        } // end if (!hideTexture)
 
         // Debug wireframe (skip outside vertices)
         VertexConsumer lvc = buffer.getBuffer(RenderType.LINES);
