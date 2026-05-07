@@ -13,9 +13,12 @@ public class ClientEvents {
 
     public static final ModelResourceLocation ARROW_MODEL =
             new ModelResourceLocation(ResourceLocation.fromNamespaceAndPath(PipesNPhysics.ID, "pipe_arrow"), "standalone");
+    public static final ModelResourceLocation ARROW_TRAVELING_MODEL =
+            new ModelResourceLocation(ResourceLocation.fromNamespaceAndPath(PipesNPhysics.ID, "pipe_arrow_traveling"), "standalone");
 
     @SubscribeEvent
     public static void onRegisterAdditionalModels(ModelEvent.RegisterAdditional event) {
         event.register(ARROW_MODEL);
+        event.register(ARROW_TRAVELING_MODEL);
     }
 }

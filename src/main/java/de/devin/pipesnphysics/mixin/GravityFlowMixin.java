@@ -36,10 +36,15 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
     @Unique
     private static final Map<UUID, float[]> pipesnphysics$lastOrientations = new ConcurrentHashMap<>();
 
+    /** Guard to prevent recursive wipePressure → scheduleCheck → wipePressure loops. */
+    @Unique
+    private boolean pipesnphysics$wiping = false;
+
     private GravityFlowMixin() { super(null); }
 
     @Inject(method = "wipePressure", at = @At("TAIL"))
     private void onWipePressure(CallbackInfo ci) {
+        if (pipesnphysics$wiping) return; // prevent recursion
         Level level = blockEntity.getLevel();
         if (level != null && !level.isClientSide()) {
             GravityFlowHandler.scheduleCheck(level, blockEntity.getBlockPos());
@@ -58,16 +63,19 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
         int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
         if (level.getGameTime() % recheckTicks != (blockEntity.getBlockPos().hashCode() & 0x7FFFFFFF) % recheckTicks) return;
 
-        // For pipes WITH pressure: check if sub-level rotated (stale gravity data)
         if (hasAnyPressure()) {
+            // For pipes on sub-levels: check if rotation changed
             if (pipesnphysics$hasSubLevelRotated(level)) {
-                // Orientation changed — wipe stale pressure, triggering recomputation via onWipePressure hook
+                pipesnphysics$wiping = true;
                 ((FluidTransportBehaviour) (Object) this).wipePressure();
+                pipesnphysics$wiping = false;
             }
-            return;
+            // Wipe and reschedule so gravity recalculates when fluid changes
+            pipesnphysics$wiping = true;
+            ((FluidTransportBehaviour) (Object) this).wipePressure();
+            pipesnphysics$wiping = false;
         }
 
-        // For pipes WITHOUT pressure: schedule normal gravity check
         GravityFlowHandler.scheduleCheck(level, blockEntity.getBlockPos());
     }
 

@@ -16,9 +16,11 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.IntValue GRAVITY_RECHECK_TICKS;
     public static final ModConfigSpec.DoubleValue GRAVITY_ROTATION_THRESHOLD;
     public static final ModConfigSpec.DoubleValue GRAVITY_DEAD_ZONE;
+    public static final ModConfigSpec.IntValue MAX_GRAVITY_RANGE;
 
     // Client
     public static final ModConfigSpec.BooleanValue SHOW_PUMP_RANGE_ARROWS;
+    public static final ModConfigSpec.IntValue ARROW_RENDER_MODE;
     public static final ModConfigSpec.BooleanValue SHOW_PIPE_GOGGLE_INFO;
     public static final ModConfigSpec.BooleanValue FLUID_TILT_ENABLED;
     public static final ModConfigSpec.BooleanValue FLUID_WAVE_MESH;
@@ -44,10 +46,10 @@ public class PipesNPhysicsConfig {
                         "Fluid will flow from a higher source to a lower sink based on height difference.")
                 .define("enableGravityFlow", true);
         GRAVITY_PRESSURE_PER_BLOCK = server
-                .comment("Pressure gained per block of height difference between source and sink.",
-                        "This is the driving force — taller drops create more pressure.",
-                        "Formula: effectivePressure = (height × this) - (pipeLength × friction)")
-                .defineInRange("gravityPressurePerBlock", 3.0, 0.1, 10.0);
+                .comment("Pressure gained per block of vertical drop.",
+                        "Higher = more flow per block of height. At default 10, a 1-block drop gives 5 mB/t,",
+                        "a 2-block drop gives 10 mB/t (max). Angled pipes scale with sin(angle).")
+                .defineInRange("gravityPressurePerBlock", 10.0, 0.1, 40.0);
         PIPE_FRICTION_PER_BLOCK = server
                 .comment("Pressure lost per pipe segment due to friction.",
                         "Longer pipe runs reduce flow. If friction exceeds gravity, flow stops.",
@@ -71,6 +73,11 @@ public class PipesNPhysicsConfig {
                         "Prevents phantom flow from floating point noise on flat pipes.",
                         "Angle-based: pipes below this angle get 0 flow. Height-based: height diff below this is ignored.")
                 .defineInRange("gravityDeadZone", 1.0, 0.0, 10.0);
+        MAX_GRAVITY_RANGE = server
+                .comment("Maximum horizontal range (in blocks) that gravity pressure can push fluid.",
+                        "A taller drop builds more pressure, but it caps at this many blocks of range.",
+                        "Range = accumulated pressure / friction per block, capped at this value.")
+                .defineInRange("maxGravityRange", 10, 1, 256);
         server.pop();
 
         SERVER_SPEC = server.build();
@@ -82,6 +89,10 @@ public class PipesNPhysicsConfig {
         SHOW_PUMP_RANGE_ARROWS = client
                 .comment("Show animated arrows along pipes when looking at a pump with goggles.")
                 .define("showPumpRangeArrows", true);
+        ARROW_RENDER_MODE = client
+                .comment("Arrow animation style. 0 = per-segment (arrow on every pipe, sliding in sync),",
+                        "1 = traveling (single arrow travels the full path from source to sink, faster).")
+                .defineInRange("arrowRenderMode", 0, 0, 1);
         SHOW_PIPE_GOGGLE_INFO = client
                 .comment("Show fluid transport info when looking at a pipe with goggles.")
                 .define("showPipeGoggleInfo", true);

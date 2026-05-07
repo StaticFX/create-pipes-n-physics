@@ -136,12 +136,8 @@ public class GravityFlowHandler {
         // If pump found, let the pump handle flow
         if (pumpFound) return;
 
-        // If any pipe already has pressure (from pump or prior gravity), skip —
-        // addPressure() accumulates, so applying twice would double the flow
-        for (BlockPos pipePos : networkPipes) {
-            FluidTransportBehaviour existingPipe = FluidPropagator.getPipe(level, pipePos);
-            if (existingPipe != null && existingPipe.hasAnyPressure()) return;
-        }
+        // If pump found, let the pump handle flow
+        if (pumpFound) return;
 
         // If fewer than 2 endpoints, no flow possible
         if (endpoints.size() < 2) return;
@@ -186,14 +182,16 @@ public class GravityFlowHandler {
         float gravityPerBlock = PipesNPhysicsConfig.GRAVITY_PRESSURE_PER_BLOCK.get().floatValue();
         float frictionPerBlock = PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue();
         float maxPressure = PipesNPhysicsConfig.MAX_GRAVITY_PRESSURE.get().floatValue();
+        int maxRange = PipesNPhysicsConfig.MAX_GRAVITY_RANGE.get();
+
+        float rangeCap = maxRange * frictionPerBlock; // max pressure for horizontal propagation
 
         float deadZone = PipesNPhysicsConfig.GRAVITY_DEAD_ZONE.get().floatValue();
 
-        // Choose strategy: angle-based for Sable sub-levels, height-based otherwise
-        boolean onSubLevel = dev.ryanhcode.sable.companion.SableCompanion.INSTANCE.getContaining(level, source.pipePos) != null;
-        GravityFlowStrategy strategy = onSubLevel
-                ? new GravityFlowStrategy.AngleBased(gravityPerBlock, frictionPerBlock, maxPressure, deadZone)
-                : new GravityFlowStrategy.HeightBased(gravityPerBlock, frictionPerBlock, maxPressure, deadZone);
+        // maxPressure controls vertical flow rate (10 mB/t at 20 pressure)
+        // rangeCap controls how far pressure propagates horizontally
+        GravityFlowStrategy strategy = new GravityFlowStrategy.AngleBased(
+                gravityPerBlock, frictionPerBlock, maxPressure, rangeCap, deadZone);
 
         // Step 2: BFS from source to build flow graph
         Map<BlockPos, Direction> parentDir = new LinkedHashMap<>();
@@ -276,8 +274,9 @@ public class GravityFlowHandler {
         Map<BlockPos, Float> carriedPressure = new HashMap<>();
         Queue<BlockPos> pressureBFS = new ArrayDeque<>();
 
-        // Angle strategy uses maxPressure as initial carry (each node computes its own pressure)
-        carriedPressure.put(source.pipePos, onSubLevel ? maxPressure : Float.MAX_VALUE);
+        // Source pipe gets full pressure — the fluid handler above provides the head.
+        // Without this, the source is the bottleneck and limits the entire network.
+        carriedPressure.put(source.pipePos, maxPressure);
         pressureBFS.add(source.pipePos);
 
         while (!pressureBFS.isEmpty()) {

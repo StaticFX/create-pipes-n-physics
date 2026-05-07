@@ -94,10 +94,10 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
 
         // Fluid name
         lang()
-                .text(ChatFormatting.AQUA, fluid.getHoverName().getString())
+                .text(ChatFormatting.WHITE, fluid.getHoverName().getString())
                 .forGoggles(tooltip, 1);
 
-        int transferRate = (int) Math.max(1, inboundPressure / 2f);
+        int transferRate = Math.max(1, Math.round(inboundPressure / 2f));
 
         langTranslate("gui.goggles.flow")
                 .style(ChatFormatting.GRAY)
@@ -106,18 +106,26 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         lang()
                 .add(langNumber(transferRate)
                         .add(CreateLang.translate("generic.unit.millibuckets"))
-                        .style(ChatFormatting.AQUA))
+                        .style(ChatFormatting.GOLD))
                 .add(langTranslate("gui.goggles.per_tick")
-                        .style(ChatFormatting.AQUA))
+                        .style(ChatFormatting.DARK_GRAY))
                 .forGoggles(tooltip, 1);
 
-        if (!pulling.isEmpty() && !pushing.isEmpty()) {
+        // Flow direction — only show when NOT on a Sable sub-level
+        // (cardinal directions don't make sense when the structure is rotated)
+        boolean onSubLevel = false;
+        try {
+            onSubLevel = dev.ryanhcode.sable.companion.SableCompanion.INSTANCE
+                    .getContainingClient(getBlockPos()) != null;
+        } catch (Exception ignored) {}
+
+        if (!onSubLevel && !pulling.isEmpty() && !pushing.isEmpty()) {
             langTranslate("gui.goggles.direction")
                     .style(ChatFormatting.GRAY)
                     .forGoggles(tooltip);
 
             lang()
-                    .text(ChatFormatting.AQUA, formatDirs(pulling) + " \u2192 " + formatDirs(pushing))
+                    .text(ChatFormatting.GOLD, formatDirs(pulling) + " \u2192 " + formatDirs(pushing))
                     .forGoggles(tooltip, 1);
         }
 
@@ -130,9 +138,9 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
 
             lang()
                     .add(langNumber(remainingRange)
-                            .style(ChatFormatting.AQUA))
+                            .style(ChatFormatting.WHITE))
                     .add(langTranslate("gui.goggles.blocks")
-                            .style(ChatFormatting.AQUA))
+                            .style(ChatFormatting.DARK_GRAY))
                     .forGoggles(tooltip, 1);
         } else if (inboundPressure > 0) {
             // Gravity flow — compute pipe's elevation angle relative to horizontal
@@ -145,32 +153,47 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                     if (sub != null) {
                         dev.ryanhcode.sable.companion.math.Pose3dc pose = sub.renderPose();
                         if (pose != null) {
-                            // Transform pipe's flow direction from local → world space
                             org.joml.Vector3d worldDir = pose.transformNormal(
                                     new org.joml.Vector3d(pipeDir.getStepX(), pipeDir.getStepY(), pipeDir.getStepZ()),
                                     new org.joml.Vector3d());
                             double len = Math.sqrt(worldDir.x*worldDir.x + worldDir.y*worldDir.y + worldDir.z*worldDir.z);
                             if (len > 0.001) {
-                                // Elevation = angle between direction and XZ plane
                                 angle = (float) Math.toDegrees(Math.asin(
                                         Math.min(1, Math.max(-1, Math.abs(worldDir.y) / len))));
                             }
                         }
                     } else {
-                        // Not on sub-level — use raw direction
                         angle = (float) Math.toDegrees(Math.asin(Math.abs(pipeDir.getStepY())));
                     }
                 } catch (Exception ignored) {}
             }
 
             lang()
-                    .text(ChatFormatting.DARK_GREEN, "\u2193 ")
+                    .text(ChatFormatting.BLUE, "\u2193 ")
                     .add(langTranslate("gui.goggles.gravity_driven")
-                            .style(ChatFormatting.DARK_GREEN))
+                            .style(ChatFormatting.BLUE))
                     .forGoggles(tooltip, 1);
-            if (angle > 0.5f) {
+
+            // Show remaining range, capped at maxGravityRange
+            float friction = PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue();
+            int maxRange = PipesNPhysicsConfig.MAX_GRAVITY_RANGE.get();
+            int remainingGravityRange = friction > 0.001f
+                    ? Math.min((int) (inboundPressure / friction), maxRange) : maxRange;
+
+            langTranslate("gui.goggles.pressure_left")
+                    .style(ChatFormatting.GRAY)
+                    .forGoggles(tooltip);
+
+            lang()
+                    .add(langNumber(remainingGravityRange)
+                            .style(ChatFormatting.WHITE))
+                    .add(langTranslate("gui.goggles.blocks")
+                            .style(ChatFormatting.DARK_GRAY))
+                    .forGoggles(tooltip, 1);
+
+            if (onSubLevel && angle > 0.5f) {
                 lang()
-                        .text(ChatFormatting.DARK_GREEN, "  " + String.format("%.1f", angle) + "\u00B0")
+                        .text(ChatFormatting.DARK_GRAY, "  " + String.format("%.1f", angle) + "\u00B0")
                         .forGoggles(tooltip, 1);
             }
         }
