@@ -8,6 +8,7 @@
   "pipesnphysics.gui.goggles.direction": "Direction",
   "pipesnphysics.gui.goggles.pressure_left": "Pressure left",
   "pipesnphysics.gui.goggles.gravity_driven": "Gravity-driven",
+  "pipesnphysics.gui.goggles.pressure": "Pressure",
   "pipesnphysics.gui.goggles.blocks": " blocks",
 
   "pipesnphysics.direction.north": "North",

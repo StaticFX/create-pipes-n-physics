@@ -155,7 +155,10 @@ public class FluidTankRendererMixin {
         float[] normal = {nxf, nyf, nzf};
         float[][] corners = pipesnphysics$buildCorners(mins, maxs);
         float[] dist = pipesnphysics$computeCornerDistances(corners, localUp, cx, cy, cz);
-        float planeOffset = pipesnphysics$findVolumeCorrectOffset(dist, clampedLevel / totalHeight);
+        int dominant = pipesnphysics$dominantAxis(nxf, nyf, nzf);
+        int axis1 = (dominant + 1) % 3, axis2 = (dominant + 2) % 3;
+        float planeOffset = pipesnphysics$findVolumeCorrectOffset(dist, clampedLevel / totalHeight,
+                dominant, axis1, axis2);
         for (int i = 0; i < 8; i++) dist[i] -= planeOffset;
 
         // If the plane doesn't intersect at least 3 edges, there's no visible surface to render
@@ -163,9 +166,7 @@ public class FluidTankRendererMixin {
         ci.cancel();
         if (intersections.size() < 3) return;
 
-        // --- Grid setup: choose which axes to build the mesh on ---
-        int dominant = pipesnphysics$dominantAxis(nxf, nyf, nzf);
-        int axis1 = (dominant + 1) % 3, axis2 = (dominant + 2) % 3;
+        // --- Grid setup ---
         int gridRes = pipesnphysics$alignedGridRes(mins, maxs, axis1, axis2);
         SurfacePlane plane = new SurfacePlane(normal, dominant, axis1, axis2, planeOffset);
         GridDims grid = new GridDims(gridRes, gridRes + 1, (gridRes + 1) * (gridRes + 1));
@@ -212,23 +213,6 @@ public class FluidTankRendererMixin {
             pipesnphysics$renderWallSkirts(qvc, mat, grid, gridRaw, gridOutside,
                     bounds, plane, style, light);
             pipesnphysics$renderWallFaces(qvc, mat, corners, dist, bounds, plane.dominant(), style, light);
-        }
-
-        // --- Level debug: show target vs smoothed level as colored lines ---
-        if (PipesNPhysicsConfig.FLUID_DEBUG_RENDER.get()) {
-            VertexConsumer dlvc = buffer.getBuffer(RenderType.LINES);
-            float targetY = yMin + targetLevel * totalHeight;
-            float smoothY = yMin + level * totalHeight;
-            // Red line = target level (what the tank actually has)
-            dlvc.addVertex(mat, xMin, targetY, zMin).setColor(255, 0, 0, 255).setNormal(0, 1, 0);
-            dlvc.addVertex(mat, xMax, targetY, zMax).setColor(255, 0, 0, 255).setNormal(0, 1, 0);
-            // Green line = smoothed level (what we render)
-            dlvc.addVertex(mat, xMin, smoothY, zMin).setColor(0, 255, 0, 255).setNormal(0, 1, 0);
-            dlvc.addVertex(mat, xMax, smoothY, zMax).setColor(0, 255, 0, 255).setNormal(0, 1, 0);
-            // Blue line = plane offset position (where binary search puts the surface)
-            float planeY = (Math.abs(nyf) > 0.01f) ? cy + planeOffset / nyf : cy;
-            dlvc.addVertex(mat, xMin, planeY, zMin).setColor(0, 100, 255, 255).setNormal(0, 1, 0);
-            dlvc.addVertex(mat, xMax, planeY, zMax).setColor(0, 100, 255, 255).setNormal(0, 1, 0);
         }
 
         // --- Debug overlay ---
@@ -319,21 +303,85 @@ public class FluidTankRendererMixin {
      * correctly handles the non-linear volume growth near corners.</p>
      */
     /**
-     * Finds the plane offset for a given fill fraction.
-     * Uses direct linear interpolation between min and max corner distances.
-     * This is exact for upright tanks and smooth for all orientations.
-     * For tilted tanks the volume mapping is approximate but visually smooth,
-     * which matters more than mathematical precision.
+     * Finds the plane offset for a given fill fraction using analytical volume computation.
+     *
+     * <p>For each of 16×16 sample columns on the axis1×axis2 plane, computes the exact
+     * fill height along the dominant axis. This gives a perfectly continuous volume function
+     * with no discrete steps. A binary search over this function finds the correct offset.</p>
+     *
+     * <p>For upright tanks (all columns identical), this reduces to a simple linear mapping.
+     * For tilted tanks, it correctly handles the non-linear "pyramid" volume at the corners.</p>
      */
     @Unique
-    private static float pipesnphysics$findVolumeCorrectOffset(float[] dist, float fillFraction) {
+    private static float pipesnphysics$findVolumeCorrectOffset(float[] dist, float fillFraction,
+                                                                 int dominant, int axis1, int axis2) {
         float minDist = Float.MAX_VALUE, maxDist = -Float.MAX_VALUE;
         for (float d : dist) { minDist = Math.min(minDist, d); maxDist = Math.max(maxDist, d); }
 
         if (fillFraction <= 0.001f) return minDist;
         if (fillFraction >= 0.999f) return maxDist;
 
-        return minDist + fillFraction * (maxDist - minDist);
+        // Binary search with continuous analytical volume
+        float lo = minDist, hi = maxDist;
+        for (int iter = 0; iter < 16; iter++) {
+            float mid = (lo + hi) / 2f;
+            float vol = pipesnphysics$analyticalVolume(dist, mid, dominant, axis1, axis2);
+            if (vol < fillFraction) lo = mid; else hi = mid;
+        }
+        return (lo + hi) / 2f;
+    }
+
+    /**
+     * Computes the exact volume fraction of the box below the plane at the given offset.
+     *
+     * <p>Samples 16×16 columns on the axis1×axis2 plane. For each column, the signed distance
+     * is linear along the dominant axis, so the fill fraction is computed analytically
+     * (no sampling along that axis). This gives a smooth, continuous result with no discrete
+     * steps regardless of plane orientation.</p>
+     */
+    @Unique
+    private static float pipesnphysics$analyticalVolume(float[] dist, float offset,
+                                                         int dominant, int axis1, int axis2) {
+        // Corner index bit masks for the three axes
+        int bitA1 = 1 << axis1, bitA2 = 1 << axis2, bitD = 1 << dominant;
+
+        // 4 corners at dominant=min (bottom of each column)
+        int b00 = 0, b10 = bitA1, b01 = bitA2, b11 = bitA1 | bitA2;
+        // 4 corners at dominant=max (top of each column)
+        int t00 = bitD, t10 = bitD | bitA1, t01 = bitD | bitA2, t11 = bitD | bitA1 | bitA2;
+
+        float total = 0;
+        int N = 16;
+        for (int i1 = 0; i1 < N; i1++) {
+            float f1 = (i1 + 0.5f) / N;
+            float w00 = (1 - f1), w10 = f1; // axis1 interpolation weights
+
+            for (int i2 = 0; i2 < N; i2++) {
+                float f2 = (i2 + 0.5f) / N;
+
+                // Bilinear interpolation of corner distances at dom=min and dom=max
+                float dLo = dist[b00] * w00 * (1 - f2) + dist[b10] * w10 * (1 - f2)
+                          + dist[b01] * w00 * f2       + dist[b11] * w10 * f2;
+                float dHi = dist[t00] * w00 * (1 - f2) + dist[t10] * w10 * (1 - f2)
+                          + dist[t01] * w00 * f2       + dist[t11] * w10 * f2;
+
+                // Distance is linear along the dominant axis for this column:
+                //   d(f) = dLo*(1-f) + dHi*f
+                // Fraction below the plane = fraction of f in [0,1] where d(f) < offset
+                float range = dHi - dLo;
+                if (Math.abs(range) < 0.0001f) {
+                    total += (dLo < offset) ? 1.0f : 0.0f;
+                } else {
+                    float fCross = (offset - dLo) / range;
+                    // If range > 0, d increases with f → below for f < fCross
+                    // If range < 0, d decreases with f → below for f > fCross
+                    total += (range > 0)
+                            ? Mth.clamp(fCross, 0, 1)
+                            : (1.0f - Mth.clamp(fCross, 0, 1));
+                }
+            }
+        }
+        return total / (N * N);
     }
 
     /**
