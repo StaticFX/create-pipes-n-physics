@@ -13,14 +13,18 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.DoubleValue GRAVITY_PRESSURE_PER_BLOCK;
     public static final ModConfigSpec.DoubleValue PIPE_FRICTION_PER_BLOCK;
     public static final ModConfigSpec.DoubleValue MAX_GRAVITY_PRESSURE;
+    public static final ModConfigSpec.IntValue GRAVITY_RECHECK_TICKS;
+    public static final ModConfigSpec.DoubleValue GRAVITY_ROTATION_THRESHOLD;
+    public static final ModConfigSpec.DoubleValue GRAVITY_DEAD_ZONE;
 
     // Client
     public static final ModConfigSpec.BooleanValue SHOW_PUMP_RANGE_ARROWS;
     public static final ModConfigSpec.BooleanValue SHOW_PIPE_GOGGLE_INFO;
-    public static final ModConfigSpec.IntValue FLUID_TILT_MODE;
+    public static final ModConfigSpec.BooleanValue FLUID_TILT_ENABLED;
     public static final ModConfigSpec.BooleanValue FLUID_WAVE_MESH;
     public static final ModConfigSpec.IntValue FLUID_SURFACE_RESOLUTION;
     public static final ModConfigSpec.BooleanValue FLUID_DEBUG_RENDER;
+    public static final ModConfigSpec.BooleanValue FLUID_HIDE_TEXTURE;
 
     static {
         // Server config
@@ -50,10 +54,23 @@ public class PipesNPhysicsConfig {
                         "Set to 0 for frictionless pipes (only height matters).")
                 .defineInRange("pipeFrictionPerBlock", 0.5, 0.0, 5.0);
         MAX_GRAVITY_PRESSURE = server
-                .comment("Maximum gravity pressure regardless of height difference.",
-                        "Caps the flow rate for very tall drops.",
-                        "Transfer rate = (pressure / 2) mB/t.")
-                .defineInRange("maxGravityPressure", 64.0, 1.0, 256.0);
+                .comment("Maximum gravity pressure. Transfer rate = pressure / 2 mB/t.",
+                        "Default 20 = max 10 mB/t at full vertical (90 degrees).")
+                .defineInRange("maxGravityPressure", 20.0, 1.0, 256.0);
+        GRAVITY_RECHECK_TICKS = server
+                .comment("How often (in ticks) to recheck gravity flow for pipes on sub-levels.",
+                        "Lower = more responsive to rotation, higher = less CPU.",
+                        "20 ticks = 1 second.")
+                .defineInRange("gravityRecheckTicks", 5, 1, 100);
+        GRAVITY_ROTATION_THRESHOLD = server
+                .comment("Minimum rotation change (quaternion dot threshold) to trigger gravity recheck.",
+                        "Lower = more sensitive to small rotations. 0.999 = ~2.5 degrees, 0.99 = ~8 degrees.")
+                .defineInRange("gravityRotationThreshold", 0.999, 0.9, 1.0);
+        GRAVITY_DEAD_ZONE = server
+                .comment("Minimum angle (degrees) or height (blocks) for gravity flow to activate.",
+                        "Prevents phantom flow from floating point noise on flat pipes.",
+                        "Angle-based: pipes below this angle get 0 flow. Height-based: height diff below this is ignored.")
+                .defineInRange("gravityDeadZone", 1.0, 0.0, 10.0);
         server.pop();
 
         SERVER_SPEC = server.build();
@@ -71,9 +88,9 @@ public class PipesNPhysicsConfig {
         client.pop();
 
         client.push("fluidPhysics");
-        FLUID_TILT_MODE = client
-                .comment("Fluid tilt rendering on Sable sub-levels. 0 = off, 1 = enabled. No restart needed.")
-                .defineInRange("fluidTiltMode", 1, 0, 10);
+        FLUID_TILT_ENABLED = client
+                .comment("Enable tilted fluid rendering in tanks on Sable sub-levels.")
+                .define("fluidTiltEnabled", true);
         FLUID_WAVE_MESH = client
                 .comment("Enable wavy fluid surface mesh on Sable sub-levels.",
                         "When disabled, the surface is a flat plane (less GPU cost).")
@@ -85,6 +102,9 @@ public class PipesNPhysicsConfig {
         FLUID_DEBUG_RENDER = client
                 .comment("Show debug wireframe, corner dots, and grid lines on fluid surfaces.")
                 .define("fluidDebugRender", false);
+        FLUID_HIDE_TEXTURE = client
+                .comment("Hide fluid textures, showing only debug wireframe. Useful for inspecting the mesh.")
+                .define("fluidHideTexture", false);
         client.pop();
 
         CLIENT_SPEC = client.build();

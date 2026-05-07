@@ -54,8 +54,9 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
         Level level = blockEntity.getLevel();
         if (level == null || level.isClientSide()) return;
 
-        // Stagger checks across ticks
-        if (level.getGameTime() % 20 != (blockEntity.getBlockPos().hashCode() & 0x7FFFFFFF) % 20) return;
+        // Stagger checks across ticks (configurable rate)
+        int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
+        if (level.getGameTime() % recheckTicks != (blockEntity.getBlockPos().hashCode() & 0x7FFFFFFF) % recheckTicks) return;
 
         // For pipes WITH pressure: check if sub-level rotated (stale gravity data)
         if (hasAnyPressure()) {
@@ -91,7 +92,8 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
 
         // Check if orientation changed significantly (dot product < threshold)
         float dot = last[0]*current[0] + last[1]*current[1] + last[2]*current[2] + last[3]*current[3];
-        if (Math.abs(dot) < 0.999f) {
+        float threshold = PipesNPhysicsConfig.GRAVITY_ROTATION_THRESHOLD.get().floatValue();
+        if (Math.abs(dot) < threshold) {
             pipesnphysics$lastOrientations.put(id, current);
             return true;
         }
