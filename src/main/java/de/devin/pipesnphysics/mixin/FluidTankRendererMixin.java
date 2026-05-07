@@ -4,6 +4,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.content.fluids.tank.FluidTankRenderer;
+import com.simibubi.create.content.contraptions.ContraptionWorld;
 import de.devin.pipesnphysics.FluidRenderData.FluidStyle;
 import de.devin.pipesnphysics.FluidRenderData.GridDims;
 import de.devin.pipesnphysics.FluidRenderData.SurfacePlane;
@@ -76,6 +77,7 @@ public class FluidTankRendererMixin {
     @Unique private static final Map<BlockPos, float[]> WAVE_LAST_UP = new HashMap<>();
     @Unique private static final Map<BlockPos, float[]> WAVE_LAST_POS = new HashMap<>();
     @Unique private static final Map<BlockPos, float[]> WAVE_LAST_VEL = new HashMap<>();
+    @Unique private static final Map<BlockPos, float[]> WAVE_LAST_QUAT = new HashMap<>();
 
     // ========================================================================
     // Main render method
@@ -89,8 +91,14 @@ public class FluidTankRendererMixin {
         FluidTankAccessor acc = (FluidTankAccessor) be;
         if (!be.isController() || !acc.pipesnphysics$isWindow()) return;
 
+        // Skip tanks on Create contraptions — they use a different rendering path
+        if (be.getLevel() instanceof ContraptionWorld) return;
+
         // --- Sable orientation ---
+        // Try BlockEntity lookup first, fall back to position-based lookup.
+        // The BE lookup can return null on moving physics objects / contraptions.
         ClientSubLevelAccess subLevel = SableCompanion.INSTANCE.getContainingClient(be);
+        if (subLevel == null) subLevel = SableCompanion.INSTANCE.getContainingClient(be.getBlockPos());
         if (subLevel == null) return;
         Pose3dc pose = subLevel.renderPose(partialTicks);
         if (pose == null) return;
@@ -179,30 +187,34 @@ public class FluidTankRendererMixin {
             // --- Render the fluid surface as a grid mesh ---
             pipesnphysics$renderSurface(qvc, mat, grid, gridRaw, gridOutside, bounds, plane, style);
 
-            // --- Render wall skirts: strips from surface boundary down to tank floor ---
-            // Unlike the old plane-clipped approach, skirt vertices are shared with the
-            // surface mesh boundary, so they follow wave displacement with no gaps.
+            // --- Render walls ---
+            // Side walls use skirts (follow wave displacement) with vertex clamping.
+            // Bottom face uses plane clipping (always flat on the tank floor).
             pipesnphysics$renderWallSkirts(qvc, mat, grid, gridRaw, gridOutside,
                     bounds, plane, style, light);
-
-            // --- Render bottom face (Y=min) using plane clipping ---
-            pipesnphysics$renderBottomFace(qvc, mat, bounds, plane, style, light);
+            pipesnphysics$renderWallFaces(qvc, mat, corners, dist, bounds, plane.dominant(), style, light);
         }
 
-        // --- Debug overlay: wireframe grid + corner markers ---
+        // --- Debug overlay ---
         if (PipesNPhysicsConfig.FLUID_DEBUG_RENDER.get()) {
             VertexConsumer lvc = buffer.getBuffer(RenderType.LINES);
-            pipesnphysics$renderDebug(lvc, mat, grid, new float[grid.size()][3], gridOutside, corners, dist);
-            // Second pass with positions clamped to tank bounds (shows clipped shape)
-            float[][] gridClamped = new float[grid.size()][3];
-            for (int i = 0; i < grid.size(); i++) {
-                gridClamped[i] = new float[]{
-                    Mth.clamp(gridRaw[i][0], xMin, xMax),
-                    Mth.clamp(gridRaw[i][1], yMin, yMax),
-                    Mth.clamp(gridRaw[i][2], zMin, zMax)
-                };
+
+            if (hideTexture) {
+                // Full wireframe mode: surface grid + wall skirts + bottom face edges
+                pipesnphysics$renderDebugWireframe(lvc, mat, grid, gridRaw, gridOutside,
+                        bounds, plane, corners, dist);
+            } else {
+                // Surface grid overlay only
+                float[][] gridClamped = new float[grid.size()][3];
+                for (int i = 0; i < grid.size(); i++) {
+                    gridClamped[i] = new float[]{
+                        Mth.clamp(gridRaw[i][0], xMin, xMax),
+                        Mth.clamp(gridRaw[i][1], yMin, yMax),
+                        Mth.clamp(gridRaw[i][2], zMin, zMax)
+                    };
+                }
+                pipesnphysics$renderDebug(lvc, mat, grid, gridClamped, gridOutside, corners, dist);
             }
-            pipesnphysics$renderDebug(lvc, mat, grid, gridClamped, gridOutside, corners, dist);
         }
     }
 
@@ -466,22 +478,22 @@ public class FluidTankRendererMixin {
         }
         WAVE_LAST_UP.put(key, new float[]{normal[0], normal[1], normal[2]});
 
-        // --- Track sub-level velocity for impact detection ---
-        // velocity = (currentPos - lastPos) / dt, deceleration = lastVelocity - currentVelocity
+        // --- Track sub-level velocity and acceleration ---
+        // Acceleration = velocity change per frame. Fluid reacts opposite to acceleration:
+        // speeding up → fluid pushes back, braking → fluid pushes forward, landing → splash up.
         float[] lastPos = WAVE_LAST_POS.get(key);
         float[] lastVel = WAVE_LAST_VEL.get(key);
         float[] curVel = {0, 0, 0};
-        float[] decel = {0, 0, 0};
+        float[] accel = {0, 0, 0}; // world-space acceleration (velocity delta)
         if (lastPos != null) {
             curVel[0] = worldPos[0] - lastPos[0];
             curVel[1] = worldPos[1] - lastPos[1];
             curVel[2] = worldPos[2] - lastPos[2];
         }
         if (lastVel != null) {
-            // Deceleration = how much velocity was lost this frame (positive = slowing down)
-            decel[0] = lastVel[0] - curVel[0];
-            decel[1] = lastVel[1] - curVel[1];
-            decel[2] = lastVel[2] - curVel[2];
+            accel[0] = curVel[0] - lastVel[0];
+            accel[1] = curVel[1] - lastVel[1];
+            accel[2] = curVel[2] - lastVel[2];
         }
         WAVE_LAST_POS.put(key, new float[]{worldPos[0], worldPos[1], worldPos[2]});
         WAVE_LAST_VEL.put(key, new float[]{curVel[0], curVel[1], curVel[2]});
@@ -518,27 +530,118 @@ public class FluidTankRendererMixin {
             }
         }
 
-        // --- Inertia sloshing from impact / deceleration ---
-        // When the sub-level suddenly decelerates (landing, collision), the fluid keeps
-        // moving by inertia. Transform the world-space deceleration into the tank's local
-        // space, then apply as a directional impulse.
-        float decelMag = (float) Math.sqrt(decel[0] * decel[0] + decel[1] * decel[1] + decel[2] * decel[2]);
-        if (decelMag > 0.01f) {
-            Vector3d localDecel = pose.transformNormalInverse(
-                    new Vector3d(decel[0], decel[1], decel[2]), new Vector3d());
-            float ldx = (float) localDecel.x, ldz = (float) localDecel.z;
-            float localMag = (float) Math.sqrt(ldx * ldx + ldz * ldz);
+        // --- Inertia sloshing from acceleration ---
+        // Fluid reacts opposite to any acceleration (Newton's first law):
+        // - Contraption speeds up → fluid pushes backward
+        // - Contraption brakes → fluid pushes forward
+        // - Contraption lands (vertical decel) → fluid splashes upward
+        // Transform world-space acceleration into tank-local space, then apply as
+        // a directional impulse. Vertical impacts get amplified (landing is dramatic).
+        float accelMag = (float) Math.sqrt(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]);
+        if (accelMag > 0.005f) {
+            // Negative sign: fluid moves OPPOSITE to the acceleration direction
+            Vector3d localAccel = pose.transformNormalInverse(
+                    new Vector3d(-accel[0], -accel[1], -accel[2]), new Vector3d());
+            float lax = (float) localAccel.x, lay = (float) localAccel.y, laz = (float) localAccel.z;
 
-            if (localMag > 0.005f) {
-                float impactStr = Math.min(0.015f, decelMag * 0.8f) / viscRatio;
-                ldx /= localMag;
-                ldz /= localMag;
+            // Vertical component (along dominant axis) creates a uniform push (splash)
+            // Horizontal components create directional lean
+            float horizontalMag = (float) Math.sqrt(lax * lax + laz * laz);
 
+            // Directional lean from horizontal acceleration
+            if (horizontalMag > 0.003f) {
+                float leanStr = Math.min(0.02f, horizontalMag * 1.2f) / viscRatio;
+                float ndx = lax / horizontalMag, ndz = laz / horizontalMag;
                 for (int g1 = 0; g1 <= grid.res(); g1++) {
                     for (int g2 = 0; g2 <= grid.res(); g2++) {
                         float fx = (g1 / (float) grid.res() - 0.5f) * 2;
                         float fz = (g2 / (float) grid.res() - 0.5f) * 2;
-                        waveNext[g1 * grid.stride() + g2] += (fx * ldx + fz * ldz) * impactStr;
+                        waveNext[g1 * grid.stride() + g2] += (fx * ndx + fz * ndz) * leanStr;
+                    }
+                }
+            }
+
+            // Vertical splash from impacts (landing, sudden drops)
+            // Amplified 2x because vertical impacts feel much stronger
+            float verticalAccel = Math.abs(lay);
+            if (verticalAccel > 0.005f) {
+                float splashStr = Math.min(0.03f, verticalAccel * 2.0f) / viscRatio;
+                // Radial splash: push outward from center (edges go up, center goes down)
+                for (int g1 = 0; g1 <= grid.res(); g1++) {
+                    for (int g2 = 0; g2 <= grid.res(); g2++) {
+                        float fx = (g1 / (float) grid.res() - 0.5f) * 2;
+                        float fz = (g2 / (float) grid.res() - 0.5f) * 2;
+                        float dist = (float) Math.sqrt(fx * fx + fz * fz);
+                        // Edges go up (+), center goes down (-): creates a bowl/splash shape
+                        float radial = (dist - 0.5f) * 2;
+                        waveNext[g1 * grid.stride() + g2] += radial * splashStr * Math.signum(lay);
+                    }
+                }
+            }
+        }
+
+        // --- Centrifugal force from spinning ---
+        // When the sub-level rotates, fluid is pushed outward from the spin axis.
+        // Computed from angular velocity (quaternion delta between frames).
+        float[] lastQuat = WAVE_LAST_QUAT.get(key);
+        float qx = (float) pose.orientation().x(), qy = (float) pose.orientation().y();
+        float qz = (float) pose.orientation().z(), qw = (float) pose.orientation().w();
+        // Normalize quaternion sign (q and -q are the same rotation, pick consistent hemisphere)
+        if (qw < 0) { qx = -qx; qy = -qy; qz = -qz; qw = -qw; }
+        float[] curQuat = {qx, qy, qz, qw};
+        WAVE_LAST_QUAT.put(key, curQuat);
+
+        if (lastQuat != null) {
+            // Quaternion delta: q_delta = q_cur × q_prev⁻¹ (conjugate for unit quaternions)
+            float pxI = -lastQuat[0], pyI = -lastQuat[1], pzI = -lastQuat[2], pwI = lastQuat[3];
+            float dw = qw * pwI - qx * pxI - qy * pyI - qz * pzI;
+            float dx = qw * pxI + qx * pwI + qy * pzI - qz * pyI;
+            float dy = qw * pyI - qx * pzI + qy * pwI + qz * pxI;
+            float dz = qw * pzI + qx * pyI - qy * pxI + qz * pwI;
+
+            // Extract angle from delta quaternion: angle = 2 × acos(|w|)
+            float angle = 2.0f * (float) Math.acos(Mth.clamp(Math.abs(dw), 0, 1));
+
+            if (angle > 0.005f) { // ~0.3 degrees minimum to avoid noise
+                // Angular velocity axis (world space) = normalized (dx, dy, dz)
+                float sinHalf = (float) Math.sin(angle / 2);
+                if (Math.abs(sinHalf) > 0.0001f) {
+                    float axWx = dx / sinHalf, axWy = dy / sinHalf, axWz = dz / sinHalf;
+
+                    // Transform spin axis to local space
+                    Vector3d localAxis = pose.transformNormalInverse(
+                            new Vector3d(axWx, axWy, axWz), new Vector3d());
+                    float lax = (float) localAxis.x, lay2 = (float) localAxis.y, laz = (float) localAxis.z;
+                    float axLen = (float) Math.sqrt(lax * lax + lay2 * lay2 + laz * laz);
+                    if (axLen > 0.001f) {
+                        lax /= axLen; lay2 /= axLen; laz /= axLen;
+                    }
+
+                    // ω² — centrifugal force scales with square of angular velocity
+                    float omega = angle; // angle per frame ≈ angular velocity (at 20Hz tick rate)
+                    float omegaSq = omega * omega;
+                    float centStr = Math.min(0.02f, omegaSq * 8.0f) / viscRatio;
+
+                    if (centStr > 0.001f) {
+                        // For each grid vertex, compute distance from spin axis and push outward
+                        for (int g1 = 0; g1 <= grid.res(); g1++) {
+                            for (int g2 = 0; g2 <= grid.res(); g2++) {
+                                // Vertex position relative to grid center (-1 to +1)
+                                float fx = (g1 / (float) grid.res() - 0.5f) * 2;
+                                float fz = (g2 / (float) grid.res() - 0.5f) * 2;
+
+                                // Project vertex onto the plane perpendicular to the spin axis
+                                // dot = projection of (fx,0,fz) onto the spin axis
+                                float dot = fx * lax + fz * laz;
+                                // Perpendicular component = vertex pos minus projection onto axis
+                                float perpX = fx - dot * lax;
+                                float perpZ = fz - dot * laz;
+                                float perpDist = (float) Math.sqrt(perpX * perpX + perpZ * perpZ);
+
+                                // Centrifugal force pushes outward: farther from axis = more displacement
+                                waveNext[g1 * grid.stride() + g2] += perpDist * centStr;
+                            }
+                        }
                     }
                 }
             }
@@ -550,9 +653,9 @@ public class FluidTankRendererMixin {
         int rg2 = (int) ((now / 31) % (grid.res() + 1));
         waveNext[rg1 * grid.stride() + rg2] += ambStr * ((now % 2 == 0) ? 1 : -1);
 
-        // --- Hard clamp: wave displacement can never exceed this limit ---
-        // Prevents the surface mesh from poking through the tank walls at any angle
-        float maxAmplitude = 0.06f;
+        // --- Hard clamp: viscous fluids can't reach the same amplitude as water ---
+        // Water (viscRatio=1) → 0.06, Lava (viscRatio=6) → 0.025, Honey → even less
+        float maxAmplitude = 0.06f / (float) Math.sqrt(viscRatio);
         for (int i = 0; i < waveNext.length; i++) {
             waveNext[i] = Mth.clamp(waveNext[i], -maxAmplitude, maxAmplitude);
         }
@@ -805,13 +908,9 @@ public class FluidTankRendererMixin {
     // ========================================================================
 
     /**
-     * Renders wall "skirts" — quad strips that connect the surface mesh boundary
-     * vertices straight down to the tank floor. Unlike plane-clipped wall faces, skirt
-     * vertices are shared with the surface mesh so they follow wave displacement exactly.
-     *
-     * <p>For each of the 4 grid boundary edges (axis1=min, axis1=max, axis2=min, axis2=max),
-     * walks along the edge and emits a quad for each pair of adjacent vertices:
-     * top edge = surface position (wave-displaced), bottom edge = same XZ at Y=yMin.</p>
+     * Renders wall skirts — quad strips from surface boundary to tank floor.
+     * Single-sided with computed winding: uses cross product to determine which
+     * way the quad faces, and flips if it doesn't match the expected outward direction.
      */
     @Unique
     private static void pipesnphysics$renderWallSkirts(VertexConsumer vc, Matrix4f mat,
@@ -820,25 +919,28 @@ public class FluidTankRendererMixin {
                                                         FluidStyle s, int light) {
         float[] mins = bounds.mins(), maxs = bounds.maxs();
         int res = grid.res(), stride = grid.stride();
+        int dom = plane.dominant();
+        float floorVal = (plane.normal()[dom] > 0) ? mins[dom] : maxs[dom];
 
-        // 4 boundary edges: {fixedG1, fixedG2, stepG1, stepG2, reverseWinding}
-        // reverseWinding flips the quad to face outward for "max" edges
+        // {fixedG1, fixedG2, stepG1, stepG2, outwardAxis, outwardSign}
+        // outwardAxis/Sign define which direction is "outside" for this wall
+        int ax1 = plane.axis1(), ax2 = plane.axis2();
         int[][] edges = {
-                {0,   -1, 0, 1, 1},  // g1=0 (axis1=min wall), walk g2
-                {res,  -1, 0, 1, 0},  // g1=res (axis1=max wall), walk g2
-                {-1,   0, 1, 0, 0},  // g2=0 (axis2=min wall), walk g1
-                {-1, res, 1, 0, 1},  // g2=res (axis2=max wall), walk g1
+                {0,   -1, 0, 1, ax1, -1},  // g1=0: outward is -axis1
+                {res,  -1, 0, 1, ax1,  1},  // g1=res: outward is +axis1
+                {-1,   0, 1, 0, ax2, -1},   // g2=0: outward is -axis2
+                {-1, res, 1, 0, ax2,  1},   // g2=res: outward is +axis2
         };
 
         for (int[] edge : edges) {
             boolean walkG1 = edge[2] == 1;
             int fixedVal = walkG1 ? edge[1] : edge[0];
-            boolean reverse = edge[4] == 1;
-            int uAxis = walkG1 ? plane.axis1() : plane.axis2();
+            int outAxis = edge[4], outSign = edge[5];
+            int uAxis = walkG1 ? ax1 : ax2;
             float uRange = Math.max(0.001f, maxs[uAxis] - mins[uAxis]);
+            float domRange = Math.max(0.001f, maxs[dom] - mins[dom]);
 
             for (int i = 0; i < res; i++) {
-                // Grid indices for this segment
                 int g1a, g2a, g1b, g2b;
                 if (walkG1) {
                     g1a = i; g2a = fixedVal; g1b = i + 1; g2b = fixedVal;
@@ -846,54 +948,55 @@ public class FluidTankRendererMixin {
                     g1a = fixedVal; g2a = i; g1b = fixedVal; g2b = i + 1;
                 }
 
-                int idxA = g1a * stride + g2a;
-                int idxB = g1b * stride + g2b;
+                int idxA = g1a * stride + g2a, idxB = g1b * stride + g2b;
                 if (gridOutside[idxA] && gridOutside[idxB]) continue;
 
-                float[] surfA = gridRaw[idxA], surfB = gridRaw[idxB];
-
-                // Top edge = surface vertex, bottom edge = project along -normal to tank floor.
-                // For an upright tank (normal=+Y), bottom is at yMin.
-                // For tilted tanks, bottom follows the normal direction to the tank boundary.
-                int dom = plane.dominant();
-                float floorVal = (plane.normal()[dom] > 0) ? mins[dom] : maxs[dom];
-
-                float[] tA = {surfA[0], surfA[1], surfA[2]};
-                float[] tB = {surfB[0], surfB[1], surfB[2]};
-                float[] bA = {surfA[0], surfA[1], surfA[2]};
-                float[] bB = {surfB[0], surfB[1], surfB[2]};
+                float[] sA = gridRaw[idxA], sB = gridRaw[idxB];
+                float[] tA = {Mth.clamp(sA[0], mins[0], maxs[0]),
+                              Mth.clamp(sA[1], mins[1], maxs[1]),
+                              Mth.clamp(sA[2], mins[2], maxs[2])};
+                float[] tB = {Mth.clamp(sB[0], mins[0], maxs[0]),
+                              Mth.clamp(sB[1], mins[1], maxs[1]),
+                              Mth.clamp(sB[2], mins[2], maxs[2])};
+                float[] bA = {tA[0], tA[1], tA[2]};
+                float[] bB = {tB[0], tB[1], tB[2]};
                 bA[dom] = floorVal;
                 bB[dom] = floorVal;
 
-                // Skip if surface is already at the floor (no wall height)
                 if (Math.abs(tA[dom] - floorVal) < 0.001f && Math.abs(tB[dom] - floorVal) < 0.001f) continue;
 
-                // UV: U = position along wall, V = height along dominant axis
-                float domRange = Math.max(0.001f, maxs[dom] - mins[dom]);
+                // Compute face normal via cross product to determine correct winding
+                float e1x = bA[0]-tA[0], e1y = bA[1]-tA[1], e1z = bA[2]-tA[2];
+                float e2x = tB[0]-tA[0], e2y = tB[1]-tA[1], e2z = tB[2]-tA[2];
+                float fnx = e1y*e2z - e1z*e2y;
+                float fny = e1z*e2x - e1x*e2z;
+                float fnz = e1x*e2y - e1y*e2x;
+                // Does the face normal agree with the expected outward direction?
+                float outDot = (outAxis == 0 ? fnx : outAxis == 1 ? fny : fnz) * outSign;
+                boolean needFlip = outDot < 0;
+
+                // UVs
                 float uA = Mth.clamp((tA[uAxis] - mins[uAxis]) / uRange, 0, 1);
                 float uB = Mth.clamp((tB[uAxis] - mins[uAxis]) / uRange, 0, 1);
                 float vTA = Mth.clamp((tA[dom] - mins[dom]) / domRange, 0, 1);
                 float vTB = Mth.clamp((tB[dom] - mins[dom]) / domRange, 0, 1);
                 float vBot = Mth.clamp((floorVal - mins[dom]) / domRange, 0, 1);
-                float quA = Mth.lerp(uA, s.su0(), s.su1());
-                float quB = Mth.lerp(uB, s.su0(), s.su1());
-                float qvTA = Mth.lerp(vTA, s.sv0(), s.sv1());
-                float qvTB = Mth.lerp(vTB, s.sv0(), s.sv1());
+                float quA = Mth.lerp(uA, s.su0(), s.su1()), quB = Mth.lerp(uB, s.su0(), s.su1());
+                float qvTA = Mth.lerp(vTA, s.sv0(), s.sv1()), qvTB = Mth.lerp(vTB, s.sv0(), s.sv1());
                 float qvBot = Mth.lerp(vBot, s.sv0(), s.sv1());
 
-                // Emit single-sided quad with outward winding
-                float[][] verts;
-                float[][] uvs;
-                if (reverse) {
-                    verts = new float[][]{tA, bA, bB, tB};
-                    uvs = new float[][]{{quA, qvTA}, {quA, qvBot}, {quB, qvBot}, {quB, qvTB}};
-                } else {
+                // Single-sided quad with correct outward winding
+                float[][] verts, uvs;
+                if (needFlip) {
                     verts = new float[][]{tB, bB, bA, tA};
                     uvs = new float[][]{{quB, qvTB}, {quB, qvBot}, {quA, qvBot}, {quA, qvTA}};
+                } else {
+                    verts = new float[][]{tA, bA, bB, tB};
+                    uvs = new float[][]{{quA, qvTA}, {quA, qvBot}, {quB, qvBot}, {quB, qvTB}};
                 }
                 for (int vi = 0; vi < 4; vi++) {
-                    float[] v = verts[vi];
-                    vc.addVertex(mat, v[0], v[1], v[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
+                    vc.addVertex(mat, verts[vi][0], verts[vi][1], verts[vi][2])
+                            .setColor(s.cr(), s.cg(), s.cb(), s.ca())
                             .setUv(uvs[vi][0], uvs[vi][1]).setOverlay(0).setLight(light).setNormal(0, 1, 0);
                 }
             }
@@ -901,44 +1004,59 @@ public class FluidTankRendererMixin {
     }
 
     /**
-     * Renders the bottom face of the fluid body — a quad at the same floor position
-     * where the wall skirts end, so they connect seamlessly.
-     * Uses the dominant axis floor (same as skirts) and spans the other two axes.
+     * Renders only the floor/ceiling faces of the fluid body (perpendicular to the dominant axis).
+     * Side walls are handled by wall skirts. Single-sided with computed outward winding.
      */
     @Unique
-    private static void pipesnphysics$renderBottomFace(VertexConsumer vc, Matrix4f mat,
-                                                        TankBounds bounds, SurfacePlane plane,
-                                                        FluidStyle s, int light) {
+    private static void pipesnphysics$renderWallFaces(VertexConsumer vc, Matrix4f mat,
+                                                       float[][] corners, float[] dist,
+                                                       TankBounds bounds, int dominant,
+                                                       FluidStyle s, int light) {
         float[] mins = bounds.mins(), maxs = bounds.maxs();
-        int dom = plane.dominant();
-        int ax1 = plane.axis1(), ax2 = plane.axis2();
 
-        // Floor position matches the wall skirts' bottom edge
-        float floorVal = (plane.normal()[dom] > 0) ? mins[dom] : maxs[dom];
+        for (int f = 0; f < 6; f++) {
+            // Only render faces whose normal is along the dominant axis (floor/ceiling).
+            // Side faces (normal perpendicular to dominant) are covered by wall skirts.
+            float[] fn = FACE_NORMALS[f];
+            if (fn[dominant] == 0) continue;
 
-        // Build 4 corners of the floor quad
-        float[][] verts = new float[4][3];
-        for (int i = 0; i < 4; i++) {
-            verts[i][dom] = floorVal;
-            verts[i][ax1] = (i == 1 || i == 2) ? maxs[ax1] : mins[ax1];
-            verts[i][ax2] = (i == 2 || i == 3) ? maxs[ax2] : mins[ax2];
-        }
+            int[] face = BOX_FACES[f];
+            boolean anyBelow = false;
+            for (int fi : face) {
+                if (dist[fi] <= 0) { anyBelow = true; break; }
+            }
+            if (!anyBelow) continue;
 
-        float range1 = Math.max(0.001f, maxs[ax1] - mins[ax1]);
-        float range2 = Math.max(0.001f, maxs[ax2] - mins[ax2]);
+            List<float[]> clipped = pipesnphysics$clipFace(corners, face, dist);
+            if (clipped.size() < 3) continue;
 
-        // Single-sided: faces away from the fluid surface (outward from the fluid body).
-        // For normal > 0 (upright), floor is at mins → face points in -dominant direction.
-        // For normal < 0 (flipped), floor is at maxs → face points in +dominant direction.
-        // Winding: if normal[dom] > 0, emit 3,2,1,0 (facing -dom); else 0,1,2,3 (facing +dom).
-        boolean faceDown = plane.normal()[dom] > 0;
-        for (int i = 0; i < 4; i++) {
-            int vi = faceDown ? (3 - i) : i;
-            float[] p = verts[vi];
-            float u = Mth.lerp((p[ax1] - mins[ax1]) / range1, s.su0(), s.su1());
-            float v = Mth.lerp((p[ax2] - mins[ax2]) / range2, s.sv0(), s.sv1());
-            vc.addVertex(mat, p[0], p[1], p[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                    .setUv(u, v).setOverlay(0).setLight(light).setNormal(0, 1, 0);
+            int uAx = FACE_UV_AXES[f][0], vAx = FACE_UV_AXES[f][1];
+            float uRange = Math.max(0.001f, maxs[uAx] - mins[uAx]);
+            float vRange = Math.max(0.001f, maxs[vAx] - mins[vAx]);
+
+            // Use the first triangle to check if clipFace winding matches the face normal
+            if (clipped.size() >= 3) {
+                float[] a = clipped.get(0), b = clipped.get(1), c = clipped.get(2);
+                float ex1 = b[0]-a[0], ey1 = b[1]-a[1], ez1 = b[2]-a[2];
+                float ex2 = c[0]-a[0], ey2 = c[1]-a[1], ez2 = c[2]-a[2];
+                float cx1 = ey1*ez2 - ez1*ey2, cy1 = ez1*ex2 - ex1*ez2, cz1 = ex1*ey2 - ey1*ex2;
+                float dot = cx1*fn[0] + cy1*fn[1] + cz1*fn[2];
+                // If dot > 0, clipFace winding matches outward normal → use as-is
+                // If dot < 0, winding is inward → reverse (p2, p1)
+                boolean inward = dot < 0;
+
+                float[] first = clipped.get(0);
+                for (int i = 1; i < clipped.size() - 1; i++) {
+                    float[] p1 = clipped.get(i), p2 = clipped.get(i + 1);
+                    float[] va = inward ? p2 : p1, vb = inward ? p1 : p2;
+                    for (float[] p : new float[][]{first, va, vb, vb}) {
+                        float u = Mth.lerp(Mth.clamp((p[uAx] - mins[uAx]) / uRange, 0, 1), s.su0(), s.su1());
+                        float v = Mth.lerp(Mth.clamp((p[vAx] - mins[vAx]) / vRange, 0, 1), s.sv0(), s.sv1());
+                        vc.addVertex(mat, p[0], p[1], p[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
+                                .setUv(u, v).setOverlay(0).setLight(light).setNormal(0, 1, 0);
+                    }
+                }
+            }
         }
     }
 
@@ -989,5 +1107,90 @@ public class FluidTankRendererMixin {
             lvc.addVertex(mat, c[0], c[1], c[2] - halfSize).setColor(255, 255, blue, 255).setNormal(0, 1, 0);
             lvc.addVertex(mat, c[0], c[1], c[2] + halfSize).setColor(255, 255, blue, 255).setNormal(0, 1, 0);
         }
+    }
+
+    /**
+     * Full wireframe mode: renders the entire fluid body as a mesh without textures.
+     * Shows the surface grid (green), wall skirt edges (orange), and bottom face outline (red).
+     */
+    @Unique
+    private static void pipesnphysics$renderDebugWireframe(VertexConsumer lvc, Matrix4f mat,
+                                                             GridDims grid, float[][] gridRaw, boolean[] gridOutside,
+                                                             TankBounds bounds, SurfacePlane plane,
+                                                             float[][] corners, float[] dist) {
+        float[] mins = bounds.mins(), maxs = bounds.maxs();
+        int res = grid.res(), stride = grid.stride();
+        int dom = plane.dominant();
+        float floorVal = (plane.normal()[dom] > 0) ? mins[dom] : maxs[dom];
+
+        // --- Surface grid (green) ---
+        for (int g1 = 0; g1 <= res; g1++) {
+            for (int g2 = 0; g2 < res; g2++) {
+                if (gridOutside[g1 * stride + g2] || gridOutside[g1 * stride + g2 + 1]) continue;
+                float[] a = gridRaw[g1 * stride + g2], b = gridRaw[g1 * stride + g2 + 1];
+                lvc.addVertex(mat, a[0], a[1], a[2]).setColor(0, 255, 100, 255).setNormal(0, 1, 0);
+                lvc.addVertex(mat, b[0], b[1], b[2]).setColor(0, 255, 100, 255).setNormal(0, 1, 0);
+            }
+        }
+        for (int g2 = 0; g2 <= res; g2++) {
+            for (int g1 = 0; g1 < res; g1++) {
+                if (gridOutside[g1 * stride + g2] || gridOutside[(g1 + 1) * stride + g2]) continue;
+                float[] a = gridRaw[g1 * stride + g2], b = gridRaw[(g1 + 1) * stride + g2];
+                lvc.addVertex(mat, a[0], a[1], a[2]).setColor(0, 255, 100, 255).setNormal(0, 1, 0);
+                lvc.addVertex(mat, b[0], b[1], b[2]).setColor(0, 255, 100, 255).setNormal(0, 1, 0);
+            }
+        }
+
+        // --- Wall skirt edges (orange): vertical lines from surface boundary to floor ---
+        int[][] edgeDefs = {{0, -1, 0, 1}, {res, -1, 0, 1}, {-1, 0, 1, 0}, {-1, res, 1, 0}};
+        for (int[] ed : edgeDefs) {
+            boolean walkG1 = ed[2] == 1;
+            int fixedVal = walkG1 ? ed[1] : ed[0];
+            for (int i = 0; i <= res; i++) {
+                int g1 = walkG1 ? i : fixedVal, g2 = walkG1 ? fixedVal : i;
+                int idx = g1 * stride + g2;
+                if (gridOutside[idx]) continue;
+                float[] surf = gridRaw[idx];
+                float[] floor = {surf[0], surf[1], surf[2]};
+                floor[dom] = floorVal;
+                // Vertical drop line (orange)
+                lvc.addVertex(mat, surf[0], surf[1], surf[2]).setColor(255, 160, 0, 255).setNormal(0, 1, 0);
+                lvc.addVertex(mat, floor[0], floor[1], floor[2]).setColor(255, 160, 0, 255).setNormal(0, 1, 0);
+            }
+            // Horizontal bottom edge (orange)
+            for (int i = 0; i < res; i++) {
+                int g1a = walkG1 ? i : fixedVal, g2a = walkG1 ? fixedVal : i;
+                int g1b = walkG1 ? i + 1 : fixedVal, g2b = walkG1 ? fixedVal : i + 1;
+                int idxA = g1a * stride + g2a, idxB = g1b * stride + g2b;
+                if (gridOutside[idxA] && gridOutside[idxB]) continue;
+                float[] sA = gridRaw[idxA], sB = gridRaw[idxB];
+                float[] fA = {sA[0], sA[1], sA[2]};
+                float[] fB = {sB[0], sB[1], sB[2]};
+                fA[dom] = floorVal;
+                fB[dom] = floorVal;
+                lvc.addVertex(mat, fA[0], fA[1], fA[2]).setColor(255, 160, 0, 255).setNormal(0, 1, 0);
+                lvc.addVertex(mat, fB[0], fB[1], fB[2]).setColor(255, 160, 0, 255).setNormal(0, 1, 0);
+            }
+        }
+
+        // --- Bottom face outline (red) ---
+        float[] bMins = {mins[0], mins[1], mins[2]};
+        float[] bMaxs = {maxs[0], maxs[1], maxs[2]};
+        bMins[dom] = floorVal;
+        bMaxs[dom] = floorVal;
+        float[][] fc = {
+                {bMins[0], bMins[1], bMins[2]}, {bMaxs[0], bMins[1], bMins[2]},
+                {bMaxs[0], bMaxs[1], bMaxs[2]}, {bMins[0], bMaxs[1], bMaxs[2]}
+        };
+        for (int i = 0; i < 4; i++) {
+            float[] a = fc[i], b = fc[(i + 1) % 4];
+            lvc.addVertex(mat, a[0], a[1], a[2]).setColor(255, 50, 50, 255).setNormal(0, 1, 0);
+            lvc.addVertex(mat, b[0], b[1], b[2]).setColor(255, 50, 50, 255).setNormal(0, 1, 0);
+        }
+        // Diagonals
+        lvc.addVertex(mat, fc[0][0], fc[0][1], fc[0][2]).setColor(255, 50, 50, 255).setNormal(0, 1, 0);
+        lvc.addVertex(mat, fc[2][0], fc[2][1], fc[2][2]).setColor(255, 50, 50, 255).setNormal(0, 1, 0);
+        lvc.addVertex(mat, fc[1][0], fc[1][1], fc[1][2]).setColor(255, 50, 50, 255).setNormal(0, 1, 0);
+        lvc.addVertex(mat, fc[3][0], fc[3][1], fc[3][2]).setColor(255, 50, 50, 255).setNormal(0, 1, 0);
     }
 }
