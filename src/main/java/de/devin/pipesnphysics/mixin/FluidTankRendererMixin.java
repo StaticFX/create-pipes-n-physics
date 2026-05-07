@@ -199,7 +199,7 @@ public class FluidTankRendererMixin {
 
         Matrix4f mat = ms.last().pose();
 
-        VertexConsumer qvc = buffer.getBuffer(RenderType.cutoutMipped());
+        VertexConsumer qvc = buffer.getBuffer(RenderType.translucent());
 
         boolean hideTexture = PipesNPhysicsConfig.FLUID_HIDE_TEXTURE.get();
         if (!hideTexture) {
@@ -966,13 +966,15 @@ public class FluidTankRendererMixin {
                 int idxA = g1a * stride + g2a, idxB = g1b * stride + g2b;
                 // Don't skip — clamped vertices at the boundary fill the wall gap
 
+                // Top edge matches the surface mesh. Clamp to tank bounds so skirts
+                // don't extend outside the tank, but preserve the dominant axis value
+                // (the surface height) so the top edge follows the wave.
                 float[] sA = gridRaw[idxA], sB = gridRaw[idxB];
-                float[] tA = {Mth.clamp(sA[0], mins[0], maxs[0]),
-                              Mth.clamp(sA[1], mins[1], maxs[1]),
-                              Mth.clamp(sA[2], mins[2], maxs[2])};
-                float[] tB = {Mth.clamp(sB[0], mins[0], maxs[0]),
-                              Mth.clamp(sB[1], mins[1], maxs[1]),
-                              Mth.clamp(sB[2], mins[2], maxs[2])};
+                float[] tA = pipesnphysics$clampToBox(sA, mins, maxs);
+                float[] tB = pipesnphysics$clampToBox(sB, mins, maxs);
+                // Restore dominant axis from raw grid so top follows the surface/waves
+                tA[dom] = Mth.clamp(sA[dom], mins[dom], maxs[dom]);
+                tB[dom] = Mth.clamp(sB[dom], mins[dom], maxs[dom]);
                 float[] bA = {tA[0], tA[1], tA[2]};
                 float[] bB = {tB[0], tB[1], tB[2]};
                 bA[dom] = floorVal;
