@@ -5,6 +5,7 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.content.fluids.tank.FluidTankRenderer;
 import com.simibubi.create.content.contraptions.ContraptionWorld;
+import net.createmod.catnip.levelWrappers.WrappedLevel;
 import de.devin.pipesnphysics.FluidRenderData.FluidStyle;
 import de.devin.pipesnphysics.FluidRenderData.GridDims;
 import de.devin.pipesnphysics.FluidRenderData.SurfacePlane;
@@ -91,8 +92,9 @@ public class FluidTankRendererMixin {
         FluidTankAccessor acc = (FluidTankAccessor) be;
         if (!be.isController() || !acc.pipesnphysics$isWindow()) return;
 
-        // Skip tanks on Create contraptions — they use a different rendering path
-        if (be.getLevel() instanceof ContraptionWorld) return;
+        // Skip tanks on Create contraptions (ContraptionWorld or any wrapped level) —
+        // they use a different rendering path and our tilted renderer doesn't apply.
+        if (be.getLevel() instanceof WrappedLevel) return;
 
         // --- Sable orientation ---
         // Try BlockEntity lookup first, fall back to position-based lookup.
