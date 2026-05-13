@@ -15,16 +15,21 @@ import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
 
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.handler.PhysicsConfigFactory;
+import de.devin.pipesnphysics.physics.PipeFormulas;
 import org.spongepowered.asm.mixin.Unique;
 
 import java.util.*;
 
 /**
- * Makes pump range gravity-aware using siphon physics:
- * - Horizontal pipes cost 1 range (unchanged)
- * - Downward pipes cost 0 range (gravity-assisted)
- * - Upward pipes below pump Y cost 0 range (siphon effect — U-pipe recovery)
- * - Upward pipes above pump Y cost 2 range (working against gravity)
+ * Gravity-aware pump pressure distribution.
+ * Uses {@link PipeFormulas} for physics computation while keeping Create's
+ * internal pipe graph structure for endpoint discovery.
+ *
+ * <p>Gravity assists downhill flow and penalizes uphill. Friction per segment
+ * scales with pipe elevation angle. Pressure at each reachable node =
+ * pumpBase + gravityAssist - friction.</p>
  */
 @Mixin(value = PumpBlockEntity.class, remap = false)
 public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
@@ -41,207 +46,162 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
     );
 
     @Unique
-    private static int create_pipes_n_physics$nextDistance(int current, Direction face, BlockPos connectedPos, int pumpY) {
-        if (face == Direction.DOWN) return current;
-        if (face == Direction.UP && connectedPos.getY() <= pumpY) return current;
-        if (face == Direction.UP) return current + PipesNPhysicsConfig.UPWARD_PIPE_COST.get();
-        return current + 1;
-    }
+    private final Map<BlockPos, Float> pipesnphysics$frictionMap = new HashMap<>();
+    @Unique
+    private final Map<BlockPos, Float> pipesnphysics$pressureMap = new HashMap<>();
 
     @Unique
-    private static boolean create_pipes_n_physics$hasReachedValidEndpoint(net.minecraft.world.level.LevelAccessor world, BlockFace face, boolean pull) {
+    private static boolean pipesnphysics$hasReachedValidEndpoint(net.minecraft.world.level.LevelAccessor world, BlockFace face) {
         BlockPos connectedPos = face.getConnectedPos();
         BlockState connectedState = world.getBlockState(connectedPos);
-        FluidTransportBehaviour pipe = FluidPropagator.getPipe(world, connectedPos);
-
-        if (pipe != null)
-            return false;
-
-        if (connectedState.getBlock() instanceof PumpBlock)
-            return false;
-
-        // Check for fluid handler capability
+        if (FluidPropagator.getPipe(world, connectedPos) != null) return false;
+        if (connectedState.getBlock() instanceof PumpBlock) return false;
         if (world instanceof net.minecraft.world.level.Level level) {
             var handler = level.getCapability(
                     net.neoforged.neoforge.capabilities.Capabilities.FluidHandler.BLOCK,
                     connectedPos, face.getFace().getOpposite());
-            if (handler != null)
-                return true;
+            if (handler != null) return true;
         }
-
-        // Open-ended pipe
         return FluidPropagator.isOpenEnd(world, face.getPos(), face.getFace());
     }
 
     /**
      * @author PipesNPhysics
-     * @reason Gravity-aware pump range: siphon physics for U-pipes
+     * @reason Gravity-aware pump range with angle-based friction
      */
     @Overwrite
     protected void distributePressureTo(Direction side) {
         PumpBlockEntity self = (PumpBlockEntity) (Object) this;
-
-        if (self.getSpeed() == 0)
-            return;
+        if (self.getSpeed() == 0) return;
 
         BlockPos worldPosition = self.getBlockPos();
-        int pumpY = worldPosition.getY();
+        PipeFormulas formulas = new PipeFormulas(PhysicsConfigFactory.fromModConfig());
+        float pumpBase = Math.abs(self.getSpeed());
+        double pumpWorldY = SableCompat.getWorldY(self.getLevel(), worldPosition);
+        pipesnphysics$frictionMap.clear();
+        pipesnphysics$pressureMap.clear();
 
         BlockFace start = new BlockFace(worldPosition, side);
-        // Inline isFront + isPullingOnSide (both are simple)
         BlockState pumpState = self.getBlockState();
         Direction front = pumpState.getBlock() instanceof PumpBlock
                 ? pumpState.getValue(PumpBlock.FACING) : side;
-        boolean isFront = side == front;
-        boolean pull = !isFront; // isPullingOnSide returns !front
+        boolean pull = side != front;
         Set<BlockFace> targets = new HashSet<>();
         Map<BlockPos, Pair<Integer, Map<Direction, Boolean>>> pipeGraph = new HashMap<>();
 
         if (!pull)
             FluidPropagator.resetAffectedFluidNetworks(self.getLevel(), worldPosition, side.getOpposite());
 
-        if (!create_pipes_n_physics$hasReachedValidEndpoint(self.getLevel(), start, pull)) {
-
+        if (!pipesnphysics$hasReachedValidEndpoint(self.getLevel(), start)) {
             pipeGraph.computeIfAbsent(worldPosition, $ -> Pair.of(0, new IdentityHashMap<>()))
-                    .getSecond()
-                    .put(side, pull);
+                    .getSecond().put(side, pull);
             pipeGraph.computeIfAbsent(start.getConnectedPos(), $ -> Pair.of(1, new IdentityHashMap<>()))
-                    .getSecond()
-                    .put(side.getOpposite(), !pull);
+                    .getSecond().put(side.getOpposite(), !pull);
 
             List<Pair<Integer, BlockPos>> frontier = new ArrayList<>();
             Set<BlockPos> visited = new HashSet<>();
-            int maxDistance = FluidPropagator.getPumpRange();
+            // Pressure is the real range limiter (accounts for siphons).
+            // Hop cap is just a safety limit to prevent infinite BFS.
+            int maxDistance = 256;
             frontier.add(Pair.of(1, start.getConnectedPos()));
 
-            while (!frontier.isEmpty()) {
-                Pair<Integer, BlockPos> entry = frontier.remove(0);
-                int distance = entry.getFirst();
-                BlockPos currentPos = entry.getSecond();
+            float startElevation = SableCompat.getPipeElevation(self.getLevel(), worldPosition, side);
+            pipesnphysics$frictionMap.put(start.getConnectedPos(), formulas.segmentFriction(startElevation));
 
-                if (!self.getLevel().isLoaded(currentPos))
-                    continue;
-                if (visited.contains(currentPos))
-                    continue;
+            while (!frontier.isEmpty()) {
+                Pair<Integer, BlockPos> frontierEntry = frontier.remove(0);
+                int distance = frontierEntry.getFirst();
+                BlockPos currentPos = frontierEntry.getSecond();
+                if (!self.getLevel().isLoaded(currentPos)) continue;
+                if (visited.contains(currentPos)) continue;
                 visited.add(currentPos);
+
                 BlockState currentState = self.getLevel().getBlockState(currentPos);
                 FluidTransportBehaviour pipe = FluidPropagator.getPipe(self.getLevel(), currentPos);
-                if (pipe == null)
-                    continue;
+                if (pipe == null) continue;
 
                 for (Direction face : FluidPropagator.getPipeConnections(currentState, pipe)) {
                     BlockFace blockFace = new BlockFace(currentPos, face);
                     BlockPos connectedPos = blockFace.getConnectedPos();
+                    if (!self.getLevel().isLoaded(connectedPos)) continue;
+                    if (blockFace.isEquivalent(start)) continue;
 
-                    if (!self.getLevel().isLoaded(connectedPos))
-                        continue;
-                    if (blockFace.isEquivalent(start))
-                        continue;
-                    if (create_pipes_n_physics$hasReachedValidEndpoint(self.getLevel(), blockFace, pull)) {
+                    if (pipesnphysics$hasReachedValidEndpoint(self.getLevel(), blockFace)) {
                         pipeGraph.computeIfAbsent(currentPos, $ -> Pair.of(distance, new IdentityHashMap<>()))
-                                .getSecond()
-                                .put(face, pull);
+                                .getSecond().put(face, pull);
                         targets.add(blockFace);
                         continue;
                     }
 
-                    FluidTransportBehaviour pipeBehaviour = FluidPropagator.getPipe(self.getLevel(), connectedPos);
-                    if (pipeBehaviour == null)
-                        continue;
-                    if (pipeBehaviour.getClass().getSimpleName().equals("PumpFluidTransferBehaviour"))
-                        continue;
-                    if (visited.contains(connectedPos))
-                        continue;
+                    FluidTransportBehaviour neighborPipe = FluidPropagator.getPipe(self.getLevel(), connectedPos);
+                    if (neighborPipe == null) continue;
+                    // String comparison: can't import PumpFluidTransferBehaviour (inner class of mixin target)
+                    if (neighborPipe.getClass().getSimpleName().equals("PumpFluidTransferBehaviour")) continue;
+                    if (visited.contains(connectedPos)) continue;
 
-                    int next = create_pipes_n_physics$nextDistance(distance, face, connectedPos, pumpY);
-                    if (next >= maxDistance) {
+                    float parentFric = pipesnphysics$frictionMap.getOrDefault(currentPos, 0f);
+                    float elevation = SableCompat.getPipeElevation(self.getLevel(), currentPos, face);
+                    float nextFric = parentFric + formulas.segmentFriction(elevation);
+
+                    double nodeY = SableCompat.getWorldY(self.getLevel(), connectedPos);
+                    float nodePressure = formulas.pumpPressure(pumpBase, pumpWorldY, nodeY, nextFric);
+
+                    int nextHopDistance = distance + 1;
+                    if (nodePressure <= 0 || nextHopDistance > maxDistance) {
                         pipeGraph.computeIfAbsent(currentPos, $ -> Pair.of(distance, new IdentityHashMap<>()))
-                                .getSecond()
-                                .put(face, pull);
+                                .getSecond().put(face, pull);
                         targets.add(blockFace);
                         continue;
                     }
 
+                    pipesnphysics$frictionMap.put(connectedPos, nextFric);
+                    pipesnphysics$pressureMap.put(connectedPos, nodePressure);
                     pipeGraph.computeIfAbsent(currentPos, $ -> Pair.of(distance, new IdentityHashMap<>()))
-                            .getSecond()
-                            .put(face, pull);
-                    pipeGraph.computeIfAbsent(connectedPos, $ -> Pair.of(next, new IdentityHashMap<>()))
-                            .getSecond()
-                            .put(face.getOpposite(), !pull);
-                    frontier.add(Pair.of(next, connectedPos));
+                            .getSecond().put(face, pull);
+                    pipeGraph.computeIfAbsent(connectedPos, $ -> Pair.of(nextHopDistance, new IdentityHashMap<>()))
+                            .getSecond().put(face.getOpposite(), !pull);
+                    frontier.add(Pair.of(nextHopDistance, connectedPos));
                 }
             }
         }
 
-        // DFS
+        // DFS to validate reachable endpoints
         Map<Integer, Set<BlockFace>> validFaces = new HashMap<>();
         searchForEndpointRecursively(pipeGraph, targets, validFaces,
                 new BlockFace(start.getPos(), start.getOppositeFace()), pull);
 
-        // Collect all valid faces and count exit faces per pipe
         Set<BlockFace> allValidFaces = new HashSet<>();
-        Map<BlockPos, Integer> exitCount = new HashMap<>();
-        Set<BlockPos> validPipes = new HashSet<>();
-
         for (Set<BlockFace> set : validFaces.values()) {
             for (BlockFace face : set) {
-                BlockPos pos = face.getPos();
-                if (pos.equals(worldPosition)) continue;
-                allValidFaces.add(face);
-                validPipes.add(pos);
-                // Exit faces point away from the pump (value == pull in the pipe graph)
-                if (pipeGraph.get(pos).getSecond().get(face.getFace()) == pull)
-                    exitCount.merge(pos, 1, Integer::sum);
+                if (!face.getPos().equals(worldPosition))
+                    allValidFaces.add(face);
             }
         }
 
-        // BFS from pump through valid pipes, propagating pressure splits
-        float pressure = Math.abs(self.getSpeed());
-        Map<BlockPos, Float> pipePressure = new LinkedHashMap<>();
-        Queue<BlockPos> pressureFrontier = new ArrayDeque<>();
-
-
-        
-        BlockPos firstPipe = start.getConnectedPos();
-        if (validPipes.contains(firstPipe)) {
-            pipePressure.put(firstPipe, pressure);
-            pressureFrontier.add(firstPipe);
-        }
-
-        while (!pressureFrontier.isEmpty()) {
-            BlockPos pos = pressureFrontier.poll();
-            float incoming = pipePressure.get(pos);
-            int exits = exitCount.getOrDefault(pos, 1);
-            float split = incoming / Math.max(1, exits);
-
-            // If this pipe branches, its own pressure becomes the split value
-            if (exits > 1)
-                pipePressure.put(pos, split);
-
-            // Propagate split pressure to downstream pipes via exit faces
-            for (Map.Entry<Direction, Boolean> e : pipeGraph.get(pos).getSecond().entrySet()) {
-                if (e.getValue() == pull) { // exit face
-                    BlockPos next = pos.relative(e.getKey());
-                    if (validPipes.contains(next) && !pipePressure.containsKey(next)) {
-                        pipePressure.put(next, split);
-                        pressureFrontier.add(next);
-                    }
-                }
+        // Find the bottleneck pipe (most friction) and its gravity assist
+        float maxFriction = 0;
+        float gravityAtWorst = 0;
+        for (BlockFace face : allValidFaces) {
+            float fric = pipesnphysics$frictionMap.getOrDefault(face.getPos(), 0f);
+            if (fric > maxFriction) {
+                maxFriction = fric;
+                float pressure = pipesnphysics$pressureMap.getOrDefault(face.getPos(), pumpBase);
+                gravityAtWorst = pressure - pumpBase + fric;
             }
         }
 
-        // Apply pressure to all valid faces
+        // Physics determines flow pressure: diminishing friction or vanilla-like
+        float flowPressure = formulas.bottleneckFlowPressure(pumpBase, maxFriction, gravityAtWorst);
+
+        // Apply uniform flow pressure to all reachable pipes (conservation of mass)
         for (BlockFace face : allValidFaces) {
             BlockPos pipePos = face.getPos();
             Direction pipeSide = face.getFace();
             boolean inbound = pipeGraph.get(pipePos).getSecond().get(pipeSide);
-            float p = pipePressure.getOrDefault(pipePos, pressure);
-
             FluidTransportBehaviour pipeBehaviour = FluidPropagator.getPipe(self.getLevel(), pipePos);
-            if (pipeBehaviour == null)
-                continue;
-
-            pipeBehaviour.addPressure(pipeSide, inbound, p);
+            if (pipeBehaviour != null) {
+                pipeBehaviour.addPressure(pipeSide, inbound, flowPressure);
+            }
         }
     }
 }

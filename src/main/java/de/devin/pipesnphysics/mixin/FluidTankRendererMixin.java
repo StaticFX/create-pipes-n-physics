@@ -6,10 +6,10 @@ import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.content.fluids.tank.FluidTankRenderer;
 import com.simibubi.create.content.contraptions.ContraptionWorld;
 import net.createmod.catnip.levelWrappers.WrappedLevel;
-import de.devin.pipesnphysics.FluidRenderData.FluidStyle;
-import de.devin.pipesnphysics.FluidRenderData.GridDims;
-import de.devin.pipesnphysics.FluidRenderData.SurfacePlane;
-import de.devin.pipesnphysics.FluidRenderData.TankBounds;
+import de.devin.pipesnphysics.client.FluidRenderData.FluidStyle;
+import de.devin.pipesnphysics.client.FluidRenderData.GridDims;
+import de.devin.pipesnphysics.client.FluidRenderData.SurfacePlane;
+import de.devin.pipesnphysics.client.FluidRenderData.TankBounds;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import dev.ryanhcode.sable.companion.ClientSubLevelAccess;
 import dev.ryanhcode.sable.companion.SableCompanion;
@@ -159,7 +159,10 @@ public class FluidTankRendererMixin {
         float[] dist = pipesnphysics$computeCornerDistances(corners, localUp, cx, cy, cz);
         int dominant = pipesnphysics$dominantAxis(nxf, nyf, nzf);
         int axis1 = (dominant + 1) % 3, axis2 = (dominant + 2) % 3;
-        float planeOffset = pipesnphysics$findVolumeCorrectOffset(dist, clampedLevel / totalHeight,
+        // Clamp fill fraction slightly away from 0 and 1 so the surface plane
+        // never sits exactly on a box face (which produces degenerate intersections).
+        float fillFraction = Mth.clamp(clampedLevel / totalHeight, 0.01f, 0.99f);
+        float planeOffset = pipesnphysics$findVolumeCorrectOffset(dist, fillFraction,
                 dominant, axis1, axis2);
         for (int i = 0; i < 8; i++) dist[i] -= planeOffset;
 

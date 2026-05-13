@@ -7,6 +7,9 @@ import com.simibubi.create.foundation.item.TooltipModifier;
 import net.createmod.catnip.lang.FontHelper;
 import net.minecraft.resources.ResourceLocation;
 import de.devin.pipesnphysics.client.PumpRangeRenderer;
+import de.devin.pipesnphysics.handler.DebugGraphCommand;
+import de.devin.pipesnphysics.handler.GravityFlowHandler;
+import de.devin.pipesnphysics.handler.PipeSwapHandler;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
@@ -15,6 +18,8 @@ import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.RegisterGameTestsEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -36,9 +41,13 @@ public class PipesNPhysics {
 
         modBus.addListener(this::onCommonSetup);
         modBus.addListener(this::onClientSetup);
+        modBus.addListener(RegisterGameTestsEvent.class, event ->
+                event.register(PipesNPhysicsGameTests.class));
 
         NeoForge.EVENT_BUS.register(GravityFlowHandler.class);
         NeoForge.EVENT_BUS.register(PipeSwapHandler.class);
+        NeoForge.EVENT_BUS.addListener((RegisterCommandsEvent event) ->
+                DebugGraphCommand.register(event.getDispatcher()));
 
         if (FMLEnvironment.dist.isClient()) {
             NeoForge.EVENT_BUS.register(PumpRangeRenderer.class);
