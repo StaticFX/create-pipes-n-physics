@@ -1,4 +1,4 @@
-package de.devin.pipesnphysics;
+package de.devin.pipesnphysics.handler;
 
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;

@@ -13,6 +13,14 @@ import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import com.simibubi.create.foundation.utility.CreateLang;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.handler.PhysicsConfigFactory;
+import de.devin.pipesnphysics.handler.PipeGraphBuilder;
+import de.devin.pipesnphysics.physics.NetworkSolver;
+import de.devin.pipesnphysics.physics.PhysicsConfig;
+import de.devin.pipesnphysics.physics.PipeFormulas;
+import de.devin.pipesnphysics.physics.PipeGraph;
+import de.devin.pipesnphysics.physics.PressureBreakdown;
 import net.createmod.catnip.lang.LangBuilder;
 import net.createmod.catnip.lang.LangNumberFormat;
 import net.minecraft.ChatFormatting;
@@ -23,6 +31,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 
 import java.util.*;
 
@@ -32,6 +41,8 @@ import java.util.*;
  */
 @Mixin(value = {FluidPipeBlockEntity.class, StraightPipeBlockEntity.class, SmartFluidPipeBlockEntity.class}, remap = false)
 public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IHaveGoggleInformation {
+
+    private static final float MIN_DIVISOR = 0.001f;
 
     private PipeGoggleInfoMixin() {
         super(null, null, null);
@@ -60,7 +71,7 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
 
         List<Direction> pulling = new ArrayList<>();
         List<Direction> pushing = new ArrayList<>();
-        net.neoforged.neoforge.fluids.FluidStack fluid = null;
+        net.neoforged.neoforge.fluids.FluidStack fluid = null; // FQCN: avoid mixin classloading issues
         float inboundPressure = 0;
 
         for (Direction side : Direction.values()) {
@@ -97,27 +108,22 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                 .text(ChatFormatting.WHITE, fluid.getHoverName().getString())
                 .forGoggles(tooltip, 1);
 
-        int transferRate = Math.max(1, Math.round(inboundPressure / 2f));
+        float transferRate = inboundPressure / 2f; // Create: flow rate = pressure / 2
 
         langTranslate("gui.goggles.flow")
                 .style(ChatFormatting.GRAY)
                 .forGoggles(tooltip);
 
         lang()
-                .add(langNumber(transferRate)
-                        .add(CreateLang.translate("generic.unit.millibuckets"))
-                        .style(ChatFormatting.GOLD))
+                .add(lang().text(ChatFormatting.GOLD, String.format("%.1f", transferRate))
+                        .add(CreateLang.translate("generic.unit.millibuckets")))
                 .add(langTranslate("gui.goggles.per_tick")
                         .style(ChatFormatting.DARK_GRAY))
                 .forGoggles(tooltip, 1);
 
         // Flow direction — only show when NOT on a Sable sub-level
         // (cardinal directions don't make sense when the structure is rotated)
-        boolean onSubLevel = false;
-        try {
-            onSubLevel = dev.ryanhcode.sable.companion.SableCompanion.INSTANCE
-                    .getContainingClient(getBlockPos()) != null;
-        } catch (Exception ignored) {}
+        boolean onSubLevel = SableCompat.isOnSubLevelClient(getBlockPos());
 
         if (!onSubLevel && !pulling.isEmpty() && !pushing.isEmpty()) {
             langTranslate("gui.goggles.direction")
@@ -129,72 +135,121 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                     .forGoggles(tooltip, 1);
         }
 
-        // Remaining pump range or gravity indicator
+        // Flow source indicator + remaining range
         int remainingRange = computeRemainingRange();
-        if (remainingRange >= 0) {
-            langTranslate("gui.goggles.pressure_left")
-                    .style(ChatFormatting.GRAY)
-                    .forGoggles(tooltip);
+        boolean isPumpDriven = remainingRange >= 0;
+        boolean isGravityDriven = !isPumpDriven && inboundPressure > 0;
 
+        if (isPumpDriven) {
+            // Pump-driven: flow rate is uniform (RPM / 2), reach varies per pipe
             lang()
-                    .add(langNumber(remainingRange)
-                            .style(ChatFormatting.WHITE))
-                    .add(langTranslate("gui.goggles.blocks")
-                            .style(ChatFormatting.DARK_GRAY))
+                    .text(ChatFormatting.GREEN, "\u26A1 ")
+                    .add(langTranslate("gui.goggles.pump_driven")
+                            .style(ChatFormatting.GREEN))
                     .forGoggles(tooltip, 1);
-        } else if (inboundPressure > 0) {
-            // Gravity flow — compute pipe's elevation angle relative to horizontal
-            float angle = 0;
-            Direction pipeDir = !pulling.isEmpty() ? pulling.get(0) : (!pushing.isEmpty() ? pushing.get(0) : null);
-            if (pipeDir != null) {
-                try {
-                    dev.ryanhcode.sable.companion.ClientSubLevelAccess sub =
-                            dev.ryanhcode.sable.companion.SableCompanion.INSTANCE.getContainingClient(getBlockPos());
-                    if (sub != null) {
-                        dev.ryanhcode.sable.companion.math.Pose3dc pose = sub.renderPose();
-                        if (pose != null) {
-                            org.joml.Vector3d worldDir = pose.transformNormal(
-                                    new org.joml.Vector3d(pipeDir.getStepX(), pipeDir.getStepY(), pipeDir.getStepZ()),
-                                    new org.joml.Vector3d());
-                            double len = Math.sqrt(worldDir.x*worldDir.x + worldDir.y*worldDir.y + worldDir.z*worldDir.z);
-                            if (len > 0.001) {
-                                angle = (float) Math.toDegrees(Math.asin(
-                                        Math.min(1, Math.max(-1, Math.abs(worldDir.y) / len))));
-                            }
-                        }
-                    } else {
-                        angle = (float) Math.toDegrees(Math.asin(Math.abs(pipeDir.getStepY())));
-                    }
-                } catch (Exception ignored) {}
-            }
 
+            de.devin.pipesnphysics.physics.PumpPressureBreakdown pumpBreakdown = computePumpBreakdown();
+            if (PipesNPhysicsConfig.COMPLEX_TOOLTIPS.get() && pumpBreakdown != null) {
+                float frictionPB = PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue();
+
+                langTranslate("gui.goggles.reach")
+                        .style(ChatFormatting.GRAY)
+                        .forGoggles(tooltip);
+
+                langTranslate("gui.goggles.friction")
+                        .style(ChatFormatting.GRAY)
+                        .add(lang().text(ChatFormatting.RED,
+                                " -" + String.format("%.1f", pumpBreakdown.friction())))
+                        .forGoggles(tooltip, 1);
+
+                float gravAssist = pumpBreakdown.gravityAssist();
+                if (Math.abs(gravAssist) > 0.1f) {
+                    ChatFormatting gravColor = gravAssist >= 0 ? ChatFormatting.GREEN : ChatFormatting.RED;
+                    String gravSign = gravAssist >= 0 ? " +" : " ";
+                    langTranslate("gui.goggles.gravity_assist")
+                            .style(ChatFormatting.GRAY)
+                            .add(lang().text(gravColor, gravSign + String.format("%.1f", gravAssist)))
+                            .forGoggles(tooltip, 1);
+                }
+
+                int remainingBlocks = frictionPB > MIN_DIVISOR
+                        ? (int) (pumpBreakdown.net() / frictionPB) : 999;
+                langTranslate("gui.goggles.remaining")
+                        .style(ChatFormatting.GRAY)
+                        .add(lang().text(ChatFormatting.WHITE,
+                                " " + remainingBlocks))
+                        .add(langTranslate("gui.goggles.more_blocks")
+                                .style(ChatFormatting.DARK_GRAY))
+                        .forGoggles(tooltip, 1);
+            }
+        } else if (isGravityDriven) {
+            // Gravity-driven: flow rate comes from sink pressure, reach varies
             lang()
                     .text(ChatFormatting.BLUE, "\u2193 ")
                     .add(langTranslate("gui.goggles.gravity_driven")
                             .style(ChatFormatting.BLUE))
                     .forGoggles(tooltip, 1);
 
-            // Show remaining range, capped at maxGravityRange
-            float friction = PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue();
+            float frictionPB = PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue();
             int maxRange = PipesNPhysicsConfig.MAX_GRAVITY_RANGE.get();
-            int remainingGravityRange = friction > 0.001f
-                    ? Math.min((int) (inboundPressure / friction), maxRange) : maxRange;
+            PressureBreakdown breakdown = computeGravityBreakdown();
 
-            langTranslate("gui.goggles.pressure_left")
+            if (PipesNPhysicsConfig.COMPLEX_TOOLTIPS.get() && breakdown != null) {
+                float gravPB = PipesNPhysicsConfig.GRAVITY_PRESSURE_PER_BLOCK.get().floatValue();
+                int headBlocks = gravPB > MIN_DIVISOR ? Math.round(breakdown.head() / gravPB) : 0;
+
+                langTranslate("gui.goggles.head")
+                        .style(ChatFormatting.GRAY)
+                        .add(lang().text(ChatFormatting.GREEN,
+                                " +" + String.format("%.1f", breakdown.head())))
+                        .add(lang().text(ChatFormatting.DARK_GRAY,
+                                " (" + headBlocks + " blk \u00d7 " + String.format("%.1f", gravPB) + ")"))
+                        .forGoggles(tooltip, 1);
+
+                int fricSegs = frictionPB > MIN_DIVISOR ? Math.round(breakdown.friction() / frictionPB) : 0;
+                langTranslate("gui.goggles.friction")
+                        .style(ChatFormatting.GRAY)
+                        .add(lang().text(ChatFormatting.RED,
+                                " -" + String.format("%.1f", breakdown.friction())))
+                        .add(lang().text(ChatFormatting.DARK_GRAY,
+                                " (" + fricSegs + " seg \u00d7 " + String.format("%.1f", frictionPB) + ")"))
+                        .forGoggles(tooltip, 1);
+
+                langTranslate("gui.goggles.net")
+                        .style(ChatFormatting.GRAY)
+                        .add(lang().text(ChatFormatting.GOLD,
+                                " " + String.format("%.1f", breakdown.net())))
+                        .add(lang().text(ChatFormatting.DARK_GRAY,
+                                " \u2192 " + String.format("%.1f", breakdown.net() / 2f) + " mB/t"))
+                        .forGoggles(tooltip, 1);
+                if (breakdown.capped()) {
+                    lang().text(ChatFormatting.DARK_GRAY,
+                                    "  (capped at " + String.format("%.0f", PipesNPhysicsConfig.MAX_GRAVITY_PRESSURE.get()) + ")")
+                            .forGoggles(tooltip, 1);
+                }
+            }
+
+            float localPressure = breakdown != null ? breakdown.net() : inboundPressure;
+            int gravRange = frictionPB > MIN_DIVISOR
+                    ? Math.min(Math.round(localPressure / frictionPB), maxRange) : maxRange;
+            langTranslate("gui.goggles.remaining")
                     .style(ChatFormatting.GRAY)
-                    .forGoggles(tooltip);
-
-            lang()
-                    .add(langNumber(remainingGravityRange)
-                            .style(ChatFormatting.WHITE))
-                    .add(langTranslate("gui.goggles.blocks")
+                    .add(lang().text(ChatFormatting.WHITE,
+                            " " + gravRange))
+                    .add(langTranslate("gui.goggles.more_blocks")
                             .style(ChatFormatting.DARK_GRAY))
                     .forGoggles(tooltip, 1);
+        }
 
-            if (onSubLevel && angle > 0.5f) {
-                lang()
-                        .text(ChatFormatting.DARK_GRAY, "  " + String.format("%.1f", angle) + "\u00B0")
-                        .forGoggles(tooltip, 1);
+        // Show pipe elevation angle on Sable sub-levels (both pump and gravity)
+        if ((isPumpDriven || isGravityDriven) && onSubLevel) {
+            Direction pipeDir = !pulling.isEmpty() ? pulling.get(0) : (!pushing.isEmpty() ? pushing.get(0) : null);
+            if (pipeDir != null) {
+                float angle = SableCompat.getClientPipeElevation(getBlockPos(), pipeDir);
+                if (angle > 0.5f) {
+                    lang().text(ChatFormatting.DARK_GRAY, "  " + String.format("%.1f", angle) + "\u00B0")
+                            .forGoggles(tooltip, 1);
+                }
             }
         }
 
@@ -202,17 +257,38 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
     }
 
     /**
-     * BFS from this pipe to find a connected pump, then BFS from the pump
-     * with gravity-aware distances to compute how much range this pipe uses.
-     * Returns remaining range, or -1 if no pump found.
+     * BFS to find the gravity source, then compute head/friction/net at this pipe.
+     * Returns null if this pipe isn't part of a gravity-driven network.
+     */
+    private PressureBreakdown computeGravityBreakdown() {
+        Level level = getLevel();
+        if (level == null) return null;
+
+        BlockPos thisPos = getBlockPos();
+        PipeGraph graph = PipeGraphBuilder.discover(level, thisPos);
+        PhysicsConfig config = PhysicsConfigFactory.fromModConfig();
+        PipeFormulas formulas = new PipeFormulas(config);
+        NetworkSolver solver = new NetworkSolver(formulas);
+        return solver.computeBreakdownAt(graph, PipeGraphBuilder.nodeOf(thisPos));
+    }
+
+    /** Cached pump breakdown from the last computeRemainingRange call. */
+    @Unique
+    private de.devin.pipesnphysics.physics.PumpPressureBreakdown pipesnphysics$lastPumpBreakdown;
+
+    /**
+     * BFS from this pipe to find a connected pump, then compute remaining range
+     * and pressure breakdown. Returns remaining range, or -1 if no pump found.
      */
     private int computeRemainingRange() {
+        pipesnphysics$lastPumpBreakdown = null;
         Level level = getLevel();
         if (level == null) return -1;
 
         BlockPos thisPos = getBlockPos();
+        PipeFormulas formulas = new PipeFormulas(PhysicsConfigFactory.fromModConfig());
 
-        // BFS from this pipe to find a connected pump
+        // BFS to find connected active pump
         Set<BlockPos> visited = new HashSet<>();
         Queue<BlockPos> queue = new ArrayDeque<>();
         queue.add(thisPos);
@@ -220,78 +296,79 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
 
         while (!queue.isEmpty() && pumpPos == null) {
             BlockPos current = queue.poll();
-            if (!visited.add(current))
-                continue;
-
+            if (!visited.add(current)) continue;
             FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, current);
             if (pipe == null) continue;
-
             BlockState state = level.getBlockState(current);
             for (Direction face : FluidPropagator.getPipeConnections(state, pipe)) {
                 BlockPos neighbor = current.relative(face);
                 if (visited.contains(neighbor)) continue;
                 if (level.getBlockState(neighbor).getBlock() instanceof PumpBlock) {
-                    // Only consider active pumps (speed != 0)
                     BlockEntity be = level.getBlockEntity(neighbor);
                     if (be instanceof KineticBlockEntity kbe && kbe.getSpeed() != 0) {
                         pumpPos = neighbor;
                         break;
                     }
                 }
-                if (FluidPropagator.getPipe(level, neighbor) != null)
-                    queue.add(neighbor);
+                if (FluidPropagator.getPipe(level, neighbor) != null) queue.add(neighbor);
             }
         }
-
         if (pumpPos == null) return -1;
 
-        // BFS from pump with gravity-aware distances
-        int pumpY = pumpPos.getY();
-        int upCost = PipesNPhysicsConfig.UPWARD_PIPE_COST.get();
-        int maxRange = FluidPropagator.getPumpRange();
+        float pumpBase = 0;
+        BlockEntity pumpBe = level.getBlockEntity(pumpPos);
+        if (pumpBe instanceof KineticBlockEntity kbe) pumpBase = Math.abs(kbe.getSpeed());
+        double pumpWorldY = SableCompat.getWorldY(level, pumpPos);
 
-        Map<BlockPos, Integer> distanceMap = new HashMap<>();
-        Queue<int[]> frontier = new ArrayDeque<>();
-        Set<BlockPos> distVisited = new HashSet<>();
-        distVisited.add(pumpPos);
+        // BFS from pump accumulating friction
+        Map<BlockPos, Float> frictionMap = new HashMap<>();
+        Queue<BlockPos> bfs = new ArrayDeque<>();
+        Set<BlockPos> bfsVisited = new HashSet<>();
+        bfsVisited.add(pumpPos);
 
         for (Direction side : Direction.values()) {
             BlockPos start = pumpPos.relative(side);
-            if (FluidPropagator.getPipe(level, start) != null)
-                frontier.add(new int[]{1, start.getX(), start.getY(), start.getZ()});
-        }
-
-        while (!frontier.isEmpty()) {
-            int[] entry = frontier.poll();
-            int distance = entry[0];
-            BlockPos current = new BlockPos(entry[1], entry[2], entry[3]);
-            if (!distVisited.add(current)) continue;
-
-            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, current);
-            if (pipe == null) continue;
-
-            distanceMap.put(current, distance);
-            if (current.equals(thisPos)) break;
-
-            BlockState currentState = level.getBlockState(current);
-            for (Direction face : FluidPropagator.getPipeConnections(currentState, pipe)) {
-                BlockPos next = current.relative(face);
-                if (distVisited.contains(next)) continue;
-                if (FluidPropagator.getPipe(level, next) == null) continue;
-
-                int nextDist;
-                if (face == Direction.DOWN) nextDist = distance;
-                else if (face == Direction.UP && next.getY() <= pumpY) nextDist = distance;
-                else if (face == Direction.UP) nextDist = distance + upCost;
-                else nextDist = distance + 1;
-
-                frontier.add(new int[]{nextDist, next.getX(), next.getY(), next.getZ()});
+            if (FluidPropagator.getPipe(level, start) != null) {
+                float elevation = SableCompat.getPipeElevation(level, pumpPos, side);
+                frictionMap.put(start, formulas.segmentFriction(elevation));
+                bfs.add(start);
             }
         }
 
-        int used = distanceMap.getOrDefault(thisPos, -1);
-        if (used < 0) return -1;
-        return maxRange - used;
+        while (!bfs.isEmpty()) {
+            BlockPos current = bfs.poll();
+            if (!bfsVisited.add(current)) continue;
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, current);
+            if (pipe == null) continue;
+            if (current.equals(thisPos)) break;
+            BlockState currentState = level.getBlockState(current);
+            for (Direction face : FluidPropagator.getPipeConnections(currentState, pipe)) {
+                BlockPos next = current.relative(face);
+                if (bfsVisited.contains(next) || FluidPropagator.getPipe(level, next) == null) continue;
+                float elevation = SableCompat.getPipeElevation(level, current, face);
+                frictionMap.put(next, frictionMap.getOrDefault(current, 0f) + formulas.segmentFriction(elevation));
+                bfs.add(next);
+            }
+        }
+
+        float friction = frictionMap.getOrDefault(thisPos, -1f);
+        if (friction < 0) return -1;
+
+        double nodeY = SableCompat.getWorldY(level, thisPos);
+        float gravityAssist = formulas.config().pumpGravityEnabled()
+                ? (float) (pumpWorldY - nodeY) * formulas.config().gravityPerBlock() * formulas.config().pumpGravityFactor()
+                : 0;
+        float netPressure = formulas.pumpPressure(pumpBase, pumpWorldY, nodeY, friction);
+
+        pipesnphysics$lastPumpBreakdown = new de.devin.pipesnphysics.physics.PumpPressureBreakdown(
+                pumpBase, gravityAssist, friction, netPressure);
+
+        float frictionPerBlock = formulas.config().frictionPerBlock();
+        return frictionPerBlock > MIN_DIVISOR ? (int) (netPressure / frictionPerBlock) : 999;
+    }
+
+    private de.devin.pipesnphysics.physics.PumpPressureBreakdown computePumpBreakdown() {
+        return pipesnphysics$lastPumpBreakdown;
     }
 
     private static String formatDirs(List<Direction> dirs) {

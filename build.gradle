@@ -88,12 +88,11 @@ dependencies {
     runtimeOnly("dev.engine-room.flywheel:flywheel-neoforge-${minecraft_version}:${flywheel_version}")
     implementation("com.tterrag.registrate:Registrate:${registrate_version}")
 
-    // Sable Companion (optional — sub-level physics compat)
-    jarJar(api("dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:[${sable_companion_version},)")) {
-        version {
-            prefer sable_companion_version
-        }
-    }
+    // Sable Companion (optional — sub-level physics compat; only used at compile time)
+    compileOnly("dev.ryanhcode.sable-companion:sable-companion-common-${minecraft_version}:${sable_companion_version}")
+
+    // Sable full (optional — dynamic tank mass; only used at compile time)
+    compileOnly("dev.ryanhcode.sable:sable-common-${minecraft_version}:${sable_version}")
 
     // JEI (optional — for recipe integration)
     compileOnly "mezz.jei:jei-${minecraft_version}-common-api:${jei_version}"

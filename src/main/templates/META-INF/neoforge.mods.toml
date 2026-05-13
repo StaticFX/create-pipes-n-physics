@@ -12,6 +12,9 @@ description = '''${mod_description}'''
 [[mixins]]
 config = "${mod_id}.mixins.json"
 
+[[mixins]]
+config = "${mod_id}.sable.mixins.json"
+
 [[dependencies.${mod_id}]]
 modId = "neoforge"
 type = "required"
@@ -30,5 +33,19 @@ side = "BOTH"
 modId = "create"
 type = "required"
 versionRange = "[6.0.9,6.1.0)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.${mod_id}]]
+modId = "sable-companion"
+type = "optional"
+versionRange = "[1.6.0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.${mod_id}]]
+modId = "sable"
+type = "optional"
+versionRange = "[1.2.0,)"
 ordering = "AFTER"
 side = "BOTH"

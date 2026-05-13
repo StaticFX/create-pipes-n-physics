@@ -1,14 +1,15 @@
 {
-  "required": true,
+  "required": false,
   "minVersion": "0.8",
   "package": "de.devin.pipesnphysics.mixin",
   "compatibilityLevel": "JAVA_21",
   "refmap": "pipesnphysics.refmap.json",
+  "plugin": "de.devin.pipesnphysics.mixin.SableMixinPlugin",
   "mixins": [
-    "PumpBlockEntityMixin",
-    "PipeGoggleInfoMixin",
-    "GravityFlowMixin",
-    "FluidTankAccessor"
+    "FluidTankMassMixin"
+  ],
+  "client": [
+    "FluidTankRendererMixin"
   ],
   "injectors": {
     "defaultRequire": 1
