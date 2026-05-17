@@ -51,11 +51,27 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
     private final Map<BlockPos, Float> pipesnphysics$pressureMap = new HashMap<>();
 
     @Unique
-    private static boolean pipesnphysics$hasReachedValidEndpoint(net.minecraft.world.level.LevelAccessor world, BlockFace face) {
+    private static boolean pipesnphysics$hasReachedValidEndpoint(net.minecraft.world.level.LevelAccessor world, BlockFace face, boolean pull) {
         BlockPos connectedPos = face.getConnectedPos();
         BlockState connectedState = world.getBlockState(connectedPos);
+
+        // Pump-to-pump: valid endpoint if the other pump cooperates
+        // (one pushes into the other's pull side on the same axis)
+        if (PumpBlock.isPump(connectedState)) {
+            Direction connFace = face.getFace();
+            if (connectedState.getValue(PumpBlock.FACING).getAxis() == connFace.getAxis()) {
+                var be = world.getBlockEntity(connectedPos);
+                if (be instanceof PumpBlockEntity otherPump) {
+                    Direction otherFacing = connectedState.getValue(PumpBlock.FACING);
+                    boolean isFront = face.getOppositeFace() == otherFacing;
+                    boolean otherPulling = otherPump.isPullingOnSide(isFront);
+                    return otherPulling != pull;
+                }
+            }
+            return false;
+        }
+
         if (FluidPropagator.getPipe(world, connectedPos) != null) return false;
-        if (connectedState.getBlock() instanceof PumpBlock) return false;
         if (world instanceof net.minecraft.world.level.Level level) {
             var handler = level.getCapability(
                     net.neoforged.neoforge.capabilities.Capabilities.FluidHandler.BLOCK,
@@ -92,7 +108,7 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
         if (!pull)
             FluidPropagator.resetAffectedFluidNetworks(self.getLevel(), worldPosition, side.getOpposite());
 
-        if (!pipesnphysics$hasReachedValidEndpoint(self.getLevel(), start)) {
+        if (!pipesnphysics$hasReachedValidEndpoint(self.getLevel(), start, pull)) {
             pipeGraph.computeIfAbsent(worldPosition, $ -> Pair.of(0, new IdentityHashMap<>()))
                     .getSecond().put(side, pull);
             pipeGraph.computeIfAbsent(start.getConnectedPos(), $ -> Pair.of(1, new IdentityHashMap<>()))
@@ -126,7 +142,7 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
                     if (!self.getLevel().isLoaded(connectedPos)) continue;
                     if (blockFace.isEquivalent(start)) continue;
 
-                    if (pipesnphysics$hasReachedValidEndpoint(self.getLevel(), blockFace)) {
+                    if (pipesnphysics$hasReachedValidEndpoint(self.getLevel(), blockFace, pull)) {
                         pipeGraph.computeIfAbsent(currentPos, $ -> Pair.of(distance, new IdentityHashMap<>()))
                                 .getSecond().put(face, pull);
                         targets.add(blockFace);
@@ -190,10 +206,12 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
             }
         }
 
-        // Physics determines flow pressure: diminishing friction or vanilla-like
-        float flowPressure = formulas.bottleneckFlowPressure(pumpBase, maxFriction, gravityAtWorst);
+        // Pull side: use vanilla pumpBase so we don't interfere with other pumps
+        // Push side: use bottleneck pressure (friction reduces flow)
+        float flowPressure = pull
+                ? pumpBase
+                : formulas.bottleneckFlowPressure(pumpBase, maxFriction, gravityAtWorst);
 
-        // Apply uniform flow pressure to all reachable pipes (conservation of mass)
         for (BlockFace face : allValidFaces) {
             BlockPos pipePos = face.getPos();
             Direction pipeSide = face.getFace();
