@@ -591,6 +591,25 @@ public class PipesNPhysicsGameTests {
         }
     }
 
+    /**
+     * Two pumps in series pushing the same direction.
+     * Uses pre-built double_pump.nbt with creative motors already connected.
+     */
+    @GameTest(template = "double_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1200)
+    public static void twoPumpsInSeries(GameTestHelper helper) {
+        BlockPos destTank = new BlockPos(0, 1, 0);
+
+        helper.succeedWhen(() -> {
+            BlockPos abs = helper.absolutePos(destTank);
+            var handler = helper.getLevel().getCapability(Capabilities.FluidHandler.BLOCK, abs, null);
+            if (handler == null) { helper.fail("No fluid handler at dest tank"); return; }
+            for (int i = 0; i < handler.getTanks(); i++) {
+                if (!handler.getFluidInTank(i).isEmpty()) return;
+            }
+            helper.fail("Dest tank has no fluid — two pumps in series failed to transfer");
+        });
+    }
+
     private static void assertClose(GameTestHelper helper, String label, float expected, float actual) {
         if (Math.abs(expected - actual) > 0.01f) {
             helper.fail(label + ": expected " + expected + " but got " + actual);

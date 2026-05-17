@@ -65,5 +65,7 @@ public class PipesNPhysics {
 
     private void onClientSetup(FMLClientSetupEvent event) {
         LOGGER.info("Client setup...");
+        net.createmod.ponder.foundation.PonderIndex.addPlugin(
+                new de.devin.pipesnphysics.client.ponder.PipesNPhysicsPonderPlugin());
     }
 }
