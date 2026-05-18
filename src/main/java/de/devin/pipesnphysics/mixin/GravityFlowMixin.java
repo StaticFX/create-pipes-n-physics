@@ -50,9 +50,8 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
         Level level = blockEntity.getLevel();
         if (level == null || level.isClientSide()) return;
 
-        // Stagger checks across ticks (configurable rate)
         int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
-        if (level.getGameTime() % recheckTicks != (blockEntity.getBlockPos().hashCode() & 0x7FFFFFFF) % recheckTicks) return;
+        if (level.getGameTime() % recheckTicks != 0) return;
 
         // For pipes on sub-levels: check if rotation changed (stale gravity data).
         // Must run even with 0 pressure — rotation can CREATE a height difference that enables flow.

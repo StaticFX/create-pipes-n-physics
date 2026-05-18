@@ -22,6 +22,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.IntValue MAX_GRAVITY_RANGE;
     public static final ModConfigSpec.BooleanValue FRICTION_AFFECTS_FLOW;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
+    public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
     public static final ModConfigSpec.DoubleValue FLUID_MASS_PER_BUCKET;
 
     // Client
@@ -118,6 +119,12 @@ public class PipesNPhysicsConfig {
                         "At 0.1, a full single tank adds 0.8 kg (nearly doubling a 1-block tank's weight).",
                         "At 1.0, a full single tank adds 8 kg (9x heavier — very aggressive).")
                 .defineInRange("fluidMassPerBucket", 0.1, 0.001, 100.0);
+        EXPERIMENTAL_TANK_COG = server
+                .comment("EXPERIMENTAL: Shift center of gravity based on fluid fill level.",
+                        "When enabled, fluid mass is added to Sable's mass tracker, affecting",
+                        "center of mass and rotational inertia. May cause instability.",
+                        "When disabled, fluid weight is applied as a simple downward force.")
+                .define("experimentalTankCenterOfGravity", false);
         server.pop();
 
         SERVER_SPEC = server.build();
