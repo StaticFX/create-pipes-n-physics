@@ -36,8 +36,8 @@ public class GravityFlowHandler {
     private record ScheduledCheck(Level level, BlockPos pos) {
         @Override public boolean equals(Object o) {
             if (this == o) return true;
-            if (!(o instanceof ScheduledCheck sc)) return false;
-            return pos.equals(sc.pos) && level == sc.level;
+            if (!(o instanceof ScheduledCheck(Level level1, BlockPos pos1))) return false;
+            return pos.equals(pos1) && level == level1;
         }
         @Override public int hashCode() { return pos.hashCode(); }
     }

@@ -1,72 +1,101 @@
 package de.devin.pipesnphysics.compat;
 
-import dev.ryanhcode.sable.api.physics.PhysicsPipeline;
-import dev.ryanhcode.sable.api.physics.mass.MassData;
+import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import dev.ryanhcode.sable.api.physics.mass.MassTracker;
 import dev.ryanhcode.sable.companion.math.Pose3dc;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3d;
-import org.joml.Vector3dc;
+
+import java.util.HashMap;
+import java.util.Map;
 
 /**
- * Bridge to Sable's full physics API for dynamic tank mass.
- * This class is ONLY loaded when Sable (full) is present at runtime —
- * the mixin plugin prevents the calling mixin from being applied otherwise.
- * Do NOT reference this class from any code path that runs without Sable.
+ * Applies fluid weight to Sable sub-levels.
+ * Two modes: force-only (stable) or mass tracker (experimental, shifts center of gravity).
  */
 public class SablePhysicsCompat {
 
-    /**
-     * Apply a gravitational impulse representing the weight of fluid in a tank.
-     * Applies a downward linear impulse plus angular impulse (torque) when the
-     * fluid center of mass is offset from the sub-level's center of mass.
-     *
-     * @param subLevel     the sub-level containing the tank
-     * @param controllerPos the controller block's local position
-     * @param width        tank width in blocks (tanks are width × width square)
-     * @param height       tank height in blocks
-     * @param fillFraction 0.0–1.0 how full the tank is
-     * @param massKg       total fluid mass in kilograms
-     * @param timeStep     physics timestep in seconds
-     */
+    private static final Map<String, Double> lastAppliedMass = new HashMap<>();
+
     public static void applyFluidWeight(ServerSubLevel subLevel, BlockPos controllerPos,
                                         int width, int height, double fillFraction,
                                         double massKg, double timeStep) {
+        if (massKg <= 0) return;
+
+        if (PipesNPhysicsConfig.EXPERIMENTAL_TANK_COG.get()) {
+            applyViaMassTracker(subLevel, controllerPos, width, height, fillFraction, massKg);
+        } else {
+            applyViaForce(subLevel, massKg);
+        }
+    }
+
+    private static void applyViaForce(ServerSubLevel subLevel, double massKg) {
         SubLevelPhysicsSystem system = SubLevelPhysicsSystem.get(subLevel.getLevel());
         if (system == null) return;
-
-        PhysicsPipeline pipeline = system.getPipeline();
+        var pipeline = system.getPipeline();
         if (pipeline == null) return;
 
-        // Linear impulse: weight = mass × g, impulse = force × dt
-        Vector3d linearImpulse = new Vector3d(0, -massKg * 9.81 * timeStep, 0);
+        Vector3d force = new Vector3d(0, -massKg, 0);
+        pipeline.applyLinearAndAngularImpulse(subLevel, force, new Vector3d(0, 0, 0), true);
+    }
 
-        // Compute torque from off-center fluid mass.
-        // r × F where r = fluidCenter - structureCenterOfMass (in world space).
-        Vector3d angularImpulse = new Vector3d(0, 0, 0);
+    private static final Map<String, Vec3> lastAppliedOffset = new HashMap<>();
 
-        MassData massData = subLevel.getMassTracker();
-        Vector3dc com = massData != null ? massData.getCenterOfMass() : null;
-        if (com != null) {
-            // Fluid center in local sub-level coordinates
-            double fluidX = controllerPos.getX() + width / 2.0;
-            double fluidY = controllerPos.getY() + (fillFraction * height) / 2.0;
-            double fluidZ = controllerPos.getZ() + width / 2.0;
+    private static void applyViaMassTracker(ServerSubLevel subLevel, BlockPos controllerPos,
+                                             int width, int height, double fillFraction,
+                                             double massKg) {
+        MassTracker tracker = subLevel.getSelfMassTracker();
+        if (tracker == null) return;
 
-            // Transform both to world space
-            Pose3dc pose = subLevel.logicalPose();
-            Vector3d fluidWorld = pose.transformPosition(
-                    new Vector3d(fluidX, fluidY, fluidZ), new Vector3d());
-            Vector3d comWorld = pose.transformPosition(
-                    new Vector3d(com), new Vector3d());
+        String key = subLevel.getUniqueId() + ":" + controllerPos.toShortString();
+        Vec3 offset = tiltAwareOffset(subLevel, width, height, fillFraction);
 
-            // r = offset from center of mass to fluid center
-            Vector3d r = new Vector3d(fluidWorld).sub(comWorld);
-            // angular impulse = r × linearImpulse
-            r.cross(linearImpulse, angularImpulse);
+        Double prevMass = lastAppliedMass.get(key);
+        if (prevMass != null && Math.abs(prevMass - massKg) < 0.001) return;
+
+        var level = subLevel.getPlot().getEmbeddedLevelAccessor();
+        BlockState state = level.getBlockState(controllerPos);
+
+        if (prevMass != null && prevMass > 0) {
+            Vec3 prevOffset = lastAppliedOffset.getOrDefault(key, offset);
+            tracker.addBlockMass(level, state, controllerPos, -prevMass, prevOffset);
         }
 
-        pipeline.applyLinearAndAngularImpulse(subLevel, linearImpulse, angularImpulse, true);
+        tracker.addBlockMass(level, state, controllerPos, massKg, offset);
+        lastAppliedMass.put(key, massKg);
+        lastAppliedOffset.put(key, offset);
+    }
+
+    /**
+     * Compute fluid center of mass as a sub-block offset (0-1 range),
+     * shifted by the sub-level's tilt. Fluid pools toward local gravity.
+     */
+    private static Vec3 tiltAwareOffset(ServerSubLevel subLevel, int width, int height, double fillFraction) {
+        double cx = 0.5;
+        double cy = fillFraction / 2.0;
+        double cz = 0.5;
+
+        Pose3dc pose = subLevel.logicalPose();
+        if (pose == null) return new Vec3(cx, cy, cz);
+
+        // Local gravity = world down transformed into sub-level space
+        Vector3d localGrav = pose.transformNormalInverse(new Vector3d(0, -1, 0), new Vector3d());
+
+        // Fluid shifts toward where gravity points. Scale by empty space (more room to shift).
+        double emptyRoom = 1.0 - fillFraction;
+        cx += localGrav.x * 0.5 * emptyRoom * 0.5;
+        cy += localGrav.y * 0.5 * emptyRoom * 0.5;
+        cz += localGrav.z * 0.5 * emptyRoom * 0.5;
+
+        // Clamp to valid sub-block range
+        cx = Math.clamp(cx, 0.05, 0.95);
+        cy = Math.clamp(cy, 0.05, 0.95);
+        cz = Math.clamp(cz, 0.05, 0.95);
+
+        return new Vec3(cx, cy, cz);
     }
 }
