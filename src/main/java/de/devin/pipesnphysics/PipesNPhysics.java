@@ -6,7 +6,10 @@ import com.simibubi.create.foundation.item.KineticStats;
 import com.simibubi.create.foundation.item.TooltipModifier;
 import net.createmod.catnip.lang.FontHelper;
 import net.minecraft.resources.ResourceLocation;
+import de.devin.pipesnphysics.client.ClientEvents;
 import de.devin.pipesnphysics.client.PumpRangeRenderer;
+import de.devin.pipesnphysics.client.ponder.PipesNPhysicsPonderPlugin;
+import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.handler.DebugGraphCommand;
 import de.devin.pipesnphysics.handler.GravityFlowHandler;
 import de.devin.pipesnphysics.handler.PipeSwapHandler;
@@ -20,6 +23,7 @@ import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.RegisterGameTestsEvent;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -48,14 +52,14 @@ public class PipesNPhysics {
         NeoForge.EVENT_BUS.register(PipeSwapHandler.class);
         NeoForge.EVENT_BUS.addListener((RegisterCommandsEvent event) ->
                 DebugGraphCommand.register(event.getDispatcher()));
-        NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.server.ServerStoppedEvent event) -> {
-            de.devin.pipesnphysics.compat.SableCompat.clearCaches();
+        NeoForge.EVENT_BUS.addListener((ServerStoppedEvent event) -> {
+            SableCompat.clearCaches();
             GravityFlowHandler.clearAllCooldowns();
         });
 
         if (FMLEnvironment.dist.isClient()) {
             NeoForge.EVENT_BUS.register(PumpRangeRenderer.class);
-            modBus.register(de.devin.pipesnphysics.client.ClientEvents.class);
+            modBus.register(ClientEvents.class);
         }
     }
 
@@ -69,7 +73,6 @@ public class PipesNPhysics {
 
     private void onClientSetup(FMLClientSetupEvent event) {
         LOGGER.info("Client setup...");
-        net.createmod.ponder.foundation.PonderIndex.addPlugin(
-                new de.devin.pipesnphysics.client.ponder.PipesNPhysicsPonderPlugin());
+        net.createmod.ponder.foundation.PonderIndex.addPlugin(new PipesNPhysicsPonderPlugin());
     }
 }

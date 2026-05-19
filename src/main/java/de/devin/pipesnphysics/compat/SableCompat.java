@@ -6,11 +6,6 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.Vec3;
 
-/**
- * Sable Companion compatibility layer.
- * Loads the real implementation if Sable Companion is present,
- * otherwise uses a no-op implementation that returns vanilla defaults.
- */
 public class SableCompat {
 
     private static final SableCompatProvider PROVIDER;
@@ -82,9 +77,6 @@ public class SableCompat {
     }
 
 
-    /**
-     * No-op implementation when Sable Companion is not installed.
-     */
     private static class NoOpProvider implements SableCompatProvider {
         @Override
         public void clearCaches() {

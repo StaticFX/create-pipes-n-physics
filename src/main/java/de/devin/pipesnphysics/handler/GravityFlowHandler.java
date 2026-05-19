@@ -4,6 +4,7 @@ import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
+import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import de.devin.pipesnphysics.physics.*;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -16,11 +17,6 @@ import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
 
 import java.util.*;
 
-/**
- * Orchestrates gravity-driven fluid flow for pipe networks without pumps.
- * Handles scheduling, cooldowns, and Minecraft-specific validation.
- * Delegates physics computation to {@link NetworkSolver}.
- */
 public class GravityFlowHandler {
 
     private static final Set<ScheduledCheck> scheduledChecks = new HashSet<>();
@@ -28,9 +24,9 @@ public class GravityFlowHandler {
     public static volatile boolean suppressWipeReschedule = false;
 
     private static final Map<BlockPos, Long> lastProcessedTick = new HashMap<>();
-    private static final Map<BlockPos, de.devin.pipesnphysics.physics.PressureBreakdown> cachedBreakdowns = new HashMap<>();
+    private static final Map<BlockPos, PressureBreakdown> cachedBreakdowns = new HashMap<>();
 
-    public static de.devin.pipesnphysics.physics.PressureBreakdown getCachedBreakdown(BlockPos pos) {
+    public static PressureBreakdown getCachedBreakdown(BlockPos pos) {
         return cachedBreakdowns.get(pos);
     }
 
@@ -83,7 +79,7 @@ public class GravityFlowHandler {
     }
 
     private static void processNetwork(Level level, BlockPos startPos, Set<BlockPos> alreadyProcessed) {
-        if (!de.devin.pipesnphysics.compat.SableCompat.isSubLevelReady(level, startPos)) return;
+        if (!SableCompat.isSubLevelReady(level, startPos)) return;
 
         long currentTick = level.getGameTime();
         Long lastTick = lastProcessedTick.get(startPos);
@@ -134,7 +130,7 @@ public class GravityFlowHandler {
 
         double tankHeight = source.handlerWorldY() - source.pipeWorldY();
         var tankBE = level.getBlockEntity(sourceHandlerPos);
-        if (tankBE instanceof com.simibubi.create.content.fluids.tank.FluidTankBlockEntity ftbe) {
+        if (tankBE instanceof FluidTankBlockEntity ftbe) {
             tankHeight = ftbe.getHeight();
         }
         double fluidSurfaceY = source.pipeWorldY() + tankHeight * fillFraction;
