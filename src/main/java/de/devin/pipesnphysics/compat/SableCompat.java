@@ -7,16 +7,13 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.Vec3;
 
 /**
- * Facade for Sable Companion compatibility.
- * All methods return sensible no-op defaults when Sable Companion is absent.
- * Actual Sable logic lives in {@code SableCompanionImpl} which is only loaded
- * when Companion classes are on the classpath.
- * <p>
- * This class must NEVER import any Sable types directly.
+ * Sable Companion compatibility layer.
+ * Loads the real implementation if Sable Companion is present,
+ * otherwise uses a no-op implementation that returns vanilla defaults.
  */
 public class SableCompat {
 
-    static final boolean COMPANION_LOADED;
+    private static final SableCompatProvider PROVIDER;
 
     static {
         boolean found;
@@ -27,95 +24,120 @@ public class SableCompat {
         } catch (ClassNotFoundException e) {
             found = false;
         }
-        COMPANION_LOADED = found;
+        PROVIDER = found ? new SableCompanionImpl() : new NoOpProvider();
     }
 
     public static boolean isCompanionLoaded() {
-        return COMPANION_LOADED;
+        return PROVIDER instanceof SableCompanionImpl;
     }
 
-    /**
-     * Get the world-space Y coordinate of a block position,
-     * accounting for sub-level transformations (rotation, translation).
-     */
+    public static void clearCaches() {
+        PROVIDER.clearCaches();
+    }
+
+    public static boolean isSubLevelReady(Level level, BlockPos pos) {
+        return PROVIDER.isSubLevelReady(level, pos);
+    }
+
     public static double getWorldY(Level level, BlockPos pos) {
-        if (!COMPANION_LOADED) return pos.getY() + 0.5;
-        return SableCompanionImpl.getWorldY(level, pos);
+        return PROVIDER.getWorldY(level, pos);
     }
 
-    /**
-     * Get the world-space position of a block,
-     * accounting for sub-level transformations.
-     */
     public static Vec3 getWorldPos(Level level, BlockPos pos) {
-        if (!COMPANION_LOADED) return Vec3.atCenterOf(pos);
-        return SableCompanionImpl.getWorldPos(level, pos);
+        return PROVIDER.getWorldPos(level, pos);
     }
 
-    /**
-     * Get the vertical height difference between two positions in world space,
-     * accounting for sub-level transformations.
-     * Returns positive if 'higher' is above 'lower' in world space.
-     */
-    public static double getHeightDifference(Level level, BlockPos higher, BlockPos lower) {
-        double higherY = getWorldY(level, higher);
-        double lowerY = getWorldY(level, lower);
-        return higherY - lowerY;
-    }
-
-    /**
-     * Get the tilt angle (degrees) of a block's sub-level relative to world.
-     * 0° = level, 90° = on its side, 180° = upside down.
-     * Returns 0 if the block is not on a sub-level or Sable is absent.
-     */
     public static float getTiltAngle(Level level, BlockPos pos) {
-        if (!COMPANION_LOADED) return 0;
-        return SableCompanionImpl.getTiltAngle(level, pos);
+        return PROVIDER.getTiltAngle(level, pos);
     }
 
-    /**
-     * Client-side tilt angle. Returns -1 if not on a sub-level or Sable is absent.
-     */
     public static float getTiltAngleClient(BlockEntity be) {
-        if (!COMPANION_LOADED) return -1;
-        return SableCompanionImpl.getTiltAngleClient(be);
+        return PROVIDER.getTiltAngleClient(be);
     }
 
-    /**
-     * Get the elevation angle (degrees) of a pipe direction in world space.
-     * Accounts for sub-level rotation. Returns 0–90.
-     */
+    public static boolean hasSubLevelRotated(Level level, BlockPos pos) {
+        return PROVIDER.hasSubLevelRotated(level, pos);
+    }
+
+    public static boolean isOnSubLevelClient(BlockPos pos) {
+        return PROVIDER.isOnSubLevelClient(pos);
+    }
+
+    public static double getHeightDifference(Level level, BlockPos higher, BlockPos lower) {
+        return PROVIDER.getWorldY(level, higher) - PROVIDER.getWorldY(level, lower);
+    }
+
     public static float getPipeElevation(Level level, BlockPos pos, Direction dir) {
         if (dir == null) return 0;
-        if (!COMPANION_LOADED) {
+        return PROVIDER.getPipeElevation(level, pos, dir);
+    }
+
+    public static float getClientPipeElevation(BlockPos pos, Direction dir) {
+        if (dir == null) return -1;
+        return PROVIDER.getClientPipeElevation(pos, dir);
+    }
+
+    public static boolean canFluidReachPipe(Level level, BlockPos tankPos, BlockPos pipePos, double fillFraction) {
+        return PROVIDER.canFluidReachPipe(level, tankPos, pipePos, fillFraction);
+    }
+
+
+    /**
+     * No-op implementation when Sable Companion is not installed.
+     */
+    private static class NoOpProvider implements SableCompatProvider {
+        @Override
+        public void clearCaches() {
+        }
+
+        @Override
+        public boolean isSubLevelReady(Level level, BlockPos pos) {
+            return true;
+        }
+
+        @Override
+        public double getWorldY(Level level, BlockPos pos) {
+            return pos.getY() + 0.5;
+        }
+
+        @Override
+        public Vec3 getWorldPos(Level level, BlockPos pos) {
+            return Vec3.atCenterOf(pos);
+        }
+
+        @Override
+        public float getTiltAngle(Level level, BlockPos pos) {
+            return 0;
+        }
+
+        @Override
+        public float getTiltAngleClient(BlockEntity be) {
+            return -1;
+        }
+
+        @Override
+        public float getPipeElevation(Level level, BlockPos pos, Direction dir) {
             return (float) Math.toDegrees(Math.asin(Math.abs(dir.getStepY())));
         }
-        return SableCompanionImpl.getPipeElevation(level, pos, dir);
-    }
 
-    /**
-     * Returns true if this block is on a Sable sub-level that rotated since last check.
-     * Used by GravityFlowMixin to detect stale gravity data.
-     */
-    public static boolean hasSubLevelRotated(Level level, BlockPos pos) {
-        if (!COMPANION_LOADED) return false;
-        return SableCompanionImpl.hasSubLevelRotated(level, pos);
-    }
+        @Override
+        public boolean hasSubLevelRotated(Level level, BlockPos pos) {
+            return false;
+        }
 
-    /**
-     * Client-side: check if a block position is on a Sable sub-level.
-     */
-    public static boolean isOnSubLevelClient(BlockPos pos) {
-        if (!COMPANION_LOADED) return false;
-        return SableCompanionImpl.isOnSubLevelClient(pos);
-    }
+        @Override
+        public boolean isOnSubLevelClient(BlockPos pos) {
+            return false;
+        }
 
-    /**
-     * Client-side: get the pipe elevation angle using the render pose.
-     * Returns -1 if not on a sub-level, or the angle in degrees (0–90).
-     */
-    public static float getClientPipeElevation(BlockPos pos, Direction dir) {
-        if (!COMPANION_LOADED || dir == null) return -1;
-        return SableCompanionImpl.getClientPipeElevation(pos, dir);
+        @Override
+        public float getClientPipeElevation(BlockPos pos, Direction dir) {
+            return -1;
+        }
+
+        @Override
+        public boolean canFluidReachPipe(Level level, BlockPos tankPos, BlockPos pipePos, double fillFraction) {
+            return true;
+        }
     }
 }
