@@ -21,6 +21,8 @@ import de.devin.pipesnphysics.physics.PhysicsConfig;
 import de.devin.pipesnphysics.physics.PipeFormulas;
 import de.devin.pipesnphysics.physics.PipeGraph;
 import de.devin.pipesnphysics.physics.PressureBreakdown;
+import de.devin.pipesnphysics.physics.PumpPressureBreakdown;
+import de.devin.pipesnphysics.handler.GravityFlowHandler;
 import net.createmod.catnip.lang.LangBuilder;
 import net.createmod.catnip.lang.LangNumberFormat;
 import net.minecraft.ChatFormatting;
@@ -35,10 +37,6 @@ import org.spongepowered.asm.mixin.Unique;
 
 import java.util.*;
 
-/**
- * Adds goggle tooltip information to pipe block entities,
- * showing fluid, transfer rate, flow direction, pressure, and remaining pump range.
- */
 @Mixin(value = {FluidPipeBlockEntity.class, StraightPipeBlockEntity.class, SmartFluidPipeBlockEntity.class}, remap = false)
 public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IHaveGoggleInformation {
 
@@ -71,7 +69,7 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
 
         List<Direction> pulling = new ArrayList<>();
         List<Direction> pushing = new ArrayList<>();
-        net.neoforged.neoforge.fluids.FluidStack fluid = null; // FQCN: avoid mixin classloading issues
+        net.neoforged.neoforge.fluids.FluidStack fluid = null;
         float inboundPressure = 0;
 
         for (Direction side : Direction.values()) {
@@ -103,7 +101,6 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
             return true;
         }
 
-        // Fluid name
         lang()
                 .text(ChatFormatting.WHITE, fluid.getHoverName().getString())
                 .forGoggles(tooltip, 1);
@@ -121,8 +118,6 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                         .style(ChatFormatting.DARK_GRAY))
                 .forGoggles(tooltip, 1);
 
-        // Flow direction — only show when NOT on a Sable sub-level
-        // (cardinal directions don't make sense when the structure is rotated)
         boolean onSubLevel = SableCompat.isOnSubLevelClient(getBlockPos());
 
         if (!onSubLevel && !pulling.isEmpty() && !pushing.isEmpty()) {
@@ -135,20 +130,18 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                     .forGoggles(tooltip, 1);
         }
 
-        // Flow source indicator + remaining range
         int remainingRange = computeRemainingRange();
         boolean isPumpDriven = remainingRange >= 0;
         boolean isGravityDriven = !isPumpDriven && inboundPressure > 0;
 
         if (isPumpDriven) {
-            // Pump-driven: flow rate is uniform (RPM / 2), reach varies per pipe
             lang()
                     .text(ChatFormatting.GREEN, "\u26A1 ")
                     .add(langTranslate("gui.goggles.pump_driven")
                             .style(ChatFormatting.GREEN))
                     .forGoggles(tooltip, 1);
 
-            de.devin.pipesnphysics.physics.PumpPressureBreakdown pumpBreakdown = computePumpBreakdown();
+            PumpPressureBreakdown pumpBreakdown = computePumpBreakdown();
             if (PipesNPhysicsConfig.COMPLEX_TOOLTIPS.get() && pumpBreakdown != null) {
                 float frictionPB = PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue();
 
@@ -183,7 +176,6 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                         .forGoggles(tooltip, 1);
             }
         } else if (isGravityDriven) {
-            // Gravity-driven: flow rate comes from sink pressure, reach varies
             lang()
                     .text(ChatFormatting.BLUE, "\u2193 ")
                     .add(langTranslate("gui.goggles.gravity_driven")
@@ -241,7 +233,6 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                     .forGoggles(tooltip, 1);
         }
 
-        // Show pipe elevation angle on Sable sub-levels (both pump and gravity)
         if ((isPumpDriven || isGravityDriven) && onSubLevel) {
             Direction pipeDir = !pulling.isEmpty() ? pulling.get(0) : (!pushing.isEmpty() ? pushing.get(0) : null);
             if (pipeDir != null) {
@@ -256,16 +247,12 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         return true;
     }
 
-    /**
-     * BFS to find the gravity source, then compute head/friction/net at this pipe.
-     * Returns null if this pipe isn't part of a gravity-driven network.
-     */
     private PressureBreakdown computeGravityBreakdown() {
         Level level = getLevel();
         if (level == null) return null;
 
         BlockPos thisPos = getBlockPos();
-        PressureBreakdown cached = de.devin.pipesnphysics.handler.GravityFlowHandler.getCachedBreakdown(thisPos);
+        PressureBreakdown cached = GravityFlowHandler.getCachedBreakdown(thisPos);
         if (cached != null) return cached;
 
         PipeGraph graph = PipeGraphBuilder.discover(level, thisPos);
@@ -275,14 +262,9 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         return solver.computeBreakdownAt(graph, PipeGraphBuilder.nodeOf(thisPos));
     }
 
-    /** Cached pump breakdown from the last computeRemainingRange call. */
     @Unique
-    private de.devin.pipesnphysics.physics.PumpPressureBreakdown pipesnphysics$lastPumpBreakdown;
+    private PumpPressureBreakdown pipesnphysics$lastPumpBreakdown;
 
-    /**
-     * BFS from this pipe to find a connected pump, then compute remaining range
-     * and pressure breakdown. Returns remaining range, or -1 if no pump found.
-     */
     private int computeRemainingRange() {
         pipesnphysics$lastPumpBreakdown = null;
         Level level = getLevel();
@@ -291,7 +273,6 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         BlockPos thisPos = getBlockPos();
         PipeFormulas formulas = new PipeFormulas(PhysicsConfigFactory.fromModConfig());
 
-        // BFS to find connected active pump
         Set<BlockPos> visited = new HashSet<>();
         Queue<BlockPos> queue = new ArrayDeque<>();
         queue.add(thisPos);
@@ -323,7 +304,6 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         if (pumpBe instanceof KineticBlockEntity kbe) pumpBase = Math.abs(kbe.getSpeed());
         double pumpWorldY = SableCompat.getWorldY(level, pumpPos);
 
-        // BFS from pump accumulating friction
         Map<BlockPos, Float> frictionMap = new HashMap<>();
         Queue<BlockPos> bfs = new ArrayDeque<>();
         Set<BlockPos> bfsVisited = new HashSet<>();
@@ -363,14 +343,14 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                 : 0;
         float netPressure = formulas.pumpPressure(pumpBase, pumpWorldY, nodeY, friction);
 
-        pipesnphysics$lastPumpBreakdown = new de.devin.pipesnphysics.physics.PumpPressureBreakdown(
+        pipesnphysics$lastPumpBreakdown = new PumpPressureBreakdown(
                 pumpBase, gravityAssist, friction, netPressure);
 
         float frictionPerBlock = formulas.config().frictionPerBlock();
         return frictionPerBlock > MIN_DIVISOR ? (int) (netPressure / frictionPerBlock) : 999;
     }
 
-    private de.devin.pipesnphysics.physics.PumpPressureBreakdown computePumpBreakdown() {
+    private PumpPressureBreakdown computePumpBreakdown() {
         return pipesnphysics$lastPumpBreakdown;
     }
 

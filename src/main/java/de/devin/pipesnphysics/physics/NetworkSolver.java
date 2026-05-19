@@ -2,13 +2,6 @@ package de.devin.pipesnphysics.physics;
 
 import java.util.*;
 
-/**
- * Pure graph algorithms for pipe network physics.
- * Operates on pre-resolved {@link PipeGraph} instances with no Minecraft dependencies.
- *
- * <p>This class deduplicates the BFS + friction + pressure logic previously
- * spread across GravityFlowHandler, PumpBlockEntityMixin, and PipeGoggleInfoMixin.</p>
- */
 public final class NetworkSolver {
 
     private static final double HORIZONTAL_THRESHOLD = 0.1;
@@ -19,16 +12,10 @@ public final class NetworkSolver {
         this.formulas = formulas;
     }
 
-    /**
-     * Compute gravity-driven flow for a pipe network.
-     *
-     * @return the flow result, or {@code null} if no valid gravity flow exists
-     */
     public GravityFlowResult solveGravityFlow(PipeGraph graph) {
         if (graph.hasActivePump()) return null;
         if (graph.endpoints().size() < 2) return null;
 
-        // 1. Find source: highest endpoint where handler is above its pipe
         NetworkEndpoint source = null;
         double sourceWorldY = Double.NEGATIVE_INFINITY;
         for (NetworkEndpoint ep : graph.endpoints()) {
@@ -40,13 +27,9 @@ public final class NetworkSolver {
         }
         if (source == null) return null;
 
-        // 2. BFS from source accumulating friction
         FrictionBfsResult bfs = frictionBfs(graph, source.pipeNode(), source.faceIndex());
-
-        // 3. Gravity preference: prune horizontal exits when downward exists
         applyGravityPreference(bfs.outboundEdges);
 
-        // 4. Validate sinks: keep endpoints where gravity pressure > 0
         List<NetworkEndpoint> validSinks = new ArrayList<>();
         for (NetworkEndpoint ep : graph.endpoints()) {
             if (ep == source) continue;
@@ -57,7 +40,6 @@ public final class NetworkSolver {
             }
         }
 
-        // 5. Compute per-pipe pressure and find active pipes
         Map<NodeId, Float> pipePressures;
         Set<NodeId> activePipes;
 
@@ -74,8 +56,6 @@ public final class NetworkSolver {
             }
             pipePressures = propagateSinkPressures(sinkPressures, bfs.parentNode, source.pipeNode());
         } else {
-            // No reachable sinks, but fluid still pushes into pipes it CAN reach.
-            // Every pipe with positive local pressure is active.
             pipePressures = new LinkedHashMap<>();
             activePipes = new HashSet<>();
             for (var entry : bfs.accumulatedFriction.entrySet()) {
@@ -92,7 +72,6 @@ public final class NetworkSolver {
             if (activePipes.isEmpty()) return null;
         }
 
-        // Build outbound face index map
         Map<NodeId, Set<Integer>> outboundFaceIndices = new HashMap<>();
         for (var entry : bfs.outboundEdges.entrySet()) {
             Set<Integer> faces = new HashSet<>();
@@ -100,7 +79,6 @@ public final class NetworkSolver {
             outboundFaceIndices.put(entry.getKey(), faces);
         }
 
-        // 7. Build flow states for each active pipe
         Map<NodeId, FlowState> flowStates = new HashMap<>();
         for (NodeId nodeId : activePipes) {
             float pressure = pipePressures.getOrDefault(nodeId, 0f);
@@ -119,9 +97,6 @@ public final class NetworkSolver {
         );
     }
 
-    /**
-     * Compute which pipes a pump can reach, accounting for friction and gravity.
-     */
     public PumpFlowResult solvePumpReach(PipeGraph graph, NodeId startNode, int startFace,
                                          float pumpBase, double pumpWorldY, int maxHopDistance) {
         Map<NodeId, Float> accFriction = new HashMap<>();
@@ -167,13 +142,6 @@ public final class NetworkSolver {
         return new PumpFlowResult(accFriction, nodePressures, hopCounts, reachable);
     }
 
-    /**
-     * Compute pressure breakdown for the gravity network containing the target pipe.
-     * The breakdown is computed at the sink that determines the actual flow rate —
-     * every pipe in a series carries the same flow, so the sink numbers are what matter.
-     *
-     * @return the breakdown, or {@code null} if this pipe is not in a gravity flow path
-     */
     public PressureBreakdown computeBreakdownAt(PipeGraph graph, NodeId targetPipe) {
         GravityFlowResult flow = solveGravityFlow(graph);
         if (flow == null) return null;
@@ -184,7 +152,6 @@ public final class NetworkSolver {
         FrictionBfsResult bfs = frictionBfs(graph, flow.source().pipeNode(), flow.source().faceIndex());
 
         if (!flow.validSinks().isEmpty()) {
-            // Sink-based: find bottleneck sink (lowest pressure = most friction)
             NetworkEndpoint bottleneckSink = null;
             float bottleneckPressure = Float.MAX_VALUE;
             for (NetworkEndpoint sink : flow.validSinks()) {
@@ -206,7 +173,6 @@ public final class NetworkSolver {
             return new PressureBreakdown(head, sinkFriction, net, capped);
         }
 
-        // Partial reach (no valid sinks): compute breakdown at this pipe directly
         PipeNode node = graph.node(targetPipe);
         if (node == null) return null;
         float friction = bfs.accumulatedFriction.getOrDefault(targetPipe, 0f);
@@ -304,7 +270,6 @@ public final class NetworkSolver {
         return result;
     }
 
-    /** Get the world Y of a node from the graph's node map. */
     private double nodeWorldY(PipeGraph graph, NodeId node) {
         PipeNode pipeNode = graph.node(node);
         if (pipeNode != null) return pipeNode.worldY();
@@ -314,7 +279,6 @@ public final class NetworkSolver {
         return 0;
     }
 
-    /** Reverse a face index (Direction ordinals are paired: 0/1, 2/3, 4/5). */
     private static int reverseFace(int faceIndex) {
         return (faceIndex % 2 == 0) ? faceIndex + 1 : faceIndex - 1;
     }

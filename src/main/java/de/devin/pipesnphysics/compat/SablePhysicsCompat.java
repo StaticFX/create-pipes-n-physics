@@ -14,10 +14,6 @@ import org.joml.Vector3d;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Applies fluid weight to Sable sub-levels.
- * Two modes: force-only (stable) or mass tracker (experimental, shifts center of gravity).
- */
 public class SablePhysicsCompat {
 
     private static final Map<String, Double> lastAppliedMass = new HashMap<>();
@@ -76,10 +72,6 @@ public class SablePhysicsCompat {
         lastAppliedOffset.put(key, offset);
     }
 
-    /**
-     * Compute fluid center of mass as a sub-block offset (0-1 range),
-     * shifted by the sub-level's tilt. Fluid pools toward local gravity.
-     */
     private static Vec3 tiltAwareOffset(ServerSubLevel subLevel, double fillFraction) {
         double cx = 0.5;
         double cy = fillFraction / 2.0;

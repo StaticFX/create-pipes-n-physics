@@ -17,9 +17,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Real Sable Companion implementation. Only loaded when Sable Companion is on the classpath.
- */
 class SableCompanionImpl implements SableCompatProvider {
 
     private static final double NORMALIZE_EPSILON = 0.001;
@@ -33,7 +30,7 @@ class SableCompanionImpl implements SableCompatProvider {
     @Override
     public boolean isSubLevelReady(Level level, BlockPos pos) {
         SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
-        if (sub == null) return true; // Not on a sub-level — always ready
+        if (sub == null) return true;
         return sub.logicalPose() != null;
     }
 
