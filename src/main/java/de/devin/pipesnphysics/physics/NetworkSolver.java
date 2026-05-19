@@ -56,23 +56,41 @@ public final class NetworkSolver {
                 validSinks.add(ep);
             }
         }
-        if (validSinks.isEmpty()) return null;
 
-        // 5. Prune dead branches
-        Set<NodeId> activePipes = pruneDeadBranches(validSinks, bfs.parentNode, source.pipeNode());
+        // 5. Compute per-pipe pressure and find active pipes
+        Map<NodeId, Float> pipePressures;
+        Set<NodeId> activePipes;
 
-        // 6. Compute sink pressures and propagate backward
-        Map<NodeId, Float> sinkPressures = new HashMap<>();
-        for (NetworkEndpoint sink : validSinks) {
-            float friction = bfs.accumulatedFriction.getOrDefault(sink.pipeNode(), 0f);
-            float pressure = formulas.gravityPressure(sourceWorldY, sink.pipeWorldY(), friction);
-            if (pressure > 0) {
-                sinkPressures.merge(sink.pipeNode(), pressure, Math::max);
+        if (!validSinks.isEmpty()) {
+            activePipes = pruneDeadBranches(validSinks, bfs.parentNode, source.pipeNode());
+
+            Map<NodeId, Float> sinkPressures = new HashMap<>();
+            for (NetworkEndpoint sink : validSinks) {
+                float friction = bfs.accumulatedFriction.getOrDefault(sink.pipeNode(), 0f);
+                float pressure = formulas.gravityPressure(sourceWorldY, sink.pipeWorldY(), friction);
+                if (pressure > 0) {
+                    sinkPressures.merge(sink.pipeNode(), pressure, Math::max);
+                }
             }
+            pipePressures = propagateSinkPressures(sinkPressures, bfs.parentNode, source.pipeNode());
+        } else {
+            // No reachable sinks, but fluid still pushes into pipes it CAN reach.
+            // Every pipe with positive local pressure is active.
+            pipePressures = new LinkedHashMap<>();
+            activePipes = new HashSet<>();
+            for (var entry : bfs.accumulatedFriction.entrySet()) {
+                NodeId nodeId = entry.getKey();
+                float friction = entry.getValue();
+                PipeNode node = graph.node(nodeId);
+                if (node == null || !node.isPipe()) continue;
+                float pressure = formulas.gravityPressure(sourceWorldY, node.worldY(), friction);
+                if (pressure > 0) {
+                    pipePressures.put(nodeId, pressure);
+                    activePipes.add(nodeId);
+                }
+            }
+            if (activePipes.isEmpty()) return null;
         }
-
-        Map<NodeId, Float> pipePressures = propagateSinkPressures(
-                sinkPressures, bfs.parentNode, source.pipeNode());
 
         // Build outbound face index map
         Map<NodeId, Set<Integer>> outboundFaceIndices = new HashMap<>();
@@ -160,34 +178,43 @@ public final class NetworkSolver {
         GravityFlowResult flow = solveGravityFlow(graph);
         if (flow == null) return null;
 
-        // Check this pipe is actually part of the active flow
         Float appliedPressure = flow.pipePressures().get(targetPipe);
         if (appliedPressure == null || appliedPressure <= 0) return null;
 
-        // Compute breakdown at the sink that determines the flow rate
         FrictionBfsResult bfs = frictionBfs(graph, flow.source().pipeNode(), flow.source().faceIndex());
 
-        // Find the sink with the highest friction (the bottleneck that sets the flow)
-        NetworkEndpoint bottleneckSink = null;
-        float bottleneckPressure = Float.MAX_VALUE;
-        for (NetworkEndpoint sink : flow.validSinks()) {
-            Float sinkFriction = bfs.accumulatedFriction.get(sink.pipeNode());
-            if (sinkFriction == null) continue;
-            float p = formulas.gravityPressure(flow.sourceWorldY(), sink.pipeWorldY(), sinkFriction);
-            if (p < bottleneckPressure) {
-                bottleneckPressure = p;
-                bottleneckSink = sink;
+        if (!flow.validSinks().isEmpty()) {
+            // Sink-based: find bottleneck sink (lowest pressure = most friction)
+            NetworkEndpoint bottleneckSink = null;
+            float bottleneckPressure = Float.MAX_VALUE;
+            for (NetworkEndpoint sink : flow.validSinks()) {
+                Float sinkFriction = bfs.accumulatedFriction.get(sink.pipeNode());
+                if (sinkFriction == null) continue;
+                float p = formulas.gravityPressure(flow.sourceWorldY(), sink.pipeWorldY(), sinkFriction);
+                if (p < bottleneckPressure) {
+                    bottleneckPressure = p;
+                    bottleneckSink = sink;
+                }
             }
+            if (bottleneckSink == null) return null;
+
+            float sinkFriction = bfs.accumulatedFriction.getOrDefault(bottleneckSink.pipeNode(), 0f);
+            float head = (float) (flow.sourceWorldY() - bottleneckSink.pipeWorldY()) * formulas.config().gravityPerBlock();
+            float unclamped = head - sinkFriction;
+            float net = formulas.gravityPressure(flow.sourceWorldY(), bottleneckSink.pipeWorldY(), sinkFriction);
+            boolean capped = unclamped > formulas.config().maxPressure();
+            return new PressureBreakdown(head, sinkFriction, net, capped);
         }
-        if (bottleneckSink == null) return null;
 
-        float sinkFriction = bfs.accumulatedFriction.getOrDefault(bottleneckSink.pipeNode(), 0f);
-        float head = (float) (flow.sourceWorldY() - bottleneckSink.pipeWorldY()) * formulas.config().gravityPerBlock();
-        float unclamped = head - sinkFriction;
-        float net = formulas.gravityPressure(flow.sourceWorldY(), bottleneckSink.pipeWorldY(), sinkFriction);
+        // Partial reach (no valid sinks): compute breakdown at this pipe directly
+        PipeNode node = graph.node(targetPipe);
+        if (node == null) return null;
+        float friction = bfs.accumulatedFriction.getOrDefault(targetPipe, 0f);
+        float head = (float) (flow.sourceWorldY() - node.worldY()) * formulas.config().gravityPerBlock();
+        float unclamped = head - friction;
+        float net = formulas.gravityPressure(flow.sourceWorldY(), node.worldY(), friction);
         boolean capped = unclamped > formulas.config().maxPressure();
-
-        return new PressureBreakdown(head, sinkFriction, net, capped);
+        return new PressureBreakdown(head, friction, net, capped);
     }
 
     private record FrictionBfsResult(

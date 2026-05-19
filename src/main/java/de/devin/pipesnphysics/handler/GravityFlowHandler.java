@@ -24,22 +24,28 @@ import java.util.*;
 public class GravityFlowHandler {
 
     private static final Set<ScheduledCheck> scheduledChecks = new HashSet<>();
-
-    /**
-     * When true, wipePressure() calls should NOT trigger a gravity recheck.
-     * Set during pressure reapplication to prevent wipe→schedule→process→wipe loops.
-     */
+    
     public static volatile boolean suppressWipeReschedule = false;
 
     private static final Map<BlockPos, Long> lastProcessedTick = new HashMap<>();
+    private static final Map<BlockPos, de.devin.pipesnphysics.physics.PressureBreakdown> cachedBreakdowns = new HashMap<>();
+
+    public static de.devin.pipesnphysics.physics.PressureBreakdown getCachedBreakdown(BlockPos pos) {
+        return cachedBreakdowns.get(pos);
+    }
 
     private record ScheduledCheck(Level level, BlockPos pos) {
-        @Override public boolean equals(Object o) {
+        @Override
+        public boolean equals(Object o) {
             if (this == o) return true;
             if (!(o instanceof ScheduledCheck(Level level1, BlockPos pos1))) return false;
             return pos.equals(pos1) && level == level1;
         }
-        @Override public int hashCode() { return pos.hashCode(); }
+
+        @Override
+        public int hashCode() {
+            return pos.hashCode();
+        }
     }
 
     public static void scheduleCheck(Level level, BlockPos pos) {
@@ -49,6 +55,12 @@ public class GravityFlowHandler {
 
     public static void clearCooldown(BlockPos pos) {
         lastProcessedTick.remove(pos);
+    }
+
+    public static void clearAllCooldowns() {
+        lastProcessedTick.clear();
+        scheduledChecks.clear();
+        cachedBreakdowns.clear();
     }
 
     @SubscribeEvent
@@ -71,6 +83,8 @@ public class GravityFlowHandler {
     }
 
     private static void processNetwork(Level level, BlockPos startPos, Set<BlockPos> alreadyProcessed) {
+        if (!de.devin.pipesnphysics.compat.SableCompat.isSubLevelReady(level, startPos)) return;
+
         long currentTick = level.getGameTime();
         Long lastTick = lastProcessedTick.get(startPos);
         int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
@@ -78,18 +92,15 @@ public class GravityFlowHandler {
 
         PipeGraph graph = PipeGraphBuilder.discover(level, startPos);
 
-        // Mark cooldown for all discovered pipe nodes
         for (NodeId node : graph.pipeNodeIds()) {
             BlockPos pos = PipeGraphBuilder.posOf(node);
             alreadyProcessed.add(pos);
             lastProcessedTick.put(pos, currentTick);
         }
 
-        // Active pump takes over — don't apply gravity on top of pump pressure
         if (graph.hasActivePump()) return;
         if (graph.endpoints().size() < 2) return;
 
-        // Find source: highest endpoint where handler is above its pipe
         NetworkEndpoint source = null;
         for (NetworkEndpoint ep : graph.endpoints()) {
             if (!ep.isHandlerAbovePipe()) continue;
@@ -99,7 +110,6 @@ public class GravityFlowHandler {
         }
         if (source == null) return;
 
-        // Verify source has fluid (Minecraft-specific capability check)
         BlockPos sourceHandlerPos = PipeGraphBuilder.posOf(source.handlerNode());
         Direction sourceFace = PipeGraphBuilder.directionOf(source.faceIndex()).getOpposite();
         var sourceHandler = level.getCapability(Capabilities.FluidHandler.BLOCK, sourceHandlerPos, sourceFace);
@@ -114,11 +124,29 @@ public class GravityFlowHandler {
         }
         if (sourceFluid.isEmpty()) return;
 
-        // Filter sinks: must accept the source fluid (Minecraft-specific)
+        int totalFluid = 0;
+        int totalCapacity = 0;
+        for (int tankIndex = 0; tankIndex < sourceHandler.getTanks(); tankIndex++) {
+            totalFluid += sourceHandler.getFluidInTank(tankIndex).getAmount();
+            totalCapacity += sourceHandler.getTankCapacity(tankIndex);
+        }
+        double fillFraction = totalCapacity > 0 ? (double) totalFluid / totalCapacity : 1.0;
+
+        double tankHeight = source.handlerWorldY() - source.pipeWorldY();
+        var tankBE = level.getBlockEntity(sourceHandlerPos);
+        if (tankBE instanceof com.simibubi.create.content.fluids.tank.FluidTankBlockEntity ftbe) {
+            tankHeight = ftbe.getHeight();
+        }
+        double fluidSurfaceY = source.pipeWorldY() + tankHeight * fillFraction;
+        NetworkEndpoint originalSource = source;
+        source = new NetworkEndpoint(
+                source.handlerNode(), source.pipeNode(), source.faceIndex(),
+                fluidSurfaceY, source.pipeWorldY());
+
         List<NetworkEndpoint> validEndpoints = new ArrayList<>();
         validEndpoints.add(source);
         for (NetworkEndpoint ep : graph.endpoints()) {
-            if (ep == source) continue;
+            if (ep == originalSource) continue;
             BlockPos sinkPos = PipeGraphBuilder.posOf(ep.handlerNode());
             Direction sinkFace = PipeGraphBuilder.directionOf(ep.faceIndex()).getOpposite();
             var sinkHandler = level.getCapability(Capabilities.FluidHandler.BLOCK, sinkPos, sinkFace);
@@ -134,7 +162,6 @@ public class GravityFlowHandler {
         }
         if (validEndpoints.size() < 2) return;
 
-        // Build filtered graph and solve physics
         PipeGraph filteredGraph = new PipeGraph(
                 graph.nodes(), graph.adjacency(), validEndpoints);
 
@@ -144,14 +171,19 @@ public class GravityFlowHandler {
         GravityFlowResult result = solver.solveGravityFlow(filteredGraph);
         if (result == null) return;
 
-        // Apply result to Create's transport system
+        for (NodeId nodeId : result.activePipes()) {
+            PressureBreakdown breakdown = solver.computeBreakdownAt(filteredGraph, nodeId);
+            if (breakdown != null) {
+                cachedBreakdowns.put(PipeGraphBuilder.posOf(nodeId), breakdown);
+            }
+        }
+
         applyFlowResult(level, graph, result);
     }
 
     private static void applyFlowResult(Level level, PipeGraph graph, GravityFlowResult result) {
         suppressWipeReschedule = true;
         try {
-            // Wipe dead branches
             for (NodeId node : graph.pipeNodeIds()) {
                 BlockPos pos = PipeGraphBuilder.posOf(node);
                 FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, pos);
@@ -161,7 +193,6 @@ public class GravityFlowHandler {
                 }
             }
 
-            // Apply pressure to active pipes
             for (NodeId node : result.activePipes()) {
                 BlockPos pos = PipeGraphBuilder.posOf(node);
                 FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, pos);
@@ -172,13 +203,11 @@ public class GravityFlowHandler {
 
                 if (pipe.hasAnyPressure()) pipe.wipePressure();
 
-                // Inbound side
                 Integer inboundFace = result.inboundFaceIndex().get(node);
                 if (inboundFace != null) {
                     pipe.addPressure(PipeGraphBuilder.directionOf(inboundFace), true, pressure);
                 }
 
-                // Outbound sides (to other active pipes)
                 Set<Integer> outFaces = result.outboundFaceIndices().getOrDefault(node, Set.of());
                 for (int faceIdx : outFaces) {
                     BlockPos neighborPos = pos.relative(PipeGraphBuilder.directionOf(faceIdx));
@@ -187,7 +216,6 @@ public class GravityFlowHandler {
                     }
                 }
 
-                // Outbound to sinks
                 for (NetworkEndpoint sink : result.sinkEndpoints()) {
                     if (sink.pipeNode().equals(node) && result.validSinks().contains(sink)) {
                         pipe.addPressure(PipeGraphBuilder.directionOf(sink.faceIndex()), false, pressure);

@@ -48,6 +48,10 @@ public class PipesNPhysics {
         NeoForge.EVENT_BUS.register(PipeSwapHandler.class);
         NeoForge.EVENT_BUS.addListener((RegisterCommandsEvent event) ->
                 DebugGraphCommand.register(event.getDispatcher()));
+        NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.server.ServerStoppedEvent event) -> {
+            de.devin.pipesnphysics.compat.SableCompat.clearCaches();
+            GravityFlowHandler.clearAllCooldowns();
+        });
 
         if (FMLEnvironment.dist.isClient()) {
             NeoForge.EVENT_BUS.register(PumpRangeRenderer.class);

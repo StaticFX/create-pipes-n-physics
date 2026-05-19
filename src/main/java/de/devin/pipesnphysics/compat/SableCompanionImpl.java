@@ -18,33 +18,48 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Actual Sable Companion logic. This class imports Sable Companion types directly
- * and is ONLY loaded when Sable Companion is present at runtime (lazy class loading).
- * All access goes through {@link SableCompat} which guards with a runtime check.
+ * Real Sable Companion implementation. Only loaded when Sable Companion is on the classpath.
  */
-class SableCompanionImpl {
+class SableCompanionImpl implements SableCompatProvider {
 
     private static final double NORMALIZE_EPSILON = 0.001;
+    private final Map<UUID, float[]> lastOrientations = new ConcurrentHashMap<>();
 
-    /** Tracks last known orientation per sub-level to detect rotation changes. */
-    private static final Map<UUID, float[]> lastOrientations = new ConcurrentHashMap<>();
-
-    static double getWorldY(Level level, BlockPos pos) {
-        Vec3 worldPos = SableCompanion.INSTANCE.projectOutOfSubLevel(level, Vec3.atCenterOf(pos));
-        return worldPos.y;
+    @Override
+    public void clearCaches() {
+        lastOrientations.clear();
     }
 
-    static Vec3 getWorldPos(Level level, BlockPos pos) {
-        return SableCompanion.INSTANCE.projectOutOfSubLevel(level, Vec3.atCenterOf(pos));
+    @Override
+    public boolean isSubLevelReady(Level level, BlockPos pos) {
+        SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
+        if (sub == null) return true; // Not on a sub-level — always ready
+        return sub.logicalPose() != null;
     }
 
-    static float getTiltAngle(Level level, BlockPos pos) {
+    @Override
+    public double getWorldY(Level level, BlockPos pos) {
+        Vector3d result = SableCompanion.INSTANCE.projectOutOfSubLevel(level,
+                new Vector3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5), new Vector3d());
+        return result.y;
+    }
+
+    @Override
+    public Vec3 getWorldPos(Level level, BlockPos pos) {
+        Vector3d result = SableCompanion.INSTANCE.projectOutOfSubLevel(level,
+                new Vector3d(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5), new Vector3d());
+        return new Vec3(result.x, result.y, result.z);
+    }
+
+    @Override
+    public float getTiltAngle(Level level, BlockPos pos) {
         SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
         if (sub == null) return 0;
         return angleFromPose(sub.logicalPose());
     }
 
-    static float getTiltAngleClient(BlockEntity be) {
+    @Override
+    public float getTiltAngleClient(BlockEntity be) {
         ClientSubLevelAccess sub = SableCompanion.INSTANCE.getContainingClient(be);
         if (sub == null) sub = SableCompanion.INSTANCE.getContainingClient(be.getBlockPos());
         if (sub == null && be.getLevel() != null) {
@@ -57,7 +72,8 @@ class SableCompanionImpl {
         return angleFromPose(pose);
     }
 
-    static float getPipeElevation(Level level, BlockPos pos, Direction dir) {
+    @Override
+    public float getPipeElevation(Level level, BlockPos pos, Direction dir) {
         SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
         if (sub != null) {
             Pose3dc pose = sub.logicalPose();
@@ -74,11 +90,8 @@ class SableCompanionImpl {
         return (float) Math.toDegrees(Math.asin(Math.abs(dir.getStepY())));
     }
 
-    /**
-     * Returns true if this block is on a Sable sub-level whose orientation
-     * changed since the last check. Uses a static orientation cache keyed by sub-level UUID.
-     */
-    static boolean hasSubLevelRotated(Level level, BlockPos pos) {
+    @Override
+    public boolean hasSubLevelRotated(Level level, BlockPos pos) {
         SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
         if (sub == null) return false;
 
@@ -105,16 +118,13 @@ class SableCompanionImpl {
         return false;
     }
 
-    /** Client-side check: is a block position on a Sable sub-level? */
-    static boolean isOnSubLevelClient(BlockPos pos) {
+    @Override
+    public boolean isOnSubLevelClient(BlockPos pos) {
         return SableCompanion.INSTANCE.getContainingClient(pos) != null;
     }
 
-    /**
-     * Client-side: get pipe elevation using the render pose.
-     * Returns the angle in degrees (0–90), or -1 if not on a sub-level.
-     */
-    static float getClientPipeElevation(BlockPos pos, Direction dir) {
+    @Override
+    public float getClientPipeElevation(BlockPos pos, Direction dir) {
         ClientSubLevelAccess sub = SableCompanion.INSTANCE.getContainingClient(pos);
         if (sub == null) return -1;
 
@@ -128,6 +138,11 @@ class SableCompanionImpl {
         if (len <= NORMALIZE_EPSILON) return -1;
 
         return (float) Math.toDegrees(Math.asin(Math.min(1, Math.max(-1, Math.abs(worldDir.y) / len))));
+    }
+
+    @Override
+    public boolean canFluidReachPipe(Level level, BlockPos tankPos, BlockPos pipePos, double fillFraction) {
+        return true;
     }
 
     private static float angleFromPose(Pose3dc pose) {

@@ -265,6 +265,9 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         if (level == null) return null;
 
         BlockPos thisPos = getBlockPos();
+        PressureBreakdown cached = de.devin.pipesnphysics.handler.GravityFlowHandler.getCachedBreakdown(thisPos);
+        if (cached != null) return cached;
+
         PipeGraph graph = PipeGraphBuilder.discover(level, thisPos);
         PhysicsConfig config = PhysicsConfigFactory.fromModConfig();
         PipeFormulas formulas = new PipeFormulas(config);

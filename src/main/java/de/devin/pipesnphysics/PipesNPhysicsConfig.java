@@ -23,6 +23,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue FRICTION_AFFECTS_FLOW;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
+    public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
     public static final ModConfigSpec.DoubleValue FLUID_MASS_PER_BUCKET;
 
     // Client
@@ -49,7 +50,7 @@ public class PipesNPhysicsConfig {
                 .comment("Pressure gained per block of height difference.",
                         "Used by both gravity and pump networks. Lower values = longer drops needed for max flow.",
                         "At default 3, a 7-block drop gives max flow (10 mB/t). Angle scales naturally via height.")
-                .defineInRange("gravityPressurePerBlock", 3.0, 0.1, 40.0);
+                .defineInRange("gravityPressurePerBlock", 15.0, 0.1, 100.0);
         ENABLE_PIPE_ANGLE_PHYSICS = server
                 .comment("Enable angle-based pipe friction scaling.",
                         "When true, friction scales smoothly with pipe elevation angle on Sable sub-levels:",
@@ -70,7 +71,7 @@ public class PipesNPhysicsConfig {
         MAX_GRAVITY_PRESSURE = server
                 .comment("Maximum pressure in pipe networks. Transfer rate = pressure / 2 mB/t.",
                         "Default 20 = max 10 mB/t. Applies to both gravity and pump+gravity combined.")
-                .defineInRange("maxGravityPressure", 20.0, 1.0, 256.0);
+                .defineInRange("maxGravityPressure", 60.0, 1.0, 256.0);
         ENABLE_PUMP_GRAVITY = server
                 .comment("Enable gravity assist/penalty for pump networks.",
                         "When true, pumps push further downhill and shorter uphill.",
@@ -107,6 +108,14 @@ public class PipesNPhysicsConfig {
                 .define("frictionAffectsFlow", true);
         server.pop();
 
+        server.push("sableCompat");
+        ENABLE_OPEN_END_WORLD_PLACEMENT = server
+                .comment("When an open-ended pipe on a Sable sub-level spills fluid,",
+                        "place the fluid block in the real world at the projected position.",
+                        "When disabled, fluid is placed inside the sub-level as vanilla Create does.")
+                .define("enableOpenEndWorldPlacement", true);
+        server.pop();
+
         server.push("tankMass");
         ENABLE_DYNAMIC_TANK_MASS = server
                 .comment("Enable dynamic mass for fluid tanks on Sable sub-levels.",
@@ -124,7 +133,7 @@ public class PipesNPhysicsConfig {
                         "When enabled, fluid mass is added to Sable's mass tracker, affecting",
                         "center of mass and rotational inertia. May cause instability.",
                         "When disabled, fluid weight is applied as a simple downward force.")
-                .define("experimentalTankCenterOfGravity", false);
+                .define("experimentalTankCenterOfGravity", true);
         server.pop();
 
         SERVER_SPEC = server.build();

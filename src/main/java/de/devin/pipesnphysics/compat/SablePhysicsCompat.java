@@ -1,5 +1,6 @@
 package de.devin.pipesnphysics.compat;
 
+import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import dev.ryanhcode.sable.api.physics.mass.MassTracker;
 import dev.ryanhcode.sable.companion.math.Pose3dc;
@@ -27,7 +28,7 @@ public class SablePhysicsCompat {
         if (massKg <= 0) return;
 
         if (PipesNPhysicsConfig.EXPERIMENTAL_TANK_COG.get()) {
-            applyViaMassTracker(subLevel, controllerPos, width, height, fillFraction, massKg);
+            applyViaMassTracker(subLevel, controllerPos, fillFraction, massKg);
         } else {
             applyViaForce(subLevel, massKg);
         }
@@ -45,21 +46,26 @@ public class SablePhysicsCompat {
 
     private static final Map<String, Vec3> lastAppliedOffset = new HashMap<>();
 
-    private static void applyViaMassTracker(ServerSubLevel subLevel, BlockPos controllerPos,
-                                             int width, int height, double fillFraction,
-                                             double massKg) {
+    private static void applyViaMassTracker(ServerSubLevel subLevel, BlockPos controllerPos, double fillFraction, double massKg) {
         MassTracker tracker = subLevel.getSelfMassTracker();
         if (tracker == null) return;
 
         String key = subLevel.getUniqueId() + ":" + controllerPos.toShortString();
-        Vec3 offset = tiltAwareOffset(subLevel, width, height, fillFraction);
+        Vec3 offset = tiltAwareOffset(subLevel, fillFraction);
 
         Double prevMass = lastAppliedMass.get(key);
         if (prevMass != null && Math.abs(prevMass - massKg) < 0.001) return;
 
-        var level = subLevel.getPlot().getEmbeddedLevelAccessor();
-        BlockState state = level.getBlockState(controllerPos);
+        BlockState state;
+        try {
+            var level = subLevel.getPlot().getEmbeddedLevelAccessor();
+            state = level.getBlockState(controllerPos);
+        } catch (Exception e) {
+            PipesNPhysics.LOGGER.error("Failed to apply Via Mass Tracker!", e);
+            return;
+        }
 
+        var level = subLevel.getPlot().getEmbeddedLevelAccessor();
         if (prevMass != null && prevMass > 0) {
             Vec3 prevOffset = lastAppliedOffset.getOrDefault(key, offset);
             tracker.addBlockMass(level, state, controllerPos, -prevMass, prevOffset);
@@ -74,7 +80,7 @@ public class SablePhysicsCompat {
      * Compute fluid center of mass as a sub-block offset (0-1 range),
      * shifted by the sub-level's tilt. Fluid pools toward local gravity.
      */
-    private static Vec3 tiltAwareOffset(ServerSubLevel subLevel, int width, int height, double fillFraction) {
+    private static Vec3 tiltAwareOffset(ServerSubLevel subLevel, double fillFraction) {
         double cx = 0.5;
         double cy = fillFraction / 2.0;
         double cz = 0.5;
@@ -82,16 +88,13 @@ public class SablePhysicsCompat {
         Pose3dc pose = subLevel.logicalPose();
         if (pose == null) return new Vec3(cx, cy, cz);
 
-        // Local gravity = world down transformed into sub-level space
         Vector3d localGrav = pose.transformNormalInverse(new Vector3d(0, -1, 0), new Vector3d());
 
-        // Fluid shifts toward where gravity points. Scale by empty space (more room to shift).
         double emptyRoom = 1.0 - fillFraction;
         cx += localGrav.x * 0.5 * emptyRoom * 0.5;
         cy += localGrav.y * 0.5 * emptyRoom * 0.5;
         cz += localGrav.z * 0.5 * emptyRoom * 0.5;
 
-        // Clamp to valid sub-block range
         cx = Math.clamp(cx, 0.05, 0.95);
         cy = Math.clamp(cy, 0.05, 0.95);
         cz = Math.clamp(cz, 0.05, 0.95);

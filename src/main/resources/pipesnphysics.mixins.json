@@ -8,7 +8,8 @@
     "PumpBlockEntityMixin",
     "PipeGoggleInfoMixin",
     "GravityFlowMixin",
-    "FluidTankAccessor"
+    "FluidTankAccessor",
+    "OpenEndedPipeMixin"
   ],
   "client": [
     "PonderSceneRegistryMixin"
