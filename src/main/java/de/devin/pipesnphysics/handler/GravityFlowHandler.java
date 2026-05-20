@@ -143,7 +143,7 @@ public class GravityFlowHandler {
         if (tankBE instanceof FluidTankBlockEntity ftbe) {
             tankHeight = ftbe.getHeight();
         }
-        double fluidSurfaceY = source.pipeWorldY() + tankHeight * fillFraction;
+        double fluidSurfaceY = source.pipeWorldY() + tankHeight * Math.floor(fillFraction * 20) / 20.0;
         NetworkEndpoint originalSource = source;
         source = new NetworkEndpoint(
                 source.handlerNode(), source.pipeNode(), source.faceIndex(),
@@ -163,6 +163,9 @@ public class GravityFlowHandler {
             var testStack = sourceFluid.copyWithAmount(1);
             int accepted = sinkHandler.fill(testStack, FluidAction.SIMULATE);
             if (accepted > 0) {
+                validEndpoints.add(ep);
+            } else if (FluidPropagator.isOpenEnd(level, PipeGraphBuilder.posOf(ep.pipeNode()),
+                    PipeGraphBuilder.directionOf(ep.faceIndex()))) {
                 validEndpoints.add(ep);
             }
         }
@@ -216,8 +219,10 @@ public class GravityFlowHandler {
                 Set<Integer> outFaces = result.outboundFaceIndices().getOrDefault(node, Set.of());
                 for (int faceIdx : outFaces) {
                     BlockPos neighborPos = pos.relative(PipeGraphBuilder.directionOf(faceIdx));
-                    if (result.activePipes().contains(PipeGraphBuilder.nodeOf(neighborPos))) {
-                        pipe.addPressure(PipeGraphBuilder.directionOf(faceIdx), false, pressure);
+                    NodeId neighborNode = PipeGraphBuilder.nodeOf(neighborPos);
+                    if (result.activePipes().contains(neighborNode)) {
+                        float outPressure = result.pipePressures().getOrDefault(neighborNode, pressure);
+                        pipe.addPressure(PipeGraphBuilder.directionOf(faceIdx), false, outPressure);
                     }
                 }
 

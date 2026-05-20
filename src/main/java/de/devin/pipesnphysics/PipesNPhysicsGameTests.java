@@ -3,9 +3,26 @@ package de.devin.pipesnphysics;
 import com.simibubi.create.AllBlocks;
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
+import de.devin.pipesnphysics.handler.GravityFlowHandler;
+import de.devin.pipesnphysics.handler.PhysicsConfigFactory;
+import de.devin.pipesnphysics.handler.PipeGraphBuilder;
+import de.devin.pipesnphysics.physics.FlowState;
+import de.devin.pipesnphysics.physics.GravityFlowResult;
+import de.devin.pipesnphysics.physics.NetworkEndpoint;
+import de.devin.pipesnphysics.physics.NetworkSolver;
+import de.devin.pipesnphysics.physics.NodeId;
+import de.devin.pipesnphysics.physics.NodeKind;
 import de.devin.pipesnphysics.physics.PhysicsConfig;
+import de.devin.pipesnphysics.physics.PipeEdge;
 import de.devin.pipesnphysics.physics.PipeFormulas;
+import de.devin.pipesnphysics.physics.PipeGraph;
+import de.devin.pipesnphysics.physics.PipeNode;
+import de.devin.pipesnphysics.physics.PressureBreakdown;
+import java.util.*;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.server.level.ServerLevel;
@@ -595,6 +612,180 @@ public class PipesNPhysicsGameTests {
                 if (!handler.getFluidInTank(i).isEmpty()) return;
             }
             helper.fail("Dest tank has no fluid — two pumps in series failed to transfer");
+        });
+    }
+
+    @GameTest(template = "empty_1x1x1", templateNamespace = PipesNPhysics.ID)
+    public static void flowSplitsAtJunction(GameTestHelper helper) {
+        // Build a Y-shaped graph: source → junction → branch A (sink), branch B (sink)
+        // Both branches at same height, same friction → flow splits 50/50
+        PipeFormulas formulas = testFormulas(15.0f, 5.0f, 60.0f, 0.1f);
+        NetworkSolver solver = new NetworkSolver(formulas);
+
+        // Source handler at Y=5, pipe at Y=4
+        // Junction pipe at Y=3 (1 vertical drop)
+        // Branch A: pipe at Y=2, sink handler at Y=1
+        // Branch B: pipe at Y=2, sink handler at Y=1 (same height, symmetric)
+        NodeId sourceHandler = new NodeId("srcHandler");
+        NodeId sourcePipe = new NodeId("srcPipe");
+        NodeId junction = new NodeId("junction");
+        NodeId branchA = new NodeId("branchA");
+        NodeId branchB = new NodeId("branchB");
+        NodeId sinkA = new NodeId("sinkA");
+        NodeId sinkB = new NodeId("sinkB");
+
+        Map<NodeId, PipeNode> nodes = new LinkedHashMap<>();
+        nodes.put(sourcePipe, new PipeNode(sourcePipe, NodeKind.PIPE, 4.5, null));
+        nodes.put(junction, new PipeNode(junction, NodeKind.PIPE, 3.5, null));
+        nodes.put(branchA, new PipeNode(branchA, NodeKind.PIPE, 2.5, null));
+        nodes.put(branchB, new PipeNode(branchB, NodeKind.PIPE, 2.5, null));
+
+        Map<NodeId, List<PipeEdge>> adjacency = new HashMap<>();
+        adjacency.computeIfAbsent(sourcePipe, k -> new ArrayList<>())
+                .add(new PipeEdge(sourcePipe, junction, 90.0f, 4.5, 3.5, 0));
+        adjacency.computeIfAbsent(junction, k -> new ArrayList<>())
+                .add(new PipeEdge(junction, sourcePipe, 90.0f, 3.5, 4.5, 1));
+        adjacency.computeIfAbsent(junction, k -> new ArrayList<>())
+                .add(new PipeEdge(junction, branchA, 45.0f, 3.5, 2.5, 5));
+        adjacency.computeIfAbsent(branchA, k -> new ArrayList<>())
+                .add(new PipeEdge(branchA, junction, 45.0f, 2.5, 3.5, 4));
+        adjacency.computeIfAbsent(junction, k -> new ArrayList<>())
+                .add(new PipeEdge(junction, branchB, 45.0f, 3.5, 2.5, 4));
+        adjacency.computeIfAbsent(branchB, k -> new ArrayList<>())
+                .add(new PipeEdge(branchB, junction, 45.0f, 2.5, 3.5, 5));
+
+        List<NetworkEndpoint> endpoints = List.of(
+                new NetworkEndpoint(sourceHandler, sourcePipe, 1, 5.5, 4.5),
+                new NetworkEndpoint(sinkA, branchA, 0, 1.5, 2.5),
+                new NetworkEndpoint(sinkB, branchB, 0, 1.5, 2.5)
+        );
+
+        PipeGraph graph = new PipeGraph(nodes, adjacency, endpoints);
+        GravityFlowResult result = solver.solveGravityFlow(graph);
+        if (result == null) { helper.fail("solveGravityFlow returned null"); return; }
+
+        Float pressureA = result.pipePressures().get(branchA);
+        Float pressureB = result.pipePressures().get(branchB);
+        if (pressureA == null || pressureB == null) {
+            helper.fail("Branch pressures are null: A=" + pressureA + " B=" + pressureB);
+            return;
+        }
+
+        // Symmetric branches must have equal pressure
+        assertClose(helper, "branches equal", pressureA, pressureB);
+
+        // Without splitting, each branch would get full junction pressure.
+        // With splitting, each should get roughly half.
+        Float junctionPressure = result.pipePressures().get(junction);
+        if (junctionPressure == null) { helper.fail("Junction pressure is null"); return; }
+
+        float totalBranchFlow = pressureA / 2f + pressureB / 2f;
+        float junctionFlow = junctionPressure / 2f;
+        if (totalBranchFlow > junctionFlow + 0.1f) {
+            helper.fail("Flow not conserved at junction: branches demand "
+                    + totalBranchFlow + " mB/t but junction supplies " + junctionFlow + " mB/t");
+            return;
+        }
+
+        helper.succeed();
+    }
+
+    @GameTest(template = "the_lava_test", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void lavaTestConsistentFlow(GameTestHelper helper) {
+        BlockPos[] pipes = {
+                new BlockPos(0, 2, 2), new BlockPos(0, 1, 2),
+                new BlockPos(1, 1, 2), new BlockPos(2, 1, 2),
+                new BlockPos(2, 1, 1), new BlockPos(2, 1, 3)
+        };
+
+        helper.runAfterDelay(5, () -> {
+            ServerLevel level = helper.getLevel();
+            // Propagate all pipes in the structure
+            for (BlockPos rel : pipes) {
+                BlockPos abs = helper.absolutePos(rel);
+                FluidPropagator.propagateChangedPipe(level, abs, level.getBlockState(abs));
+            }
+        });
+
+        helper.runAfterDelay(200, () -> {
+            ServerLevel level = helper.getLevel();
+            BlockPos firstPipe = helper.absolutePos(pipes[2]);
+
+            PipeGraph graph = PipeGraphBuilder.discover(level, firstPipe);
+            NetworkSolver solver = new NetworkSolver(new PipeFormulas(PhysicsConfigFactory.fromModConfig()));
+            GravityFlowResult flow = solver.solveGravityFlow(graph);
+
+            if (flow == null) {
+                helper.fail("No gravity flow (nodes=" + graph.nodes().size()
+                        + " endpoints=" + graph.endpoints().size() + ")");
+                return;
+            }
+
+            Map<NodeId, PressureBreakdown> breakdowns = solver.computeAllBreakdowns(graph, flow);
+
+            BlockPos trunk1 = helper.absolutePos(pipes[0]);
+            BlockPos trunk2 = helper.absolutePos(pipes[1]);
+            BlockPos trunk3 = helper.absolutePos(pipes[2]);
+            PressureBreakdown bd1 = breakdowns.get(PipeGraphBuilder.nodeOf(trunk1));
+            PressureBreakdown bd2 = breakdowns.get(PipeGraphBuilder.nodeOf(trunk2));
+            PressureBreakdown bd3 = breakdowns.get(PipeGraphBuilder.nodeOf(trunk3));
+
+            if (bd1 == null || bd2 == null || bd3 == null) {
+                helper.fail("Missing breakdown: bd1=" + bd1 + " bd2=" + bd2 + " bd3=" + bd3);
+                return;
+            }
+
+            if (bd1.net() != bd2.net() || bd2.net() != bd3.net()) {
+                helper.fail("Inconsistent trunk flow: " + bd1.net() + " / " + bd2.net() + " / " + bd3.net());
+                return;
+            }
+
+            helper.succeed();
+        });
+    }
+
+    @GameTest(template = "fill_to_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400, required = false)
+    public static void fillToCauldron(GameTestHelper helper) {
+        BlockPos[] pipes = { new BlockPos(0, 2, 0), new BlockPos(0, 1, 0), new BlockPos(1, 1, 0) };
+        helper.runAfterDelay(5, () -> {
+            propagatePipes(helper, pipes);
+            for (BlockPos rel : pipes) {
+                GravityFlowHandler.scheduleCheck(helper.getLevel(), helper.absolutePos(rel));
+            }
+        });
+
+        helper.succeedWhen(() -> {
+            BlockPos cauldron = helper.absolutePos(new BlockPos(2, 1, 0));
+            BlockState state = helper.getLevel().getBlockState(cauldron);
+            if (!state.toString().contains("lava_cauldron")) {
+                helper.fail("Cauldron not filled: " + state);
+            }
+        });
+    }
+
+    @GameTest(template = "suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void suckFromCauldron(GameTestHelper helper) {
+        // (0,2,0) cauldron, (0,1,0) pipe down, (0,0,0) corner, (1,0,0) horizontal, (2,0,0) creative tank
+        // With +1 Y offset: cauldron=(0,3,0), pipes=(0,2,0),(0,1,0),(1,1,0), tank=(2,1,0)
+        BlockPos[] pipes = { new BlockPos(0, 2, 0), new BlockPos(0, 1, 0), new BlockPos(1, 1, 0) };
+
+        // Fill the cauldron with water first
+        helper.runAfterDelay(5, () -> {
+            BlockPos cauldron = helper.absolutePos(new BlockPos(0, 3, 0));
+            helper.getLevel().setBlock(cauldron,
+                    net.minecraft.world.level.block.Blocks.WATER_CAULDRON.defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.LayeredCauldronBlock.LEVEL, 3),
+                    Block.UPDATE_ALL);
+            propagatePipes(helper, pipes);
+        });
+
+        helper.succeedWhen(() -> {
+            BlockPos cauldron = helper.absolutePos(new BlockPos(0, 3, 0));
+            BlockState state = helper.getLevel().getBlockState(cauldron);
+            // Cauldron should be drained (back to empty cauldron)
+            if (state.toString().contains("water_cauldron")) {
+                helper.fail("Cauldron still has water: " + state);
+            }
         });
     }
 

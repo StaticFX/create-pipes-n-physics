@@ -181,13 +181,15 @@ public class DebugGraphCommand {
 
             send(player, "§7  " + sideLabel + " side (" + side + "):");
 
-            // BFS mirroring what distributePressureTo does
             Map<BlockPos, Float> frictionMap = new HashMap<>();
+            Map<BlockPos, Double> peakYMap = new HashMap<>();
             Set<BlockPos> visited = new HashSet<>();
             Queue<BlockPos> frontier = new ArrayDeque<>();
             visited.add(pumpPos);
             float startElev = SableCompat.getPipeElevation(level, pumpPos, side);
             frictionMap.put(startPos, formulas.segmentFriction(startElev));
+            double startNodeY = SableCompat.getWorldY(level, startPos);
+            peakYMap.put(startPos, Math.max(pumpWorldY, startNodeY));
             frontier.add(startPos);
 
             int reachCount = 0;
@@ -199,16 +201,19 @@ public class DebugGraphCommand {
 
                 float friction = frictionMap.getOrDefault(current, 0f);
                 double nodeY = SableCompat.getWorldY(level, current);
+                double peakY = peakYMap.getOrDefault(current, pumpWorldY);
+                float reachPressure = formulas.pumpPressure(pumpBase, pumpWorldY, peakY, friction);
                 float pressure = formulas.pumpPressure(pumpBase, pumpWorldY, nodeY, friction);
                 float gravAssist = formulas.config().pumpGravityEnabled()
                         ? (float) (pumpWorldY - nodeY) * formulas.config().gravityPerBlock() * formulas.config().pumpGravityFactor()
                         : 0;
 
-                send(player, String.format("    §f%s §7fric=§f%.1f §7grav=§f%+.1f §7pres=§f%.1f%s",
+                String siphonTag = peakY > nodeY + 0.5 ? " §b(siphon)" : "";
+                send(player, String.format("    §f%s §7fric=§f%.1f §7grav=§f%+.1f §7pres=§f%.1f%s%s",
                         current.toShortString(), friction, gravAssist, pressure,
-                        pressure <= 0 ? " §c(OUT OF RANGE)" : ""));
+                        reachPressure <= 0 ? " §c(OUT OF RANGE)" : "", siphonTag));
 
-                if (pressure <= 0) continue;
+                if (reachPressure <= 0) continue;
                 reachCount++;
 
                 BlockState currentState = level.getBlockState(current);
@@ -216,7 +221,6 @@ public class DebugGraphCommand {
                     BlockPos next = current.relative(face);
                     if (visited.contains(next)) continue;
 
-                    // Check for endpoint (tank)
                     var handler = level.getCapability(
                             net.neoforged.neoforge.capabilities.Capabilities.FluidHandler.BLOCK,
                             next, face.getOpposite());
@@ -228,6 +232,8 @@ public class DebugGraphCommand {
                     if (FluidPropagator.getPipe(level, next) == null) continue;
                     float elev = SableCompat.getPipeElevation(level, current, face);
                     frictionMap.put(next, friction + formulas.segmentFriction(elev));
+                    double nextY = SableCompat.getWorldY(level, next);
+                    peakYMap.put(next, Math.max(peakY, nextY));
                     frontier.add(next);
                 }
             }

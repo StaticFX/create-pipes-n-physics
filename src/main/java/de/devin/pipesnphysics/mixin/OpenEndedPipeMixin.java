@@ -5,10 +5,6 @@ import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.material.FlowingFluid;
-import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.fluids.FluidStack;
 import org.spongepowered.asm.mixin.Mixin;
@@ -24,68 +20,42 @@ public class OpenEndedPipeMixin {
     @Shadow private Level world;
     @Shadow private BlockPos outputPos;
 
-    @Inject(method = "provideFluidToSpace", at = @At("HEAD"), cancellable = true)
-    private void pipesnphysics$provideFluidToWorld(FluidStack fluid, boolean simulate, CallbackInfoReturnable<Boolean> cir) {
-        BlockPos worldBlockPos = pipesnphysics$getWorldOutputPos();
-        if (worldBlockPos == null) return;
+    @Unique private BlockPos pipesnphysics$savedOutputPos;
 
-        if (world == null || !world.isLoaded(worldBlockPos)) {
-            cir.setReturnValue(false);
-            return;
-        }
-
-        if (fluid.isEmpty() || !(fluid.getFluid() instanceof FlowingFluid)) {
-            cir.setReturnValue(false);
-            return;
-        }
-
-        BlockState state = world.getBlockState(worldBlockPos);
-        FluidState fluidState = state.getFluidState();
-
-        if (!state.canBeReplaced()) {
-            cir.setReturnValue(false);
-            return;
-        }
-
-        if (fluidState.isSource()) {
-            cir.setReturnValue(false);
-            return;
-        }
-
-        if (simulate) {
-            cir.setReturnValue(true);
-            return;
-        }
-
-        world.setBlock(worldBlockPos, fluid.getFluid()
-                .defaultFluidState()
-                .createLegacyBlock(), Block.UPDATE_ALL);
-        cir.setReturnValue(true);
+    @Inject(method = "provideFluidToSpace", at = @At("HEAD"))
+    private void pipesnphysics$beforeProvide(FluidStack fluid, boolean simulate, CallbackInfoReturnable<Boolean> cir) {
+        pipesnphysics$swapToWorldPos();
     }
 
-    @Inject(method = "removeFluidFromSpace", at = @At("HEAD"), cancellable = true)
-    private void pipesnphysics$removeFluidFromWorld(boolean simulate, CallbackInfoReturnable<FluidStack> cir) {
+    @Inject(method = "provideFluidToSpace", at = @At("RETURN"))
+    private void pipesnphysics$afterProvide(FluidStack fluid, boolean simulate, CallbackInfoReturnable<Boolean> cir) {
+        pipesnphysics$restorePos();
+    }
+
+    @Inject(method = "removeFluidFromSpace", at = @At("HEAD"))
+    private void pipesnphysics$beforeRemove(boolean simulate, CallbackInfoReturnable<FluidStack> cir) {
+        pipesnphysics$swapToWorldPos();
+    }
+
+    @Inject(method = "removeFluidFromSpace", at = @At("RETURN"))
+    private void pipesnphysics$afterRemove(boolean simulate, CallbackInfoReturnable<FluidStack> cir) {
+        pipesnphysics$restorePos();
+    }
+
+    @Unique
+    private void pipesnphysics$swapToWorldPos() {
         BlockPos worldBlockPos = pipesnphysics$getWorldOutputPos();
         if (worldBlockPos == null) return;
+        pipesnphysics$savedOutputPos = outputPos;
+        outputPos = worldBlockPos;
+    }
 
-        if (world == null || !world.isLoaded(worldBlockPos)) {
-            cir.setReturnValue(FluidStack.EMPTY);
-            return;
+    @Unique
+    private void pipesnphysics$restorePos() {
+        if (pipesnphysics$savedOutputPos != null) {
+            outputPos = pipesnphysics$savedOutputPos;
+            pipesnphysics$savedOutputPos = null;
         }
-
-        BlockState state = world.getBlockState(worldBlockPos);
-        FluidState fluidState = state.getFluidState();
-
-        if (!fluidState.isSource()) {
-            cir.setReturnValue(FluidStack.EMPTY);
-            return;
-        }
-
-        if (!simulate) {
-            world.setBlock(worldBlockPos, fluidState.createLegacyBlock(), Block.UPDATE_ALL);
-        }
-
-        cir.setReturnValue(new FluidStack(fluidState.getType(), 1000));
     }
 
     @Unique

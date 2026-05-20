@@ -21,6 +21,7 @@
   "pipesnphysics.gui.goggles.reach": "Reach at this pipe:",
   "pipesnphysics.gui.goggles.remaining": "Remaining",
   "pipesnphysics.gui.goggles.more_blocks": " more blocks",
+  "pipesnphysics.gui.goggles.viscosity_penalty": " friction",
 
   "pipesnphysics.ponder.pump.header": "Mechanical Pump",
   "pipesnphysics.ponder.pump.text_1": "A fluid tank filled with water",
