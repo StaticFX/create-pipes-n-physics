@@ -161,8 +161,7 @@ if (System.getenv("CURSEFORGE_TOKEN")) {
         mainFile.addModLoader('NeoForge')
         mainFile.addJavaVersion('Java 21')
         mainFile.addRequirement('create')
-        mainFile.addOptional('sable')
-        mainFile.addOptional('sable-companion')
+        mainFile.addOptional(1312371)
     }
 }
 
@@ -178,8 +177,7 @@ if (System.getenv("MODRINTH_TOKEN")) {
         loaders = ['neoforge']
         dependencies {
             required.project 'create'
-            optional.project 'sable'
-            optional.project 'sable-companion'
+            optional.project 'T9PomCSv'
         }
     }
 }
