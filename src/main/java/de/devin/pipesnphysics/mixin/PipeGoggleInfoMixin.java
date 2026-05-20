@@ -16,7 +16,9 @@ import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.handler.PhysicsConfigFactory;
 import de.devin.pipesnphysics.handler.PipeGraphBuilder;
+import de.devin.pipesnphysics.physics.GravityFlowResult;
 import de.devin.pipesnphysics.physics.NetworkSolver;
+import de.devin.pipesnphysics.physics.NodeId;
 import de.devin.pipesnphysics.physics.PhysicsConfig;
 import de.devin.pipesnphysics.physics.PipeFormulas;
 import de.devin.pipesnphysics.physics.PipeGraph;
@@ -259,7 +261,9 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         PhysicsConfig config = PhysicsConfigFactory.fromModConfig();
         PipeFormulas formulas = new PipeFormulas(config);
         NetworkSolver solver = new NetworkSolver(formulas);
-        return solver.computeBreakdownAt(graph, PipeGraphBuilder.nodeOf(thisPos));
+        GravityFlowResult flow = solver.solveGravityFlow(graph);
+        NodeId nodeId = PipeGraphBuilder.nodeOf(thisPos);
+        return solver.computeAllBreakdowns(graph, flow).get(nodeId);
     }
 
     @Unique

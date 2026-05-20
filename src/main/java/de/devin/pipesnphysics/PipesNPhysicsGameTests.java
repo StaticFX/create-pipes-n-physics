@@ -517,47 +517,35 @@ public class PipesNPhysicsGameTests {
      * Same vertical drop as above, but 5 horizontal segments instead of 2.
      *
      * <p>With default config:
-     * <ul>
-     *   <li>Head pressure: 6 blocks × 3.0 = 18.0</li>
-     *   <li>Angle-based friction: 6 vertical(0) + 5 horizontal(5) = 25.0</li>
-     *   <li>Net pressure: 18 - 25 = -7 → clamped to 0 → <b>no flow</b></li>
-     * </ul></p>
+     * <p>With hydrostatic pressure (full tank surface at Y=3), head = (3-1) × 15 = 30.
+     * Friction: 1 vertical(0) + 7 horizontal × 5.0 = 35 &gt; 30 → no flow.</p>
      */
-    @GameTest(template = "empty_8x9x3", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    @GameTest(template = "empty_10x3x3", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
     public static void lShapedExcessFrictionBlocksFlow(GameTestHelper helper) {
-        // Layout:
-        // (1,7,1) source tank
-        // (1,6,1)-(1,1,1) 6 vertical pipes
-        // (2,1,1)-(6,1,1) 5 horizontal pipes → friction exceeds head pressure
-        // (7,1,1) destination tank
-        BlockPos sourceTank = new BlockPos(1, 7, 1);
-        BlockPos destTank = new BlockPos(7, 1, 1);
+        BlockPos sourceTank = new BlockPos(1, 2, 1);
+        BlockPos destTank = new BlockPos(9, 1, 1);
 
         helper.setBlock(sourceTank, AllBlocks.FLUID_TANK.getDefaultState());
         helper.setBlock(destTank, AllBlocks.FLUID_TANK.getDefaultState());
 
-        BlockPos[] pipes = new BlockPos[11];
-        for (int y = 1; y <= 6; y++) {
-            pipes[y - 1] = new BlockPos(1, y, 1);
-            helper.setBlock(pipes[y - 1], AllBlocks.FLUID_PIPE.getDefaultState());
-        }
-        for (int x = 2; x <= 6; x++) {
-            pipes[x + 4] = new BlockPos(x, 1, 1);
-            helper.setBlock(pipes[x + 4], AllBlocks.FLUID_PIPE.getDefaultState());
+        BlockPos[] pipes = new BlockPos[8];
+        pipes[0] = new BlockPos(1, 1, 1);
+        helper.setBlock(pipes[0], AllBlocks.FLUID_PIPE.getDefaultState());
+        for (int x = 2; x <= 8; x++) {
+            pipes[x - 1] = new BlockPos(x, 1, 1);
+            helper.setBlock(pipes[x - 1], AllBlocks.FLUID_PIPE.getDefaultState());
         }
 
         helper.runAfterDelay(20, () -> propagatePipes(helper, pipes));
         helper.runAfterDelay(60, () -> fillTank(helper, sourceTank, 8000));
 
-        // Destination should remain empty — friction exceeds head pressure
         helper.runAfterDelay(180, () -> {
             BlockPos abs = helper.absolutePos(destTank);
             var handler = helper.getLevel().getCapability(Capabilities.FluidHandler.BLOCK, abs, null);
             if (handler != null) {
                 for (int i = 0; i < handler.getTanks(); i++) {
                     if (!handler.getFluidInTank(i).isEmpty()) {
-                        helper.fail("Fluid should not reach destination — horizontal friction "
-                                + "(25.0) exceeds head pressure (18.0)");
+                        helper.fail("Fluid should not reach destination — horizontal friction exceeds head pressure");
                         return;
                     }
                 }
@@ -617,10 +605,10 @@ public class PipesNPhysicsGameTests {
     }
 
     private static PipeFormulas testFormulas(float gravity, float friction, float maxPressure, float deadZone) {
-        return new PipeFormulas(new PhysicsConfig(gravity, friction, maxPressure, deadZone, 5.0f, true, true, 1.0f, 10, true));
+        return new PipeFormulas(new PhysicsConfig(gravity, friction, maxPressure, deadZone, 5.0f, true, true, 1.0f, 10, true, 0.3f));
     }
 
     private static PipeFormulas testFormulasWithGravityFactor(float gravity, float friction, float maxPressure, float deadZone, float gravityFactor) {
-        return new PipeFormulas(new PhysicsConfig(gravity, friction, maxPressure, deadZone, 5.0f, true, true, gravityFactor, 10, true));
+        return new PipeFormulas(new PhysicsConfig(gravity, friction, maxPressure, deadZone, 5.0f, true, true, gravityFactor, 10, true, 0.3f));
     }
 }

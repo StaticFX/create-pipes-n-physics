@@ -14,5 +14,6 @@ public record PhysicsConfig(
         boolean pumpGravityEnabled,
         float pumpGravityFactor,
         int maxGravityRange,
-        boolean frictionAffectsFlow
+        boolean frictionAffectsFlow,
+        float viscosityScaling
 ) {}

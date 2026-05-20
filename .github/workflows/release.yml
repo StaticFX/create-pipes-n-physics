@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  release:
+    types: [ published ]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Determine release type
+        id: release_type
+        run: |
+          if [ "${{ github.event.release.prerelease }}" = "true" ]; then
+            echo "type=alpha" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=release" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        run: ./gradlew build
+
+      - name: Attach jar to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" build/libs/pipesnphysics-*.jar --clobber
+
+      - name: Publish to CurseForge
+        run: ./gradlew publishCurseForge
+        env:
+          CURSEFORGE_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+          CURSEFORGE_PROJECT_ID: ${{ secrets.CURSEFORGE_PROJECT_ID }}
+          RELEASE_TYPE: ${{ steps.release_type.outputs.type }}
+          CHANGELOG: ${{ github.event.release.body }}
+
+      - name: Publish to Modrinth
+        run: ./gradlew modrinth
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+          MODRINTH_PROJECT_ID: ${{ secrets.MODRINTH_PROJECT_ID }}
+          RELEASE_TYPE: ${{ steps.release_type.outputs.type }}
+          CHANGELOG: ${{ github.event.release.body }}

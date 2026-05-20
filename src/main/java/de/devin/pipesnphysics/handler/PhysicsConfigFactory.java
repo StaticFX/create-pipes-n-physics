@@ -23,7 +23,8 @@ public final class PhysicsConfigFactory {
                 PipesNPhysicsConfig.ENABLE_PUMP_GRAVITY.get(),
                 PipesNPhysicsConfig.PUMP_GRAVITY_FACTOR.get().floatValue(),
                 PipesNPhysicsConfig.MAX_GRAVITY_RANGE.get(),
-                PipesNPhysicsConfig.FRICTION_AFFECTS_FLOW.get()
+                PipesNPhysicsConfig.FRICTION_AFFECTS_FLOW.get(),
+                PipesNPhysicsConfig.VISCOSITY_SCALING.get().floatValue()
         );
     }
 }

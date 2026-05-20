@@ -52,24 +52,21 @@ public class SablePhysicsCompat {
         Double prevMass = lastAppliedMass.get(key);
         if (prevMass != null && Math.abs(prevMass - massKg) < 0.001) return;
 
-        BlockState state;
         try {
             var level = subLevel.getPlot().getEmbeddedLevelAccessor();
-            state = level.getBlockState(controllerPos);
+            BlockState state = level.getBlockState(controllerPos);
+
+            if (prevMass != null && prevMass > 0) {
+                Vec3 prevOffset = lastAppliedOffset.getOrDefault(key, offset);
+                tracker.addBlockMass(level, state, controllerPos, -prevMass, prevOffset);
+            }
+
+            tracker.addBlockMass(level, state, controllerPos, massKg, offset);
+            lastAppliedMass.put(key, massKg);
+            lastAppliedOffset.put(key, offset);
         } catch (Exception e) {
-            PipesNPhysics.LOGGER.error("Failed to apply Via Mass Tracker!", e);
             return;
         }
-
-        var level = subLevel.getPlot().getEmbeddedLevelAccessor();
-        if (prevMass != null && prevMass > 0) {
-            Vec3 prevOffset = lastAppliedOffset.getOrDefault(key, offset);
-            tracker.addBlockMass(level, state, controllerPos, -prevMass, prevOffset);
-        }
-
-        tracker.addBlockMass(level, state, controllerPos, massKg, offset);
-        lastAppliedMass.put(key, massKg);
-        lastAppliedOffset.put(key, offset);
     }
 
     private static Vec3 tiltAwareOffset(ServerSubLevel subLevel, double fillFraction) {

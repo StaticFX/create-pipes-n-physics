@@ -33,21 +33,29 @@ public final class PipeFormulas {
      * @return friction value for this segment
      */
     public float segmentFriction(float elevationAngleDegrees) {
+        return segmentFriction(elevationAngleDegrees, 1.0f);
+    }
+
+    public float segmentFriction(float elevationAngleDegrees, float viscosityMultiplier) {
+        float base;
         if (!config.anglePhysicsEnabled()) {
-            // Simple mode: vertical = 0, everything else = full
-            return elevationAngleDegrees >= VERTICAL_THRESHOLD ? 0 : config.frictionPerBlock();
+            base = elevationAngleDegrees >= VERTICAL_THRESHOLD ? 0 : config.frictionPerBlock();
+        } else {
+            float threshold = config.minGravityAngleDegrees();
+            if (threshold <= 0) {
+                float sinElev = (float) Math.sin(Math.toRadians(elevationAngleDegrees));
+                float factor = 1.0f - sinElev;
+                base = factor * factor * config.frictionPerBlock();
+            } else if (elevationAngleDegrees >= threshold) {
+                base = 0;
+            } else {
+                float t = elevationAngleDegrees / threshold;
+                float factor = 1.0f - t;
+                base = factor * factor * config.frictionPerBlock();
+            }
         }
-        float threshold = config.minGravityAngleDegrees();
-        if (threshold <= 0) {
-            // No threshold — squared falloff from (1 - sin)²
-            float sinElev = (float) Math.sin(Math.toRadians(elevationAngleDegrees));
-            float factor = 1.0f - sinElev;
-            return factor * factor * config.frictionPerBlock();
-        }
-        if (elevationAngleDegrees >= threshold) return 0;
-        float t = elevationAngleDegrees / threshold;
-        float factor = 1.0f - t;
-        return factor * factor * config.frictionPerBlock();
+        float scaled = 1.0f + (viscosityMultiplier - 1.0f) * config.viscosityScaling();
+        return base * scaled;
     }
 
     /**

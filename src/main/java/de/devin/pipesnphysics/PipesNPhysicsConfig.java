@@ -21,6 +21,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.DoubleValue MIN_GRAVITY_ANGLE;
     public static final ModConfigSpec.IntValue MAX_GRAVITY_RANGE;
     public static final ModConfigSpec.BooleanValue FRICTION_AFFECTS_FLOW;
+    public static final ModConfigSpec.DoubleValue VISCOSITY_SCALING;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
@@ -106,6 +107,13 @@ public class PipesNPhysicsConfig {
                         "reducing the bottleneck pressure and thus flow rate for the whole network.",
                         "When false, friction only limits range — all reachable pipes flow at RPM/2 (vanilla-like).")
                 .define("frictionAffectsFlow", true);
+        VISCOSITY_SCALING = server
+                .comment("How much fluid viscosity affects pipe friction.",
+                        "0.0 = viscosity ignored (all fluids flow the same).",
+                        "1.0 = full effect (lava has 6x friction vs water).",
+                        "0.3 = softened (lava has ~2.5x friction vs water).",
+                        "Uses the fluid's viscosity from FluidType (water=1000, lava=6000).")
+                .defineInRange("viscosityScaling", 0.3, 0.0, 2.0);
         server.pop();
 
         server.push("sableCompat");
