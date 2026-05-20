@@ -40,7 +40,7 @@ public class GravityFlowHandler {
 
         @Override
         public int hashCode() {
-            return pos.hashCode();
+            return 31 * System.identityHashCode(level) + pos.hashCode();
         }
     }
 
@@ -59,12 +59,22 @@ public class GravityFlowHandler {
         cachedBreakdowns.clear();
     }
 
+    private static final int STALE_ENTRY_TICKS = 6000; // ~5 minutes
+    private static long lastPurgeTick = 0;
+
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
         if (scheduledChecks.isEmpty()) return;
         if (!PipesNPhysicsConfig.ENABLE_GRAVITY_FLOW.get()) {
             scheduledChecks.clear();
             return;
+        }
+
+        long gameTick = event.getServer().overworld().getGameTime();
+        if (gameTick - lastPurgeTick > STALE_ENTRY_TICKS) {
+            lastPurgeTick = gameTick;
+            lastProcessedTick.entrySet().removeIf(e -> gameTick - e.getValue() > STALE_ENTRY_TICKS);
+            cachedBreakdowns.keySet().retainAll(lastProcessedTick.keySet());
         }
 
         Set<ScheduledCheck> toProcess = new HashSet<>(scheduledChecks);
@@ -164,14 +174,13 @@ public class GravityFlowHandler {
         PhysicsConfig config = PhysicsConfigFactory.fromModConfig();
         PipeFormulas formulas = new PipeFormulas(config);
         NetworkSolver solver = new NetworkSolver(formulas);
-        GravityFlowResult result = solver.solveGravityFlow(filteredGraph);
+        float viscosity = sourceFluid.getFluid().getFluidType().getViscosity(sourceFluid) / 1000f;
+        GravityFlowResult result = solver.solveGravityFlow(filteredGraph, viscosity);
         if (result == null) return;
 
-        for (NodeId nodeId : result.activePipes()) {
-            PressureBreakdown breakdown = solver.computeBreakdownAt(filteredGraph, nodeId);
-            if (breakdown != null) {
-                cachedBreakdowns.put(PipeGraphBuilder.posOf(nodeId), breakdown);
-            }
+        Map<NodeId, PressureBreakdown> breakdowns = solver.computeAllBreakdowns(filteredGraph, result, viscosity);
+        for (var entry : breakdowns.entrySet()) {
+            cachedBreakdowns.put(PipeGraphBuilder.posOf(entry.getKey()), entry.getValue());
         }
 
         applyFlowResult(level, graph, result);

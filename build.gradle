@@ -3,6 +3,8 @@ plugins {
     id 'maven-publish'
     id 'idea'
     id 'net.neoforged.moddev' version '2.0.78'
+    id 'net.darkhax.curseforgegradle' version '1.1.28'
+    id 'com.modrinth.minotaur' version '2.+'
 }
 
 version = mod_version
@@ -143,5 +145,41 @@ idea {
     module {
         downloadSources = true
         downloadJavadoc = true
+    }
+}
+
+if (System.getenv("CURSEFORGE_TOKEN")) {
+    task publishCurseForge(type: net.darkhax.curseforgegradle.TaskPublishCurseForge) {
+        dependsOn build
+        apiToken = System.getenv("CURSEFORGE_TOKEN")
+
+        def mainFile = upload(System.getenv("CURSEFORGE_PROJECT_ID").toInteger(), jar)
+        mainFile.releaseType = System.getenv("RELEASE_TYPE") ?: 'release'
+        mainFile.changelog = System.getenv("CHANGELOG") ?: ''
+        mainFile.changelogType = 'markdown'
+        mainFile.addGameVersion(minecraft_version)
+        mainFile.addModLoader('NeoForge')
+        mainFile.addJavaVersion('Java 21')
+        mainFile.addRequirement('create')
+        mainFile.addOptional('sable')
+        mainFile.addOptional('sable-companion')
+    }
+}
+
+if (System.getenv("MODRINTH_TOKEN")) {
+    modrinth {
+        token = System.getenv("MODRINTH_TOKEN")
+        projectId = System.getenv("MODRINTH_PROJECT_ID")
+        versionNumber = mod_version
+        versionType = System.getenv("RELEASE_TYPE") ?: 'release'
+        changelog = System.getenv("CHANGELOG") ?: ''
+        uploadFile = jar
+        gameVersions = [minecraft_version]
+        loaders = ['neoforge']
+        dependencies {
+            required.project 'create'
+            optional.project 'sable'
+            optional.project 'sable-companion'
+        }
     }
 }

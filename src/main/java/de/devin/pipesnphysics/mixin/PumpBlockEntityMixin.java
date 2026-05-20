@@ -18,6 +18,8 @@ import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.handler.PhysicsConfigFactory;
 import de.devin.pipesnphysics.physics.PipeFormulas;
+import net.neoforged.neoforge.capabilities.Capabilities;
+import net.neoforged.neoforge.fluids.FluidStack;
 import org.spongepowered.asm.mixin.Unique;
 
 import java.util.*;
@@ -121,8 +123,10 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
             int maxDistance = 256;
             frontier.add(Pair.of(1, start.getConnectedPos()));
 
+            float viscosity = pipesnphysics$getFluidViscosity(self, side);
+
             float startElevation = SableCompat.getPipeElevation(self.getLevel(), worldPosition, side);
-            pipesnphysics$frictionMap.put(start.getConnectedPos(), formulas.segmentFriction(startElevation));
+            pipesnphysics$frictionMap.put(start.getConnectedPos(), formulas.segmentFriction(startElevation, viscosity));
 
             while (!frontier.isEmpty()) {
                 Pair<Integer, BlockPos> frontierEntry = frontier.remove(0);
@@ -151,13 +155,12 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
 
                     FluidTransportBehaviour neighborPipe = FluidPropagator.getPipe(self.getLevel(), connectedPos);
                     if (neighborPipe == null) continue;
-                    // String comparison: can't import PumpFluidTransferBehaviour (inner class of mixin target)
-                    if (neighborPipe.getClass().getSimpleName().equals("PumpFluidTransferBehaviour")) continue;
+                    if (neighborPipe.getClass() == self.getBehaviour(FluidTransportBehaviour.TYPE).getClass()) continue;
                     if (visited.contains(connectedPos)) continue;
 
                     float parentFric = pipesnphysics$frictionMap.getOrDefault(currentPos, 0f);
                     float elevation = SableCompat.getPipeElevation(self.getLevel(), currentPos, face);
-                    float nextFric = parentFric + formulas.segmentFriction(elevation);
+                    float nextFric = parentFric + formulas.segmentFriction(elevation, viscosity);
 
                     double nodeY = SableCompat.getWorldY(self.getLevel(), connectedPos);
                     float nodePressure = formulas.pumpPressure(pumpBase, pumpWorldY, nodeY, nextFric);
@@ -221,5 +224,30 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
                 pipeBehaviour.addPressure(pipeSide, inbound, flowPressure);
             }
         }
+    }
+
+    @Unique
+    private static float pipesnphysics$getFluidViscosity(PumpBlockEntity pump, Direction side) {
+        BlockPos neighbor = pump.getBlockPos().relative(side);
+        if (pump.getLevel() == null) return 1.0f;
+        FluidTransportBehaviour pipe = FluidPropagator.getPipe(pump.getLevel(), neighbor);
+        if (pipe != null) {
+            for (Direction d : Direction.values()) {
+                var flow = pipe.getFlow(d);
+                if (flow != null && !flow.fluid.isEmpty()) {
+                    return flow.fluid.getFluid().getFluidType().getViscosity(flow.fluid) / 1000f;
+                }
+            }
+        }
+        var handler = pump.getLevel().getCapability(Capabilities.FluidHandler.BLOCK, neighbor, side.getOpposite());
+        if (handler != null) {
+            for (int i = 0; i < handler.getTanks(); i++) {
+                FluidStack stack = handler.getFluidInTank(i);
+                if (!stack.isEmpty()) {
+                    return stack.getFluid().getFluidType().getViscosity(stack) / 1000f;
+                }
+            }
+        }
+        return 1.0f;
     }
 }

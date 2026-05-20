@@ -13,6 +13,10 @@ public final class NetworkSolver {
     }
 
     public GravityFlowResult solveGravityFlow(PipeGraph graph) {
+        return solveGravityFlow(graph, 1.0f);
+    }
+
+    public GravityFlowResult solveGravityFlow(PipeGraph graph, float viscosityMultiplier) {
         if (graph.hasActivePump()) return null;
         if (graph.endpoints().size() < 2) return null;
 
@@ -27,7 +31,7 @@ public final class NetworkSolver {
         }
         if (source == null) return null;
 
-        FrictionBfsResult bfs = frictionBfs(graph, source.pipeNode(), source.faceIndex());
+        FrictionBfsResult bfs = frictionBfs(graph, source.pipeNode(), source.faceIndex(), viscosityMultiplier);
         applyGravityPreference(bfs.outboundEdges);
 
         List<NetworkEndpoint> validSinks = new ArrayList<>();
@@ -142,14 +146,15 @@ public final class NetworkSolver {
         return new PumpFlowResult(accFriction, nodePressures, hopCounts, reachable);
     }
 
-    public PressureBreakdown computeBreakdownAt(PipeGraph graph, NodeId targetPipe) {
-        GravityFlowResult flow = solveGravityFlow(graph);
-        if (flow == null) return null;
+    public Map<NodeId, PressureBreakdown> computeAllBreakdowns(PipeGraph graph, GravityFlowResult flow) {
+        return computeAllBreakdowns(graph, flow, 1.0f);
+    }
 
-        Float appliedPressure = flow.pipePressures().get(targetPipe);
-        if (appliedPressure == null || appliedPressure <= 0) return null;
+    public Map<NodeId, PressureBreakdown> computeAllBreakdowns(PipeGraph graph, GravityFlowResult flow, float viscosityMultiplier) {
+        Map<NodeId, PressureBreakdown> result = new HashMap<>();
+        if (flow == null) return result;
 
-        FrictionBfsResult bfs = frictionBfs(graph, flow.source().pipeNode(), flow.source().faceIndex());
+        FrictionBfsResult bfs = frictionBfs(graph, flow.source().pipeNode(), flow.source().faceIndex(), viscosityMultiplier);
 
         if (!flow.validSinks().isEmpty()) {
             NetworkEndpoint bottleneckSink = null;
@@ -163,24 +168,37 @@ public final class NetworkSolver {
                     bottleneckSink = sink;
                 }
             }
-            if (bottleneckSink == null) return null;
+            if (bottleneckSink == null) return result;
 
             float sinkFriction = bfs.accumulatedFriction.getOrDefault(bottleneckSink.pipeNode(), 0f);
             float head = (float) (flow.sourceWorldY() - bottleneckSink.pipeWorldY()) * formulas.config().gravityPerBlock();
             float unclamped = head - sinkFriction;
             float net = formulas.gravityPressure(flow.sourceWorldY(), bottleneckSink.pipeWorldY(), sinkFriction);
             boolean capped = unclamped > formulas.config().maxPressure();
-            return new PressureBreakdown(head, sinkFriction, net, capped);
+            PressureBreakdown shared = new PressureBreakdown(head, sinkFriction, net, capped);
+
+            for (NodeId nodeId : flow.activePipes()) {
+                if (flow.pipePressures().getOrDefault(nodeId, 0f) > 0) {
+                    result.put(nodeId, shared);
+                }
+            }
+        } else {
+            for (NodeId nodeId : flow.activePipes()) {
+                Float appliedPressure = flow.pipePressures().get(nodeId);
+                if (appliedPressure == null || appliedPressure <= 0) continue;
+
+                PipeNode node = graph.node(nodeId);
+                if (node == null) continue;
+                float friction = bfs.accumulatedFriction.getOrDefault(nodeId, 0f);
+                float head = (float) (flow.sourceWorldY() - node.worldY()) * formulas.config().gravityPerBlock();
+                float unclamped = head - friction;
+                float net = formulas.gravityPressure(flow.sourceWorldY(), node.worldY(), friction);
+                boolean capped = unclamped > formulas.config().maxPressure();
+                result.put(nodeId, new PressureBreakdown(head, friction, net, capped));
+            }
         }
 
-        PipeNode node = graph.node(targetPipe);
-        if (node == null) return null;
-        float friction = bfs.accumulatedFriction.getOrDefault(targetPipe, 0f);
-        float head = (float) (flow.sourceWorldY() - node.worldY()) * formulas.config().gravityPerBlock();
-        float unclamped = head - friction;
-        float net = formulas.gravityPressure(flow.sourceWorldY(), node.worldY(), friction);
-        boolean capped = unclamped > formulas.config().maxPressure();
-        return new PressureBreakdown(head, friction, net, capped);
+        return result;
     }
 
     private record FrictionBfsResult(
@@ -191,6 +209,10 @@ public final class NetworkSolver {
     ) {}
 
     private FrictionBfsResult frictionBfs(PipeGraph graph, NodeId sourceNode, int sourceFaceIndex) {
+        return frictionBfs(graph, sourceNode, sourceFaceIndex, 1.0f);
+    }
+
+    private FrictionBfsResult frictionBfs(PipeGraph graph, NodeId sourceNode, int sourceFaceIndex, float viscosityMultiplier) {
         Map<NodeId, Float> friction = new HashMap<>();
         Map<NodeId, NodeId> parent = new LinkedHashMap<>();
         Map<NodeId, Integer> inboundFace = new HashMap<>();
@@ -214,7 +236,7 @@ public final class NetworkSolver {
                 outbound.computeIfAbsent(current, id -> new HashSet<>()).add(edge);
 
                 float parentFric = friction.getOrDefault(current, 0f);
-                float segFric = formulas.segmentFriction(edge.elevationAngleDegrees());
+                float segFric = formulas.segmentFriction(edge.elevationAngleDegrees(), viscosityMultiplier);
                 friction.put(neighbor, parentFric + segFric);
 
                 queue.add(neighbor);
@@ -268,15 +290,6 @@ public final class NetworkSolver {
             }
         }
         return result;
-    }
-
-    private double nodeWorldY(PipeGraph graph, NodeId node) {
-        PipeNode pipeNode = graph.node(node);
-        if (pipeNode != null) return pipeNode.worldY();
-        for (NetworkEndpoint ep : graph.endpoints()) {
-            if (ep.pipeNode().equals(node)) return ep.pipeWorldY();
-        }
-        return 0;
     }
 
     private static int reverseFace(int faceIndex) {
