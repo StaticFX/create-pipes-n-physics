@@ -53,7 +53,7 @@ public class SablePhysicsCompat {
         if (prevMass != null && Math.abs(prevMass - massKg) < 0.001) return;
 
         try {
-            var level = subLevel.getPlot().getEmbeddedLevelAccessor();
+            var level = subLevel.getLevel();
             BlockState state = level.getBlockState(controllerPos);
 
             if (prevMass != null && prevMass > 0) {
