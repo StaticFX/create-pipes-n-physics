@@ -50,6 +50,8 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
     @Unique
     private final Map<BlockPos, Float> pipesnphysics$frictionMap = new HashMap<>();
     @Unique
+    private final Map<BlockPos, Double> pipesnphysics$peakYMap = new HashMap<>();
+    @Unique
     private final Map<BlockPos, Float> pipesnphysics$pressureMap = new HashMap<>();
 
     @Unique
@@ -98,6 +100,7 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
         double pumpWorldY = SableCompat.getWorldY(self.getLevel(), worldPosition);
         pipesnphysics$frictionMap.clear();
         pipesnphysics$pressureMap.clear();
+        pipesnphysics$peakYMap.clear();
 
         BlockFace start = new BlockFace(worldPosition, side);
         BlockState pumpState = self.getBlockState();
@@ -127,6 +130,8 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
 
             float startElevation = SableCompat.getPipeElevation(self.getLevel(), worldPosition, side);
             pipesnphysics$frictionMap.put(start.getConnectedPos(), formulas.segmentFriction(startElevation, viscosity));
+            double startNodeY = SableCompat.getWorldY(self.getLevel(), start.getConnectedPos());
+            pipesnphysics$peakYMap.put(start.getConnectedPos(), Math.max(pumpWorldY, startNodeY));
 
             while (!frontier.isEmpty()) {
                 Pair<Integer, BlockPos> frontierEntry = frontier.remove(0);
@@ -163,18 +168,22 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
                     float nextFric = parentFric + formulas.segmentFriction(elevation, viscosity);
 
                     double nodeY = SableCompat.getWorldY(self.getLevel(), connectedPos);
-                    float nodePressure = formulas.pumpPressure(pumpBase, pumpWorldY, nodeY, nextFric);
+                    double parentPeakY = pipesnphysics$peakYMap.getOrDefault(currentPos, pumpWorldY);
+                    double peakY = Math.max(parentPeakY, nodeY);
+                    float reachPressure = formulas.pumpPressure(pumpBase, pumpWorldY, peakY, nextFric);
 
                     int nextHopDistance = distance + 1;
-                    if (nodePressure <= 0 || nextHopDistance > maxDistance) {
+                    if (reachPressure <= 0 || nextHopDistance > maxDistance) {
                         pipeGraph.computeIfAbsent(currentPos, $ -> Pair.of(distance, new IdentityHashMap<>()))
                                 .getSecond().put(face, pull);
                         targets.add(blockFace);
                         continue;
                     }
 
+                    float nodePressure = formulas.pumpPressure(pumpBase, pumpWorldY, nodeY, nextFric);
                     pipesnphysics$frictionMap.put(connectedPos, nextFric);
                     pipesnphysics$pressureMap.put(connectedPos, nodePressure);
+                    pipesnphysics$peakYMap.put(connectedPos, peakY);
                     pipeGraph.computeIfAbsent(currentPos, $ -> Pair.of(distance, new IdentityHashMap<>()))
                             .getSecond().put(face, pull);
                     pipeGraph.computeIfAbsent(connectedPos, $ -> Pair.of(nextHopDistance, new IdentityHashMap<>()))

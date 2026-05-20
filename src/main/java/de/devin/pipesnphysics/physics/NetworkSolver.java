@@ -59,6 +59,7 @@ public final class NetworkSolver {
                 }
             }
             pipePressures = propagateSinkPressures(sinkPressures, bfs.parentNode, source.pipeNode());
+            enforceFlowConservation(pipePressures, bfs.outboundEdges, source.pipeNode(), activePipes);
         } else {
             pipePressures = new LinkedHashMap<>();
             activePipes = new HashSet<>();
@@ -106,10 +107,13 @@ public final class NetworkSolver {
         Map<NodeId, Float> accFriction = new HashMap<>();
         Map<NodeId, Float> nodePressures = new HashMap<>();
         Map<NodeId, Integer> hopCounts = new HashMap<>();
+        Map<NodeId, Double> pathPeakY = new HashMap<>();
         Set<NodeId> reachable = new HashSet<>();
 
         accFriction.put(startNode, 0f);
         hopCounts.put(startNode, 1);
+        PipeNode startPipeNode = graph.node(startNode);
+        pathPeakY.put(startNode, startPipeNode != null ? Math.max(startPipeNode.worldY(), pumpWorldY) : pumpWorldY);
 
         Queue<NodeId> frontier = new ArrayDeque<>();
         Set<NodeId> visited = new HashSet<>();
@@ -121,6 +125,7 @@ public final class NetworkSolver {
 
             int currentHops = hopCounts.getOrDefault(current, 0);
             float currentFriction = accFriction.getOrDefault(current, 0f);
+            double currentPeakY = pathPeakY.getOrDefault(current, pumpWorldY);
 
             for (PipeEdge edge : graph.adjacency().getOrDefault(current, List.of())) {
                 NodeId neighbor = edge.to();
@@ -130,14 +135,18 @@ public final class NetworkSolver {
 
                 float segFric = formulas.segmentFriction(edge.elevationAngleDegrees());
                 float nextFriction = currentFriction + segFric;
-                float pressure = formulas.pumpPressure(pumpBase, pumpWorldY, edge.toWorldY(), nextFriction);
+
+                double peakY = Math.max(currentPeakY, edge.toWorldY());
+                float reachPressure = formulas.pumpPressure(pumpBase, pumpWorldY, peakY, nextFriction);
 
                 int nextHops = currentHops + 1;
-                if (pressure <= 0 || nextHops >= maxHopDistance) continue;
+                if (reachPressure <= 0 || nextHops >= maxHopDistance) continue;
 
+                float pressure = formulas.pumpPressure(pumpBase, pumpWorldY, edge.toWorldY(), nextFriction);
                 accFriction.put(neighbor, nextFriction);
                 nodePressures.put(neighbor, pressure);
                 hopCounts.put(neighbor, nextHops);
+                pathPeakY.put(neighbor, peakY);
                 reachable.add(neighbor);
                 frontier.add(neighbor);
             }
@@ -175,26 +184,27 @@ public final class NetworkSolver {
             float unclamped = head - sinkFriction;
             float net = formulas.gravityPressure(flow.sourceWorldY(), bottleneckSink.pipeWorldY(), sinkFriction);
             boolean capped = unclamped > formulas.config().maxPressure();
-            PressureBreakdown shared = new PressureBreakdown(head, sinkFriction, net, capped);
-
             for (NodeId nodeId : flow.activePipes()) {
-                if (flow.pipePressures().getOrDefault(nodeId, 0f) > 0) {
-                    result.put(nodeId, shared);
+                float pipePressure = flow.pipePressures().getOrDefault(nodeId, 0f);
+                if (pipePressure > 0) {
+                    result.put(nodeId, new PressureBreakdown(head, sinkFriction, net, capped, pipePressure));
                 }
             }
         } else {
-            for (NodeId nodeId : flow.activePipes()) {
-                Float appliedPressure = flow.pipePressures().get(nodeId);
-                if (appliedPressure == null || appliedPressure <= 0) continue;
-
-                PipeNode node = graph.node(nodeId);
-                if (node == null) continue;
-                float friction = bfs.accumulatedFriction.getOrDefault(nodeId, 0f);
-                float head = (float) (flow.sourceWorldY() - node.worldY()) * formulas.config().gravityPerBlock();
-                float unclamped = head - friction;
-                float net = formulas.gravityPressure(flow.sourceWorldY(), node.worldY(), friction);
+            NodeId sourcePipeId = flow.source().pipeNode();
+            PipeNode sourceNode = graph.node(sourcePipeId);
+            if (sourceNode != null) {
+                float sourceFriction = bfs.accumulatedFriction.getOrDefault(sourcePipeId, 0f);
+                float head = (float) (flow.sourceWorldY() - sourceNode.worldY()) * formulas.config().gravityPerBlock();
+                float unclamped = head - sourceFriction;
+                float net = formulas.gravityPressure(flow.sourceWorldY(), sourceNode.worldY(), sourceFriction);
                 boolean capped = unclamped > formulas.config().maxPressure();
-                result.put(nodeId, new PressureBreakdown(head, friction, net, capped));
+                for (NodeId nodeId : flow.activePipes()) {
+                    float pipePressure = flow.pipePressures().getOrDefault(nodeId, 0f);
+                    if (pipePressure > 0) {
+                        result.put(nodeId, new PressureBreakdown(head, sourceFriction, net, capped, pipePressure));
+                    }
+                }
             }
         }
 
@@ -290,6 +300,88 @@ public final class NetworkSolver {
             }
         }
         return result;
+    }
+
+    private void enforceFlowConservation(Map<NodeId, Float> pipePressures,
+                                          Map<NodeId, Set<PipeEdge>> outboundEdges,
+                                          NodeId sourceNode, Set<NodeId> activePipes) {
+        // Build children map (only active pipes)
+        Map<NodeId, List<NodeId>> children = new HashMap<>();
+        for (var entry : outboundEdges.entrySet()) {
+            NodeId parent = entry.getKey();
+            if (!activePipes.contains(parent) && !parent.equals(sourceNode)) continue;
+            List<NodeId> kids = new ArrayList<>();
+            for (PipeEdge edge : entry.getValue()) {
+                if (activePipes.contains(edge.to())) kids.add(edge.to());
+            }
+            if (!kids.isEmpty()) children.put(parent, kids);
+        }
+
+        // Bottom-up: compute subtree flow demand for each node
+        Map<NodeId, Float> subtreeDemand = new HashMap<>();
+        computeSubtreeDemand(sourceNode, children, pipePressures, subtreeDemand);
+
+        // Top-down: enforce conservation at junctions
+        applyFlowBudget(sourceNode, 1.0f, children, pipePressures, subtreeDemand);
+    }
+
+    private float computeSubtreeDemand(NodeId node, Map<NodeId, List<NodeId>> children,
+                                        Map<NodeId, Float> pipePressures,
+                                        Map<NodeId, Float> subtreeDemand) {
+        List<NodeId> kids = children.get(node);
+        float nodeFlow = pipePressures.getOrDefault(node, 0f) / 2f;
+
+        if (kids == null || kids.isEmpty()) {
+            subtreeDemand.put(node, nodeFlow);
+            return nodeFlow;
+        }
+
+        float maxChildDemand = 0;
+        for (NodeId child : kids) {
+            float childDemand = computeSubtreeDemand(child, children, pipePressures, subtreeDemand);
+            maxChildDemand = Math.max(maxChildDemand, childDemand);
+        }
+        subtreeDemand.put(node, maxChildDemand);
+        return maxChildDemand;
+    }
+
+    private void applyFlowBudget(NodeId node, float scaleFactor,
+                                  Map<NodeId, List<NodeId>> children,
+                                  Map<NodeId, Float> pipePressures,
+                                  Map<NodeId, Float> subtreeDemand) {
+        if (scaleFactor < 1.0f) {
+            Float pressure = pipePressures.get(node);
+            if (pressure != null) {
+                pipePressures.put(node, pressure * scaleFactor);
+            }
+        }
+
+        List<NodeId> kids = children.get(node);
+        if (kids == null || kids.size() <= 1) {
+            // Single path — just propagate scale factor
+            if (kids != null && !kids.isEmpty()) {
+                applyFlowBudget(kids.get(0), scaleFactor, children, pipePressures, subtreeDemand);
+            }
+            return;
+        }
+
+        // Junction: split flow proportionally by demand
+        float budget = pipePressures.getOrDefault(node, 0f) / 2f;
+        float totalDemand = 0;
+        for (NodeId child : kids) {
+            totalDemand += subtreeDemand.getOrDefault(child, 0f);
+        }
+
+        for (NodeId child : kids) {
+            float childDemand = subtreeDemand.getOrDefault(child, 0f);
+            float childScale;
+            if (totalDemand <= budget || totalDemand <= 0) {
+                childScale = scaleFactor;
+            } else {
+                childScale = scaleFactor * (budget / totalDemand);
+            }
+            applyFlowBudget(child, childScale, children, pipePressures, subtreeDemand);
+        }
     }
 
     private static int reverseFace(int faceIndex) {

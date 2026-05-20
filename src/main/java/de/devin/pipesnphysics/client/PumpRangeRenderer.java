@@ -181,6 +181,7 @@ public class PumpRangeRenderer {
      */
     private static List<PipePath> tracePumpPaths(Level level, BlockPos pumpPos, BlockState pumpState) {
         Direction facing = pumpState.getValue(PumpBlock.FACING);
+        PipeFormulas formulas = new PipeFormulas(PhysicsConfigFactory.fromModConfig());
         List<PipePath> allPaths = new ArrayList<>();
 
         for (Direction side : new Direction[]{facing, facing.getOpposite()}) {
@@ -189,70 +190,63 @@ public class PumpRangeRenderer {
             BlockPos startPos = pumpPos.relative(side);
             if (FluidPropagator.getPipe(level, startPos) == null) continue;
 
-            // Match pump mixin: range scales with RPM
             float pumpSpeed = 0;
             BlockEntity be = level.getBlockEntity(pumpPos);
             if (be instanceof KineticBlockEntity kbe)
                 pumpSpeed = Math.abs(kbe.getSpeed());
-            int maxDistance = 256; // Safety cap; pressure is the real range limiter
-            int pumpY = pumpPos.getY();
+
+            PipeGraph graph = PipeGraphBuilder.discover(level, startPos);
+            NodeId startNode = PipeGraphBuilder.nodeOf(startPos);
+            double pumpWorldY = startPos.getY() + 0.5;
+            int startFace = side.ordinal();
+
+            NetworkSolver solver = new NetworkSolver(formulas);
+            PumpFlowResult result = solver.solvePumpReach(graph, startNode, startFace,
+                    pumpSpeed, pumpWorldY, 256);
+
             List<BlockPos> orderedPositions = new ArrayList<>();
             orderedPositions.add(pumpPos);
-
-            Queue<int[]> frontier = new ArrayDeque<>();
-            Set<BlockPos> visited = new HashSet<>();
             Map<BlockPos, BlockPos> parentMap = new LinkedHashMap<>();
             Map<BlockPos, Integer> distanceMap = new HashMap<>();
-
             distanceMap.put(pumpPos, 0);
-            frontier.add(new int[]{1, startPos.getX(), startPos.getY(), startPos.getZ()});
+
+            for (NodeId nodeId : result.reachableNodes()) {
+                BlockPos pos = PipeGraphBuilder.posOf(nodeId);
+                orderedPositions.add(pos);
+                distanceMap.put(pos, result.hopCounts().getOrDefault(nodeId, 1));
+            }
+
+            // Build parent map from graph adjacency
+            Set<BlockPos> visited = new HashSet<>();
             visited.add(pumpPos);
+            Queue<BlockPos> bfs = new ArrayDeque<>();
+            bfs.add(startPos);
             parentMap.put(startPos, pumpPos);
-
-            while (!frontier.isEmpty()) {
-                int[] entry = frontier.poll();
-                int distance = entry[0];
-                BlockPos current = new BlockPos(entry[1], entry[2], entry[3]);
-                if (visited.contains(current)) continue;
-                visited.add(current);
-
-                if (!level.isLoaded(current)) continue;
-                BlockState currentState = level.getBlockState(current);
-                FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, current);
-                if (pipe == null) continue;
-
-                orderedPositions.add(current);
-                distanceMap.put(current, distance);
-                if (distance >= maxDistance) continue;
-
-                for (Direction face : FluidPropagator.getPipeConnections(currentState, pipe)) {
-                    BlockPos next = current.relative(face);
+            while (!bfs.isEmpty()) {
+                BlockPos current = bfs.poll();
+                if (!visited.add(current)) continue;
+                NodeId currentId = PipeGraphBuilder.nodeOf(current);
+                if (!result.reachableNodes().contains(currentId) && !current.equals(startPos)) continue;
+                for (PipeEdge edge : graph.adjacency().getOrDefault(currentId, List.of())) {
+                    BlockPos next = PipeGraphBuilder.posOf(edge.to());
                     if (visited.contains(next)) continue;
-                    if (FluidPropagator.getPipe(level, next) == null) continue;
+                    if (!result.reachableNodes().contains(edge.to())) continue;
                     parentMap.put(next, current);
-                    int nextDist = visualDistance(distance, face, next, pumpY);
-                    frontier.add(new int[]{nextDist, next.getX(), next.getY(), next.getZ()});
+                    bfs.add(next);
                 }
             }
 
             if (orderedPositions.size() > 1) {
+                int maxDist = result.hopCounts().values().stream().mapToInt(i -> i).max().orElse(1);
                 List<List<BlockPos>> branches = extractBranches(orderedPositions, parentMap, pumpPos);
                 for (List<BlockPos> branch : branches) {
                     List<Integer> distances = new ArrayList<>();
                     for (BlockPos pos : branch) distances.add(distanceMap.getOrDefault(pos, 0));
-                    allPaths.add(new PipePath(branch, distances, maxDistance, isPull, false));
+                    allPaths.add(new PipePath(branch, distances, maxDist, isPull, false));
                 }
             }
         }
         return allPaths;
-    }
-
-    /** Visual distance for pump arrows (not physics). Down=free, up=costly, horizontal=1. */
-    private static int visualDistance(int current, Direction face, BlockPos pos, int pumpY) {
-        if (face == Direction.DOWN) return current;
-        if (face == Direction.UP && pos.getY() <= pumpY) return current;
-        if (face == Direction.UP) return current + 2;
-        return current + 1;
     }
 
     private static List<List<BlockPos>> extractBranches(List<BlockPos> positions,
