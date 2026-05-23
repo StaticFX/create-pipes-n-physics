@@ -298,60 +298,52 @@ public class GravityFlowHandler {
         if (flowRate <= 0 || flowRate == Float.MAX_VALUE) return false;
         int transferAmount = Math.max(1, (int) (flowRate * elapsedTicks));
 
-        // Find source and sink handlers
-        List<HandlerInfo> sources = new ArrayList<>();
-        List<HandlerInfo> sinks = new ArrayList<>();
-
+        // Collect boundary handlers, use potentials for direction
+        List<HandlerInfo> handlers = new ArrayList<>();
         for (var entry : network.nodes().entrySet()) {
             SimNode node = entry.getValue();
-            BlockPos nodePos = PipeGraphBuilder.posOf(entry.getKey());
-
-            // Any node adjacent to a fluid handler is a potential source/sink
             if (node.kind() == SimNodeKind.JUNCTION || node.kind() == SimNodeKind.DEAD_END) continue;
-
+            BlockPos nodePos = PipeGraphBuilder.posOf(entry.getKey());
             for (Direction dir : Direction.values()) {
                 BlockPos neighbor = nodePos.relative(dir);
                 var handler = level.getCapability(Capabilities.FluidHandler.BLOCK, neighbor, dir.getOpposite());
-                if (handler == null) continue;
-
-                FluidStack simDrain = handler.drain(networkFluid.copyWithAmount(1), FluidAction.SIMULATE);
-                if (!simDrain.isEmpty()) {
-                    sources.add(new HandlerInfo(entry.getKey(), handler, neighbor));
+                if (handler != null) {
+                    handlers.add(new HandlerInfo(entry.getKey(), handler, neighbor));
+                    break;
                 }
-
-                int simFill = handler.fill(networkFluid.copyWithAmount(1), FluidAction.SIMULATE);
-                if (simFill > 0) {
-                    sinks.add(new HandlerInfo(entry.getKey(), handler, neighbor));
-                }
-                break;
             }
         }
+        if (handlers.size() < 2) return false;
 
-        if (sources.isEmpty() || sinks.isEmpty()) return false;
+        // Sort by potential descending: highest Φ = source, lowest = sink
+        handlers.sort((a, b) -> Float.compare(
+                result.potentials().getOrDefault(b.node, 0f),
+                result.potentials().getOrDefault(a.node, 0f)));
 
-        // Use flow direction from potentials to determine source vs sink
-        // The source is the node with higher potential (fluid flows from high to low Φ)
+        HandlerInfo src = null;
+        for (HandlerInfo h : handlers) {
+            if (!h.handler.drain(networkFluid.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()) {
+                src = h; break;
+            }
+        }
+        if (src == null) return false;
+
         boolean didTransfer = false;
-        int perSink = Math.max(1, transferAmount / sinks.size());
-
-        for (HandlerInfo src : sources) {
-            FluidStack simDrain = src.handler.drain(networkFluid.copyWithAmount(perSink), FluidAction.SIMULATE);
-            if (simDrain.isEmpty()) continue;
-
-            for (HandlerInfo dst : sinks) {
-                if (dst.pos.equals(src.pos)) continue;
-                int accepted = dst.handler.fill(simDrain, FluidAction.SIMULATE);
-                if (accepted <= 0) continue;
-
-                FluidStack actualDrain = src.handler.drain(
-                        networkFluid.copyWithAmount(accepted), FluidAction.EXECUTE);
-                if (!actualDrain.isEmpty()) {
-                    dst.handler.fill(actualDrain, FluidAction.EXECUTE);
-                    didTransfer = true;
-                }
+        for (int i = handlers.size() - 1; i >= 0; i--) {
+            HandlerInfo dst = handlers.get(i);
+            if (dst.pos.equals(src.pos)) continue;
+            if (dst.handler.fill(networkFluid.copyWithAmount(1), FluidAction.SIMULATE) <= 0) continue;
+            FluidStack drained = src.handler.drain(networkFluid.copyWithAmount(transferAmount), FluidAction.SIMULATE);
+            if (drained.isEmpty()) break;
+            int accepted = dst.handler.fill(drained, FluidAction.SIMULATE);
+            if (accepted <= 0) continue;
+            FluidStack actual = src.handler.drain(networkFluid.copyWithAmount(accepted), FluidAction.EXECUTE);
+            if (!actual.isEmpty()) {
+                dst.handler.fill(actual, FluidAction.EXECUTE);
+                didTransfer = true;
             }
+            break;
         }
-
         return didTransfer;
     }
 
