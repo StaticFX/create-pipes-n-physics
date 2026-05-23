@@ -101,12 +101,22 @@ public class GravityFlowHandler {
         int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
         if (lastTick != null && currentTick - lastTick < recheckTicks) return;
 
-        // Reuse cached network or build new one
+        // Reuse cached network or build new one.
+        // Normalize the cache key: use the smallest pipe position in the network
+        // so all pipes in the same network share one cached entry.
         SimConfig config = PhysicsConfigFactory.simConfig();
         FluidNetwork network = cachedNetworks.get(startPos);
         if (network == null) {
             network = NetworkBuilder.build(level, startPos, config);
-            cachedNetworks.put(startPos, network);
+            // Cache under ALL node positions so any pipe lookup hits the same network
+            for (var entry : network.nodes().entrySet()) {
+                cachedNetworks.put(PipeGraphBuilder.posOf(entry.getKey()), network);
+            }
+            for (SimEdge edge : network.edges()) {
+                for (BlockPos pos : edge.pipePositions()) {
+                    cachedNetworks.put(pos, network);
+                }
+            }
         }
 
         // Mark all pipes as processed
@@ -131,16 +141,9 @@ public class GravityFlowHandler {
         // Find fluid in the network and build fluid registry
         Map<String, SimFluid> fluids = new HashMap<>();
         FluidStack networkFluid = findAndRegisterFluid(level, network, fluids);
-        if (networkFluid.isEmpty()) {
-            LOGGER.debug("No fluid in network at {} (nodes={}, edges={})", startPos,
-                    network.nodes().size(), network.edges().size());
-            return;
-        }
 
-        // Seed fluid into empty edges connected to sources
-        seedFluidIntoEdges(level, network, fluids, networkFluid);
-
-        // Run simulation tick
+        // Always run the simulator — it handles edge phase transitions even without fluid
+        // (e.g. DRAINING edges need to tick even when no new fluid is available)
         FluidSimulator simulator = new FluidSimulator(config);
         SimResult result = simulator.tick(network, fluids);
 
@@ -175,10 +178,9 @@ public class GravityFlowHandler {
 
     private static FluidStack findAndRegisterFluid(Level level, FluidNetwork network,
                                                     Map<String, SimFluid> fluids) {
-        // Check endpoints for fluid
+        // Check all nodes for adjacent fluid handlers
         for (var entry : network.nodes().entrySet()) {
             SimNode node = entry.getValue();
-            if (node.kind() != SimNodeKind.SOURCE && node.kind() != SimNodeKind.SINK) continue;
             BlockPos pos = PipeGraphBuilder.posOf(entry.getKey());
 
             for (Direction dir : Direction.values()) {
