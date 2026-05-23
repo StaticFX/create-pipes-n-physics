@@ -81,6 +81,16 @@ public final class NetworkBuilder {
             nodes.put(id, new SimNode(id, kind, elevation, staticPressure));
         }
 
+        // Debug: log raw data
+        org.apache.logging.log4j.LogManager.getLogger().debug(
+                "NetworkBuilder: pipes={} nodes={} conns={} endpoints={}",
+                allPipes.size(), nodePositions.size(),
+                pipeConnections.entrySet().stream()
+                        .map(e -> e.getKey().toShortString() + "→" + e.getValue().stream()
+                                .map(BlockPos::toShortString).toList())
+                        .toList(),
+                endpoints.size());
+
         // Phase 4: Contract pipe runs into edges
         List<SimEdge> edges = new ArrayList<>();
         Set<BlockPos> visitedPipes = new HashSet<>();
@@ -151,6 +161,8 @@ public final class NetworkBuilder {
             }
         }
 
+        org.apache.logging.log4j.LogManager.getLogger().debug(
+                "NetworkBuilder: raw_edges={} deduped_edges={}", edges.size(), dedupedEdges.size());
         return new FluidNetwork(nodes, dedupedEdges);
     }
 
@@ -216,19 +228,20 @@ public final class NetworkBuilder {
                                              Map<BlockPos, List<BlockPos>> pipeConnections,
                                              Map<BlockPos, BlockPos> pumpPositions,
                                              Map<BlockPos, EndpointData> endpoints) {
-        // Check if adjacent to a pump
-        for (BlockPos pumpPos : pumpPositions.keySet()) {
-            if (pumpPos.distManhattan(pos) == 1) {
-                return SimNodeKind.PUMP;
-            }
-        }
-
         // Check if adjacent to an endpoint — all endpoints are potential source/sinks.
         // Direction is determined by Φ, not by static classification.
         // Mark as SOURCE so fluid gets seeded into adjacent edges.
+        // Endpoint takes priority over pump adjacency.
         for (var ep : endpoints.values()) {
             if (ep.pipePos.equals(pos)) {
                 return SimNodeKind.SOURCE;
+            }
+        }
+
+        // Check if adjacent to a pump (only if not also an endpoint)
+        for (BlockPos pumpPos : pumpPositions.keySet()) {
+            if (pumpPos.distManhattan(pos) == 1) {
+                return SimNodeKind.PUMP;
             }
         }
 
