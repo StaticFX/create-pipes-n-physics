@@ -2,9 +2,21 @@ package de.devin.pipesnphysics.physics;
 
 import java.util.*;
 
+/**
+ * Solves pressure, flow, and burst state for a pipe network.
+ *
+ * Algorithm overview:
+ * 1. Discover all pressure sources (gravity tanks, pump push/pull)
+ * 2. Build a directed flow graph via BFS from each source
+ * 3. Propagate pressure through the directed graph in topological order
+ *    - Merge junctions: sum incoming pressures
+ *    - Split junctions: divide pressure evenly
+ *    - Gravity adds pressure on downhill edges, reduces on uphill
+ *    - Friction reduces pressure on non-vertical segments
+ * 4. For cycles, iterate until convergence
+ * 5. Detect bursting pipes
+ */
 public final class NetworkSolver {
-
-    private static final double HORIZONTAL_THRESHOLD = 0.1;
 
     private final PipeFormulas formulas;
 
@@ -12,379 +24,509 @@ public final class NetworkSolver {
         this.formulas = formulas;
     }
 
-    public GravityFlowResult solveGravityFlow(PipeGraph graph) {
-        return solveGravityFlow(graph, 1.0f);
+    public SolverResult solve(PipeGraph graph) {
+        return solve(graph, 1.0f, 1.0f);
     }
 
-    public GravityFlowResult solveGravityFlow(PipeGraph graph, float viscosityMultiplier) {
-        if (graph.hasActivePump()) return null;
-        if (graph.endpoints().size() < 2) return null;
+    public SolverResult solve(PipeGraph graph, float viscosityMultiplier) {
+        return solve(graph, viscosityMultiplier, 1.0f);
+    }
 
-        NetworkEndpoint source = null;
-        double sourceWorldY = Double.NEGATIVE_INFINITY;
+    /**
+     * Solve the entire network: pressure propagation, flow, and burst detection.
+     *
+     * @param graph the pipe network graph
+     * @param viscosityMultiplier fluid viscosity scaling for friction
+     * @param gravityDirection +1 for liquids (flow down), -1 for gases (flow up)
+     * @return solver result with pressures, flows, and burst events
+     */
+    public SolverResult solve(PipeGraph graph, float viscosityMultiplier, float gravityDirection) {
+        List<PressureSource> sources = discoverSources(graph, gravityDirection);
+        if (sources.isEmpty()) {
+            return emptySolverResult(sources);
+        }
+
+        DirectedFlowGraph flowGraph = buildFlowGraph(graph, sources, viscosityMultiplier);
+        flowGraph.gravityDirection = gravityDirection;
+        if (flowGraph.nodeOrder.isEmpty()) {
+            return emptySolverResult(sources);
+        }
+
+        return buildResult(flowGraph, graph, viscosityMultiplier, sources);
+    }
+
+    /**
+     * Find all pressure sources in the network.
+     * For liquids: sources are endpoints where the handler is above the pipe.
+     * For gases: sources are endpoints where the handler is below the pipe.
+     */
+    List<PressureSource> discoverSources(PipeGraph graph, float gravityDirection) {
+        List<PressureSource> sources = new ArrayList<>();
+        boolean isGas = gravityDirection < 0;
+
         for (NetworkEndpoint ep : graph.endpoints()) {
-            if (!ep.isHandlerAbovePipe()) continue;
-            if (ep.handlerWorldY() > sourceWorldY) {
-                source = ep;
-                sourceWorldY = ep.handlerWorldY();
-            }
-        }
-        if (source == null) return null;
-
-        FrictionBfsResult bfs = frictionBfs(graph, source.pipeNode(), source.faceIndex(), viscosityMultiplier);
-        applyGravityPreference(bfs.outboundEdges);
-
-        List<NetworkEndpoint> validSinks = new ArrayList<>();
-        for (NetworkEndpoint ep : graph.endpoints()) {
-            if (ep == source) continue;
-            Float friction = bfs.accumulatedFriction.get(ep.pipeNode());
-            if (friction == null) continue;
-            if (formulas.gravityPressure(sourceWorldY, ep.pipeWorldY(), friction) > 0) {
-                validSinks.add(ep);
+            boolean validSource = isGas ? !ep.isHandlerAbovePipe() : ep.isHandlerAbovePipe();
+            if (!validSource) continue;
+            float gravity = formulas.gravityDelta(ep.handlerWorldY(), ep.pipeWorldY(), gravityDirection);
+            if (gravity > 0) {
+                sources.add(new PressureSource(
+                        ep.pipeNode(), PressureSource.Kind.GRAVITY, gravity, ep.handlerWorldY()));
             }
         }
 
-        Map<NodeId, Float> pipePressures;
-        Set<NodeId> activePipes;
+        return sources;
+    }
 
-        if (!validSinks.isEmpty()) {
-            activePipes = pruneDeadBranches(validSinks, bfs.parentNode, source.pipeNode());
+    /**
+     * Solve with additional external pressure sources (pump push/pull from handler layer).
+     */
+    public SolverResult solve(PipeGraph graph, float viscosityMultiplier,
+                              List<PressureSource> externalSources) {
+        return solve(graph, viscosityMultiplier, 1.0f, externalSources);
+    }
 
-            Map<NodeId, Float> sinkPressures = new HashMap<>();
-            for (NetworkEndpoint sink : validSinks) {
-                float friction = bfs.accumulatedFriction.getOrDefault(sink.pipeNode(), 0f);
-                float pressure = formulas.gravityPressure(sourceWorldY, sink.pipeWorldY(), friction);
-                if (pressure > 0) {
-                    sinkPressures.merge(sink.pipeNode(), pressure, Math::max);
-                }
-            }
-            pipePressures = propagateSinkPressures(sinkPressures, bfs.parentNode, source.pipeNode());
-            enforceFlowConservation(pipePressures, bfs.outboundEdges, source.pipeNode(), activePipes);
-        } else {
-            pipePressures = new LinkedHashMap<>();
-            activePipes = new HashSet<>();
-            for (var entry : bfs.accumulatedFriction.entrySet()) {
-                NodeId nodeId = entry.getKey();
-                float friction = entry.getValue();
-                PipeNode node = graph.node(nodeId);
-                if (node == null || !node.isPipe()) continue;
-                float pressure = formulas.gravityPressure(sourceWorldY, node.worldY(), friction);
-                if (pressure > 0) {
-                    pipePressures.put(nodeId, pressure);
-                    activePipes.add(nodeId);
-                }
-            }
-            if (activePipes.isEmpty()) return null;
+    public SolverResult solve(PipeGraph graph, float viscosityMultiplier,
+                              float gravityDirection, List<PressureSource> externalSources) {
+        List<PressureSource> sources = new ArrayList<>(discoverSources(graph, gravityDirection));
+        sources.addAll(externalSources);
+
+        if (sources.isEmpty()) {
+            return emptySolverResult(sources);
         }
 
-        Map<NodeId, Set<Integer>> outboundFaceIndices = new HashMap<>();
-        for (var entry : bfs.outboundEdges.entrySet()) {
-            Set<Integer> faces = new HashSet<>();
-            for (PipeEdge edge : entry.getValue()) faces.add(edge.faceIndex());
-            outboundFaceIndices.put(entry.getKey(), faces);
+        DirectedFlowGraph flowGraph = buildFlowGraph(graph, sources, viscosityMultiplier);
+        flowGraph.gravityDirection = gravityDirection;
+        if (flowGraph.nodeOrder.isEmpty()) {
+            return emptySolverResult(sources);
         }
 
+        return buildResult(flowGraph, graph, viscosityMultiplier, sources);
+    }
+
+    private SolverResult buildResult(DirectedFlowGraph flowGraph, PipeGraph graph,
+                                      float viscosityMultiplier, List<PressureSource> sources) {
+        Map<NodeId, Float> pressures = propagatePressure(flowGraph, graph, viscosityMultiplier);
+        equalizeSegments(flowGraph, pressures);
+
+        Set<NodeId> activePipes = new LinkedHashSet<>();
         Map<NodeId, FlowState> flowStates = new HashMap<>();
-        for (NodeId nodeId : activePipes) {
-            float pressure = pipePressures.getOrDefault(nodeId, 0f);
-            if (pressure <= 0) continue;
-            float flowRate = pressure / 2f;
-            int inFace = bfs.inboundFaceIndex.getOrDefault(nodeId, -1);
-            Set<Integer> outFaces = outboundFaceIndices.getOrDefault(nodeId, Set.of());
-            int outFace = outFaces.isEmpty() ? -1 : outFaces.iterator().next();
-            flowStates.put(nodeId, new FlowState(flowRate, inFace, outFace));
-        }
+        Map<NodeId, Integer> inboundFaces = new HashMap<>();
+        Map<NodeId, Set<Integer>> outboundFaces = new HashMap<>();
 
-        return new GravityFlowResult(
-                source, sourceWorldY, validSinks, pipePressures,
-                bfs.parentNode, bfs.inboundFaceIndex, outboundFaceIndices,
-                activePipes, validSinks, flowStates
-        );
-    }
+        for (var entry : pressures.entrySet()) {
+            if (entry.getValue() > 0) {
+                NodeId nodeId = entry.getKey();
+                activePipes.add(nodeId);
+                float pressure = entry.getValue();
+                float flowRate = formulas.flowFromPressure(pressure);
+                int inFace = flowGraph.inboundFace.getOrDefault(nodeId, -1);
+                int outFace = pickOutflowFace(flowGraph, nodeId);
+                flowStates.put(nodeId, new FlowState(pressure, flowRate, inFace, outFace));
 
-    public PumpFlowResult solvePumpReach(PipeGraph graph, NodeId startNode, int startFace,
-                                         float pumpBase, double pumpWorldY, int maxHopDistance) {
-        Map<NodeId, Float> accFriction = new HashMap<>();
-        Map<NodeId, Float> nodePressures = new HashMap<>();
-        Map<NodeId, Integer> hopCounts = new HashMap<>();
-        Map<NodeId, Double> pathPeakY = new HashMap<>();
-        Set<NodeId> reachable = new HashSet<>();
+                if (inFace >= 0) inboundFaces.put(nodeId, inFace);
 
-        accFriction.put(startNode, 0f);
-        hopCounts.put(startNode, 1);
-        PipeNode startPipeNode = graph.node(startNode);
-        pathPeakY.put(startNode, startPipeNode != null ? Math.max(startPipeNode.worldY(), pumpWorldY) : pumpWorldY);
-
-        Queue<NodeId> frontier = new ArrayDeque<>();
-        Set<NodeId> visited = new HashSet<>();
-        frontier.add(startNode);
-
-        while (!frontier.isEmpty()) {
-            NodeId current = frontier.poll();
-            if (!visited.add(current)) continue;
-
-            int currentHops = hopCounts.getOrDefault(current, 0);
-            float currentFriction = accFriction.getOrDefault(current, 0f);
-            double currentPeakY = pathPeakY.getOrDefault(current, pumpWorldY);
-
-            for (PipeEdge edge : graph.adjacency().getOrDefault(current, List.of())) {
-                NodeId neighbor = edge.to();
-                if (visited.contains(neighbor)) continue;
-                PipeNode neighborNode = graph.node(neighbor);
-                if (neighborNode == null || !neighborNode.isPipe()) continue;
-
-                float segFric = formulas.segmentFriction(edge.elevationAngleDegrees());
-                float nextFriction = currentFriction + segFric;
-
-                double peakY = Math.max(currentPeakY, edge.toWorldY());
-                float reachPressure = formulas.pumpPressure(pumpBase, pumpWorldY, peakY, nextFriction);
-
-                int nextHops = currentHops + 1;
-                if (reachPressure <= 0 || nextHops >= maxHopDistance) continue;
-
-                float pressure = formulas.pumpPressure(pumpBase, pumpWorldY, edge.toWorldY(), nextFriction);
-                accFriction.put(neighbor, nextFriction);
-                nodePressures.put(neighbor, pressure);
-                hopCounts.put(neighbor, nextHops);
-                pathPeakY.put(neighbor, peakY);
-                reachable.add(neighbor);
-                frontier.add(neighbor);
-            }
-        }
-
-        return new PumpFlowResult(accFriction, nodePressures, hopCounts, reachable);
-    }
-
-    public Map<NodeId, PressureBreakdown> computeAllBreakdowns(PipeGraph graph, GravityFlowResult flow) {
-        return computeAllBreakdowns(graph, flow, 1.0f);
-    }
-
-    public Map<NodeId, PressureBreakdown> computeAllBreakdowns(PipeGraph graph, GravityFlowResult flow, float viscosityMultiplier) {
-        Map<NodeId, PressureBreakdown> result = new HashMap<>();
-        if (flow == null) return result;
-
-        FrictionBfsResult bfs = frictionBfs(graph, flow.source().pipeNode(), flow.source().faceIndex(), viscosityMultiplier);
-
-        if (!flow.validSinks().isEmpty()) {
-            NetworkEndpoint bottleneckSink = null;
-            float bottleneckPressure = Float.MAX_VALUE;
-            for (NetworkEndpoint sink : flow.validSinks()) {
-                Float sinkFriction = bfs.accumulatedFriction.get(sink.pipeNode());
-                if (sinkFriction == null) continue;
-                float p = formulas.gravityPressure(flow.sourceWorldY(), sink.pipeWorldY(), sinkFriction);
-                if (p < bottleneckPressure) {
-                    bottleneckPressure = p;
-                    bottleneckSink = sink;
-                }
-            }
-            if (bottleneckSink == null) return result;
-
-            float sinkFriction = bfs.accumulatedFriction.getOrDefault(bottleneckSink.pipeNode(), 0f);
-            float head = (float) (flow.sourceWorldY() - bottleneckSink.pipeWorldY()) * formulas.config().gravityPerBlock();
-            float unclamped = head - sinkFriction;
-            float net = formulas.gravityPressure(flow.sourceWorldY(), bottleneckSink.pipeWorldY(), sinkFriction);
-            boolean capped = unclamped > formulas.config().maxPressure();
-            for (NodeId nodeId : flow.activePipes()) {
-                float pipePressure = flow.pipePressures().getOrDefault(nodeId, 0f);
-                if (pipePressure > 0) {
-                    result.put(nodeId, new PressureBreakdown(head, sinkFriction, net, capped, pipePressure));
-                }
-            }
-        } else {
-            NodeId sourcePipeId = flow.source().pipeNode();
-            PipeNode sourceNode = graph.node(sourcePipeId);
-            if (sourceNode != null) {
-                float sourceFriction = bfs.accumulatedFriction.getOrDefault(sourcePipeId, 0f);
-                float head = (float) (flow.sourceWorldY() - sourceNode.worldY()) * formulas.config().gravityPerBlock();
-                float unclamped = head - sourceFriction;
-                float net = formulas.gravityPressure(flow.sourceWorldY(), sourceNode.worldY(), sourceFriction);
-                boolean capped = unclamped > formulas.config().maxPressure();
-                for (NodeId nodeId : flow.activePipes()) {
-                    float pipePressure = flow.pipePressures().getOrDefault(nodeId, 0f);
-                    if (pipePressure > 0) {
-                        result.put(nodeId, new PressureBreakdown(head, sourceFriction, net, capped, pipePressure));
+                Set<Integer> outFaces = new HashSet<>();
+                for (DirectedEdge edge : flowGraph.outgoing.getOrDefault(nodeId, List.of())) {
+                    if (activePipes.contains(edge.to()) || pressures.getOrDefault(edge.to(), 0f) > 0) {
+                        outFaces.add(edge.originalEdge().faceIndex());
                     }
                 }
+                if (!outFaces.isEmpty()) outboundFaces.put(nodeId, outFaces);
             }
         }
 
-        return result;
+        // Second pass: fill outbound faces for nodes whose downstream may not have been processed yet
+        for (NodeId nodeId : activePipes) {
+            if (outboundFaces.containsKey(nodeId)) continue;
+            Set<Integer> outFaces = new HashSet<>();
+            for (DirectedEdge edge : flowGraph.outgoing.getOrDefault(nodeId, List.of())) {
+                outFaces.add(edge.originalEdge().faceIndex());
+            }
+            if (!outFaces.isEmpty()) outboundFaces.put(nodeId, outFaces);
+        }
+
+        List<BurstEvent> burstEvents = detectBursts(pressures);
+
+        Map<NodeId, PressureBreakdown> breakdowns = buildBreakdowns(
+                flowGraph, pressures, graph, viscosityMultiplier);
+
+        return new SolverResult(pressures, flowStates, activePipes, burstEvents,
+                breakdowns, sources, inboundFaces, outboundFaces);
     }
 
-    private record FrictionBfsResult(
-            Map<NodeId, Float> accumulatedFriction,
-            Map<NodeId, NodeId> parentNode,
-            Map<NodeId, Integer> inboundFaceIndex,
-            Map<NodeId, Set<PipeEdge>> outboundEdges
-    ) {}
+    // -- Directed flow graph construction --
 
-    private FrictionBfsResult frictionBfs(PipeGraph graph, NodeId sourceNode, int sourceFaceIndex) {
-        return frictionBfs(graph, sourceNode, sourceFaceIndex, 1.0f);
+    /**
+     * Internal representation of the directed flow graph.
+     * Edges point in the flow direction (from source toward sinks).
+     */
+    static final class DirectedFlowGraph {
+        final Map<NodeId, List<DirectedEdge>> outgoing = new HashMap<>();
+        final Map<NodeId, List<DirectedEdge>> incoming = new HashMap<>();
+        final Map<NodeId, Integer> inboundFace = new HashMap<>();
+        final Map<NodeId, Float> sourceContributions = new HashMap<>();
+        final List<NodeId> nodeOrder = new ArrayList<>();
+        final Set<NodeId> cycleNodes = new HashSet<>();
+        float gravityDirection = 1.0f;
     }
 
-    private FrictionBfsResult frictionBfs(PipeGraph graph, NodeId sourceNode, int sourceFaceIndex, float viscosityMultiplier) {
-        Map<NodeId, Float> friction = new HashMap<>();
-        Map<NodeId, NodeId> parent = new LinkedHashMap<>();
-        Map<NodeId, Integer> inboundFace = new HashMap<>();
-        Map<NodeId, Set<PipeEdge>> outbound = new HashMap<>();
+    record DirectedEdge(NodeId from, NodeId to, PipeEdge originalEdge) {}
 
+    /**
+     * Build a directed flow graph by BFS from each source.
+     * Flow direction is determined by pressure gradient: flow goes from
+     * higher pressure (sources, downhill) to lower pressure (sinks, uphill).
+     */
+    DirectedFlowGraph buildFlowGraph(PipeGraph graph, List<PressureSource> sources,
+                                     float viscosityMultiplier) {
+        DirectedFlowGraph flowGraph = new DirectedFlowGraph();
+        Set<NodeId> visited = new HashSet<>();
         Queue<NodeId> queue = new ArrayDeque<>();
-        queue.add(sourceNode);
-        friction.put(sourceNode, 0f);
-        inboundFace.put(sourceNode, sourceFaceIndex);
 
+        for (PressureSource source : sources) {
+            NodeId startNode = source.node();
+            if (!graph.contains(startNode)) continue;
+
+            flowGraph.sourceContributions.merge(startNode, source.basePressure(), Float::sum);
+
+            if (visited.add(startNode)) {
+                queue.add(startNode);
+            }
+        }
+
+        // BFS from all sources simultaneously
         while (!queue.isEmpty()) {
             NodeId current = queue.poll();
+
             for (PipeEdge edge : graph.adjacency().getOrDefault(current, List.of())) {
                 NodeId neighbor = edge.to();
                 PipeNode neighborNode = graph.node(neighbor);
                 if (neighborNode == null || !neighborNode.isPipe()) continue;
-                if (parent.containsKey(neighbor) || neighbor.equals(sourceNode)) continue;
 
-                parent.put(neighbor, current);
-                inboundFace.put(neighbor, reverseFace(edge.faceIndex()));
-                outbound.computeIfAbsent(current, id -> new HashSet<>()).add(edge);
+                if (visited.contains(neighbor)) {
+                    // Already visited — check if this is a merge (valid) or a back-edge (cycle).
+                    // If the neighbor already has a directed edge TO current, it's a cycle.
+                    boolean isBackEdge = flowGraph.outgoing.getOrDefault(neighbor, List.of()).stream()
+                            .anyMatch(e -> e.to().equals(current));
+                    if (isBackEdge) {
+                        flowGraph.cycleNodes.add(neighbor);
+                        flowGraph.cycleNodes.add(current);
+                    } else {
+                        // Merge: add the incoming edge so this node receives pressure from both paths
+                        DirectedEdge directedEdge = new DirectedEdge(current, neighbor, edge);
+                        flowGraph.outgoing.computeIfAbsent(current, k -> new ArrayList<>()).add(directedEdge);
+                        flowGraph.incoming.computeIfAbsent(neighbor, k -> new ArrayList<>()).add(directedEdge);
+                    }
+                    continue;
+                }
 
-                float parentFric = friction.getOrDefault(current, 0f);
-                float segFric = formulas.segmentFriction(edge.elevationAngleDegrees(), viscosityMultiplier);
-                friction.put(neighbor, parentFric + segFric);
+                DirectedEdge directedEdge = new DirectedEdge(current, neighbor, edge);
+                flowGraph.outgoing.computeIfAbsent(current, k -> new ArrayList<>()).add(directedEdge);
+                flowGraph.incoming.computeIfAbsent(neighbor, k -> new ArrayList<>()).add(directedEdge);
+                flowGraph.inboundFace.put(neighbor, reverseFace(edge.faceIndex()));
 
+                visited.add(neighbor);
                 queue.add(neighbor);
             }
         }
 
-        return new FrictionBfsResult(friction, parent, inboundFace, outbound);
+        // Build topological order via Kahn's algorithm
+        buildTopologicalOrder(flowGraph, visited);
+
+        return flowGraph;
     }
 
-    private void applyGravityPreference(Map<NodeId, Set<PipeEdge>> outbound) {
-        for (var entry : outbound.entrySet()) {
-            Set<PipeEdge> edges = entry.getValue();
-            if (edges.size() <= 1) continue;
-            boolean hasDownward = edges.stream()
-                    .anyMatch(edge -> edge.toWorldY() < edge.fromWorldY() - HORIZONTAL_THRESHOLD);
-            if (hasDownward) {
-                edges.removeIf(edge -> Math.abs(edge.fromWorldY() - edge.toWorldY()) < HORIZONTAL_THRESHOLD);
+    private void buildTopologicalOrder(DirectedFlowGraph flowGraph, Set<NodeId> allNodes) {
+        Map<NodeId, Integer> inDegree = new HashMap<>();
+        for (NodeId node : allNodes) {
+            inDegree.put(node, 0);
+        }
+        for (var edges : flowGraph.incoming.values()) {
+            for (DirectedEdge edge : edges) {
+                inDegree.merge(edge.to(), 1, Integer::sum);
             }
         }
-    }
 
-    private Set<NodeId> pruneDeadBranches(List<NetworkEndpoint> validSinks,
-                                         Map<NodeId, NodeId> parentNode, NodeId sourceNode) {
-        Set<NodeId> active = new HashSet<>();
-        for (NetworkEndpoint sink : validSinks) {
-            NodeId trace = sink.pipeNode();
-            while (trace != null && active.add(trace)) {
-                if (trace.equals(sourceNode)) break;
-                trace = parentNode.get(trace);
+        Queue<NodeId> zeroIn = new ArrayDeque<>();
+        for (var entry : inDegree.entrySet()) {
+            if (entry.getValue() == 0 && allNodes.contains(entry.getKey())) {
+                zeroIn.add(entry.getKey());
             }
         }
-        return active;
-    }
 
-    private Map<NodeId, Float> propagateSinkPressures(Map<NodeId, Float> sinkPressures,
-                                                      Map<NodeId, NodeId> parentNode,
-                                                      NodeId sourceNode) {
-        Map<NodeId, Float> result = new LinkedHashMap<>();
-        for (var entry : sinkPressures.entrySet()) {
-            float pressure = entry.getValue();
-            NodeId trace = entry.getKey();
-            while (trace != null) {
-                float existing = result.getOrDefault(trace, 0f);
-                if (pressure > existing) {
-                    result.put(trace, pressure);
-                } else {
-                    break;
+        while (!zeroIn.isEmpty()) {
+            NodeId node = zeroIn.poll();
+            flowGraph.nodeOrder.add(node);
+            for (DirectedEdge edge : flowGraph.outgoing.getOrDefault(node, List.of())) {
+                int newDeg = inDegree.merge(edge.to(), -1, Integer::sum);
+                if (newDeg == 0) {
+                    zeroIn.add(edge.to());
                 }
-                if (trace.equals(sourceNode)) break;
-                trace = parentNode.get(trace);
             }
         }
-        return result;
+
+        // Nodes not in topological order are part of cycles
+        for (NodeId node : allNodes) {
+            if (!flowGraph.nodeOrder.contains(node)) {
+                flowGraph.cycleNodes.add(node);
+                flowGraph.nodeOrder.add(node);
+            }
+        }
     }
 
-    private void enforceFlowConservation(Map<NodeId, Float> pipePressures,
-                                          Map<NodeId, Set<PipeEdge>> outboundEdges,
-                                          NodeId sourceNode, Set<NodeId> activePipes) {
-        // Build children map (only active pipes)
-        Map<NodeId, List<NodeId>> children = new HashMap<>();
-        for (var entry : outboundEdges.entrySet()) {
-            NodeId parent = entry.getKey();
-            if (!activePipes.contains(parent) && !parent.equals(sourceNode)) continue;
-            List<NodeId> kids = new ArrayList<>();
-            for (PipeEdge edge : entry.getValue()) {
-                if (activePipes.contains(edge.to())) kids.add(edge.to());
-            }
-            if (!kids.isEmpty()) children.put(parent, kids);
+    // -- Pressure propagation --
+
+    private Map<NodeId, Float> propagatePressure(DirectedFlowGraph flowGraph, PipeGraph graph,
+                                                  float viscosityMultiplier) {
+        Map<NodeId, Float> pressures = new HashMap<>();
+        Map<NodeId, Float> edgePressures = new HashMap<>();
+
+        if (flowGraph.cycleNodes.isEmpty()) {
+            propagateAcyclic(flowGraph, graph, viscosityMultiplier, pressures, edgePressures);
+        } else {
+            propagateWithCycles(flowGraph, graph, viscosityMultiplier, pressures, edgePressures);
         }
 
-        // Bottom-up: compute subtree flow demand for each node
-        Map<NodeId, Float> subtreeDemand = new HashMap<>();
-        computeSubtreeDemand(sourceNode, children, pipePressures, subtreeDemand);
-
-        // Top-down: enforce conservation at junctions
-        applyFlowBudget(sourceNode, 1.0f, children, pipePressures, subtreeDemand);
+        return pressures;
     }
 
-    private float computeSubtreeDemand(NodeId node, Map<NodeId, List<NodeId>> children,
-                                        Map<NodeId, Float> pipePressures,
-                                        Map<NodeId, Float> subtreeDemand) {
-        List<NodeId> kids = children.get(node);
-        float nodeFlow = pipePressures.getOrDefault(node, 0f) / 2f;
-
-        if (kids == null || kids.isEmpty()) {
-            subtreeDemand.put(node, nodeFlow);
-            return nodeFlow;
+    private void propagateAcyclic(DirectedFlowGraph flowGraph, PipeGraph graph,
+                                   float viscosityMultiplier,
+                                   Map<NodeId, Float> pressures,
+                                   Map<NodeId, Float> edgePressures) {
+        for (NodeId nodeId : flowGraph.nodeOrder) {
+            float nodePressure = computeNodePressure(nodeId, flowGraph, graph,
+                    viscosityMultiplier, edgePressures);
+            pressures.put(nodeId, nodePressure);
+            distributeToOutgoing(nodeId, nodePressure, flowGraph, edgePressures);
         }
-
-        float maxChildDemand = 0;
-        for (NodeId child : kids) {
-            float childDemand = computeSubtreeDemand(child, children, pipePressures, subtreeDemand);
-            maxChildDemand = Math.max(maxChildDemand, childDemand);
-        }
-        subtreeDemand.put(node, maxChildDemand);
-        return maxChildDemand;
     }
 
-    private void applyFlowBudget(NodeId node, float scaleFactor,
-                                  Map<NodeId, List<NodeId>> children,
-                                  Map<NodeId, Float> pipePressures,
-                                  Map<NodeId, Float> subtreeDemand) {
-        if (scaleFactor < 1.0f) {
-            Float pressure = pipePressures.get(node);
-            if (pressure != null) {
-                pipePressures.put(node, pressure * scaleFactor);
+    private void propagateWithCycles(DirectedFlowGraph flowGraph, PipeGraph graph,
+                                      float viscosityMultiplier,
+                                      Map<NodeId, Float> pressures,
+                                      Map<NodeId, Float> edgePressures) {
+        int maxIterations = formulas.config().maxCycleIterations();
+        float epsilon = 0.01f;
+
+        for (int iter = 0; iter < maxIterations; iter++) {
+            float maxChange = 0;
+
+            for (NodeId nodeId : flowGraph.nodeOrder) {
+                float oldPressure = pressures.getOrDefault(nodeId, 0f);
+                float newPressure = computeNodePressure(nodeId, flowGraph, graph,
+                        viscosityMultiplier, edgePressures);
+                newPressure = Math.min(newPressure, formulas.config().maxPressure());
+
+                pressures.put(nodeId, newPressure);
+                distributeToOutgoing(nodeId, newPressure, flowGraph, edgePressures);
+
+                maxChange = Math.max(maxChange, Math.abs(newPressure - oldPressure));
+            }
+
+            if (maxChange < epsilon) break;
+        }
+    }
+
+    private float computeNodePressure(NodeId nodeId, DirectedFlowGraph flowGraph,
+                                       PipeGraph graph, float viscosityMultiplier,
+                                       Map<NodeId, Float> edgePressures) {
+        List<DirectedEdge> incomingEdges = flowGraph.incoming.getOrDefault(nodeId, List.of());
+        List<Float> incomingPressures = new ArrayList<>();
+
+        for (DirectedEdge edge : incomingEdges) {
+            float upstreamOutgoing = edgePressures.getOrDefault(edge.from(), 0f);
+            PipeEdge original = edge.originalEdge();
+            float delivered = formulas.edgeDeliveredPressure(
+                    upstreamOutgoing,
+                    original.fromWorldY(), original.toWorldY(),
+                    original.elevationAngleDegrees(), viscosityMultiplier,
+                    flowGraph.gravityDirection);
+            if (delivered > 0) {
+                incomingPressures.add(delivered);
             }
         }
 
-        List<NodeId> kids = children.get(node);
-        if (kids == null || kids.size() <= 1) {
-            // Single path — just propagate scale factor
-            if (kids != null && !kids.isEmpty()) {
-                applyFlowBudget(kids.get(0), scaleFactor, children, pipePressures, subtreeDemand);
+        float merged = formulas.junctionMergePressure(incomingPressures);
+        float sourceContribution = flowGraph.sourceContributions.getOrDefault(nodeId, 0f);
+        return merged + sourceContribution;
+    }
+
+    private void distributeToOutgoing(NodeId nodeId, float nodePressure,
+                                       DirectedFlowGraph flowGraph,
+                                       Map<NodeId, Float> edgePressures) {
+        List<DirectedEdge> outgoing = flowGraph.outgoing.getOrDefault(nodeId, List.of());
+        int fanOut = outgoing.size();
+        float perEdge = formulas.junctionSplitPressure(nodePressure, fanOut);
+        edgePressures.put(nodeId, perEdge);
+    }
+
+    // -- Segment equalization --
+
+    /**
+     * In a single unbranched pipe segment, flow must be uniform.
+     * A segment is a maximal chain of nodes where each node (except the last)
+     * has exactly 1 outgoing edge whose target has exactly 1 incoming edge.
+     * All nodes in a segment get the exit (last) node's pressure.
+     */
+    private void equalizeSegments(DirectedFlowGraph flowGraph, Map<NodeId, Float> pressures) {
+        Set<NodeId> equalized = new HashSet<>();
+
+        for (NodeId startNode : flowGraph.nodeOrder) {
+            if (equalized.contains(startNode)) continue;
+
+            // Try to start a chain from this node
+            List<NodeId> chain = new ArrayList<>();
+            chain.add(startNode);
+
+            NodeId current = startNode;
+            while (true) {
+                List<DirectedEdge> out = flowGraph.outgoing.getOrDefault(current, List.of());
+                if (out.size() != 1) break;
+
+                NodeId next = out.get(0).to();
+                List<DirectedEdge> nextIn = flowGraph.incoming.getOrDefault(next, List.of());
+                if (nextIn.size() != 1) break;
+
+                if (equalized.contains(next)) break;
+                chain.add(next);
+                current = next;
             }
-            return;
+
+            if (chain.size() < 2) continue;
+
+            NodeId exitNode = chain.get(chain.size() - 1);
+            float exitPressure = pressures.getOrDefault(exitNode, 0f);
+            for (NodeId node : chain) {
+                pressures.put(node, exitPressure);
+            }
+            equalized.addAll(chain);
+        }
+    }
+
+    // -- Burst detection --
+
+    private List<BurstEvent> detectBursts(Map<NodeId, Float> pressures) {
+        List<BurstEvent> events = new ArrayList<>();
+        for (var entry : pressures.entrySet()) {
+            float pressure = entry.getValue();
+            if (formulas.wouldBurst(pressure)) {
+                events.add(new BurstEvent(entry.getKey(), pressure, formulas.config().burstThreshold()));
+            }
+        }
+        return events;
+    }
+
+    // -- Breakdown computation --
+
+    private Map<NodeId, PressureBreakdown> buildBreakdowns(DirectedFlowGraph flowGraph,
+                                                            Map<NodeId, Float> pressures,
+                                                            PipeGraph graph,
+                                                            float viscosityMultiplier) {
+        Map<NodeId, PressureBreakdown> breakdowns = new HashMap<>();
+        Set<NodeId> handled = new HashSet<>();
+
+        for (NodeId startNode : flowGraph.nodeOrder) {
+            if (handled.contains(startNode)) continue;
+            float net = pressures.getOrDefault(startNode, 0f);
+            if (net <= 0) { handled.add(startNode); continue; }
+
+            // Walk the equalized chain from this node
+            List<NodeId> chain = new ArrayList<>();
+            chain.add(startNode);
+            NodeId current = startNode;
+            while (true) {
+                List<DirectedEdge> out = flowGraph.outgoing.getOrDefault(current, List.of());
+                if (out.size() != 1) break;
+                NodeId next = out.get(0).to();
+                if (flowGraph.incoming.getOrDefault(next, List.of()).size() != 1) break;
+                if (handled.contains(next)) break;
+                chain.add(next);
+                current = next;
+            }
+
+            // Accumulate gravity and friction across the entire chain
+            float gravityTotal = 0;
+            float frictionTotal = 0;
+            for (NodeId node : chain) {
+                for (DirectedEdge edge : flowGraph.incoming.getOrDefault(node, List.of())) {
+                    PipeEdge original = edge.originalEdge();
+                    float gravity = formulas.gravityDelta(original.fromWorldY(), original.toWorldY(),
+                            flowGraph.gravityDirection);
+                    float friction = formulas.segmentFriction(
+                            original.elevationAngleDegrees(), viscosityMultiplier);
+                    gravityTotal += Math.max(0, gravity);
+                    frictionTotal += friction;
+                }
+            }
+
+            // Source contributions across the chain
+            float sourceContrib = 0;
+            for (NodeId node : chain) {
+                sourceContrib += flowGraph.sourceContributions.getOrDefault(node, 0f);
+            }
+            gravityTotal += sourceContrib;
+
+            // Merge at the chain entry
+            float mergeExtra = 0;
+            NodeId entryNode = chain.get(0);
+            List<DirectedEdge> entryInEdges = flowGraph.incoming.getOrDefault(entryNode, List.of());
+            if (entryInEdges.size() > 1) {
+                List<Float> inPressures = new ArrayList<>();
+                for (DirectedEdge edge : entryInEdges) {
+                    float upstreamOut = pressures.getOrDefault(edge.from(), 0f);
+                    int fanOut = flowGraph.outgoing.getOrDefault(edge.from(), List.of()).size();
+                    float perEdge = formulas.junctionSplitPressure(upstreamOut, fanOut);
+                    PipeEdge original = edge.originalEdge();
+                    float delivered = formulas.edgeDeliveredPressure(perEdge,
+                            original.fromWorldY(), original.toWorldY(),
+                            original.elevationAngleDegrees(), viscosityMultiplier,
+                            flowGraph.gravityDirection);
+                    inPressures.add(delivered);
+                }
+                float maxSingle = inPressures.stream().max(Float::compareTo).orElse(0f);
+                float sum = (float) inPressures.stream().mapToDouble(f -> f).sum();
+                mergeExtra = sum - maxSingle;
+            }
+
+            // Split at the chain exit
+            float splitPenalty = 0;
+            NodeId exitNode = chain.get(chain.size() - 1);
+            List<DirectedEdge> exitOutEdges = flowGraph.outgoing.getOrDefault(exitNode, List.of());
+            if (exitOutEdges.size() > 1) {
+                splitPenalty = net - (net / exitOutEdges.size());
+            }
+
+            boolean capped = net >= formulas.config().maxPressure();
+            boolean bursting = formulas.wouldBurst(net);
+
+            PressureBreakdown bd = new PressureBreakdown(
+                    gravityTotal, 0, mergeExtra, splitPenalty,
+                    frictionTotal, net, capped, bursting);
+
+            for (NodeId node : chain) {
+                breakdowns.put(node, bd);
+            }
+            handled.addAll(chain);
         }
 
-        // Junction: split flow proportionally by demand
-        float budget = pipePressures.getOrDefault(node, 0f) / 2f;
-        float totalDemand = 0;
-        for (NodeId child : kids) {
-            totalDemand += subtreeDemand.getOrDefault(child, 0f);
-        }
+        return breakdowns;
+    }
 
-        for (NodeId child : kids) {
-            float childDemand = subtreeDemand.getOrDefault(child, 0f);
-            float childScale;
-            if (totalDemand <= budget || totalDemand <= 0) {
-                childScale = scaleFactor;
-            } else {
-                childScale = scaleFactor * (budget / totalDemand);
-            }
-            applyFlowBudget(child, childScale, children, pipePressures, subtreeDemand);
-        }
+    // -- Helpers --
+
+    private int pickOutflowFace(DirectedFlowGraph flowGraph, NodeId nodeId) {
+        List<DirectedEdge> outgoing = flowGraph.outgoing.getOrDefault(nodeId, List.of());
+        if (outgoing.isEmpty()) return -1;
+        return outgoing.get(0).originalEdge().faceIndex();
     }
 
     private static int reverseFace(int faceIndex) {
         return (faceIndex % 2 == 0) ? faceIndex + 1 : faceIndex - 1;
+    }
+
+    private SolverResult emptySolverResult(List<PressureSource> sources) {
+        return new SolverResult(
+                Map.of(), Map.of(), Set.of(), List.of(), Map.of(), sources, Map.of(), Map.of());
     }
 }

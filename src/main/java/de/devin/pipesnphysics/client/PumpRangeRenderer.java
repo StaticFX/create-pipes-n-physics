@@ -140,30 +140,31 @@ public class PumpRangeRenderer {
     private static List<PipePath> traceGravityPaths(PipeGraph graph) {
         PipeFormulas formulas = new PipeFormulas(PhysicsConfigFactory.fromModConfig());
         NetworkSolver solver = new NetworkSolver(formulas);
-        GravityFlowResult flow = solver.solveGravityFlow(graph);
-        if (flow == null) return Collections.emptyList();
+        SolverResult result = solver.solve(graph);
+        if (result.activePipes().isEmpty()) return Collections.emptyList();
 
-        // Convert flowParent (NodeId → NodeId) to BlockPos parent map
+        // Build parent map from inbound face indices
         Map<BlockPos, BlockPos> parentMap = new LinkedHashMap<>();
         List<BlockPos> orderedPipes = new ArrayList<>();
-        BlockPos sourcePos = PipeGraphBuilder.posOf(flow.source().pipeNode());
-        orderedPipes.add(sourcePos);
 
-        for (NodeId nodeId : flow.activePipes()) {
+        for (NodeId nodeId : result.activePipes()) {
             BlockPos pos = PipeGraphBuilder.posOf(nodeId);
             orderedPipes.add(pos);
-            NodeId parentId = flow.flowParent().get(nodeId);
-            if (parentId != null) {
-                parentMap.put(pos, PipeGraphBuilder.posOf(parentId));
+            Integer inFace = result.inboundFaceIndex().get(nodeId);
+            if (inFace != null) {
+                Direction inDir = PipeGraphBuilder.directionOf(inFace);
+                BlockPos parentPos = pos.relative(inDir);
+                parentMap.put(pos, parentPos);
             }
         }
 
-        // Compute max visual range for color gradient
+        if (orderedPipes.isEmpty()) return Collections.emptyList();
+        BlockPos sourcePos = orderedPipes.get(0);
+
         float frictionPB = formulas.config().frictionPerBlock();
         float maxPressure = formulas.config().maxPressure();
         int maxRange = frictionPB > 0.001f ? (int) (maxPressure / frictionPB) : 999;
 
-        // Extract branches and build PipePaths
         List<List<BlockPos>> branches = extractBranches(orderedPipes, parentMap, sourcePos);
         List<PipePath> paths = new ArrayList<>();
         for (List<BlockPos> branch : branches) {
@@ -200,9 +201,16 @@ public class PumpRangeRenderer {
             double pumpWorldY = startPos.getY() + 0.5;
             int startFace = side.ordinal();
 
+            // Use the unified solver with pump source
+            float effectivePressure = isPull
+                    ? formulas.pumpPullPressure(pumpSpeed)
+                    : formulas.pumpPushPressure(pumpSpeed);
+            PressureSource pumpSource = new PressureSource(
+                    startNode,
+                    isPull ? PressureSource.Kind.PUMP_PULL : PressureSource.Kind.PUMP_PUSH,
+                    effectivePressure, pumpWorldY);
             NetworkSolver solver = new NetworkSolver(formulas);
-            PumpFlowResult result = solver.solvePumpReach(graph, startNode, startFace,
-                    pumpSpeed, pumpWorldY, 256);
+            SolverResult result = solver.solve(graph, 1.0f, List.of(pumpSource));
 
             List<BlockPos> orderedPositions = new ArrayList<>();
             orderedPositions.add(pumpPos);
@@ -210,34 +218,20 @@ public class PumpRangeRenderer {
             Map<BlockPos, Integer> distanceMap = new HashMap<>();
             distanceMap.put(pumpPos, 0);
 
-            for (NodeId nodeId : result.reachableNodes()) {
+            int dist = 1;
+            for (NodeId nodeId : result.activePipes()) {
                 BlockPos pos = PipeGraphBuilder.posOf(nodeId);
                 orderedPositions.add(pos);
-                distanceMap.put(pos, result.hopCounts().getOrDefault(nodeId, 1));
-            }
-
-            // Build parent map from graph adjacency
-            Set<BlockPos> visited = new HashSet<>();
-            visited.add(pumpPos);
-            Queue<BlockPos> bfs = new ArrayDeque<>();
-            bfs.add(startPos);
-            parentMap.put(startPos, pumpPos);
-            while (!bfs.isEmpty()) {
-                BlockPos current = bfs.poll();
-                if (!visited.add(current)) continue;
-                NodeId currentId = PipeGraphBuilder.nodeOf(current);
-                if (!result.reachableNodes().contains(currentId) && !current.equals(startPos)) continue;
-                for (PipeEdge edge : graph.adjacency().getOrDefault(currentId, List.of())) {
-                    BlockPos next = PipeGraphBuilder.posOf(edge.to());
-                    if (visited.contains(next)) continue;
-                    if (!result.reachableNodes().contains(edge.to())) continue;
-                    parentMap.put(next, current);
-                    bfs.add(next);
+                distanceMap.put(pos, dist++);
+                Integer inFace = result.inboundFaceIndex().get(nodeId);
+                if (inFace != null) {
+                    Direction inDir = PipeGraphBuilder.directionOf(inFace);
+                    parentMap.put(pos, pos.relative(inDir));
                 }
             }
 
             if (orderedPositions.size() > 1) {
-                int maxDist = result.hopCounts().values().stream().mapToInt(i -> i).max().orElse(1);
+                int maxDist = dist - 1;
                 List<List<BlockPos>> branches = extractBranches(orderedPositions, parentMap, pumpPos);
                 for (List<BlockPos> branch : branches) {
                     List<Integer> distances = new ArrayList<>();
