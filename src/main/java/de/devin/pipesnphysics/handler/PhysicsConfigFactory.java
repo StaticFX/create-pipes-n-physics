@@ -22,7 +22,9 @@ public final class PhysicsConfigFactory {
                 PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue(),
                 1000,  // per-pipe capacity in mB
                 10.0f, // taperMargin — head below which flow tapers
-                256.0f // defaultPumpHead — reach ~50 tiles at friction=5
+                256.0f, // defaultPumpHead — reach ~50 tiles at friction=5
+                2.0f,  // frontK — ~2 tiles/tick at full head with water viscosity
+                5.0f   // hysteresis — head margin before FLOWING→DRAINING
         );
     }
 

@@ -175,7 +175,9 @@ public class DebugGraphCommand {
             boolean lighter = networkFluid.getFluid().getFluidType().isLighterThanAir();
             float dens = networkFluid.getFluid().getFluidType().getDensity(networkFluid) / 1000f;
             if (dens <= 0) dens = 1.0f;
-            fluids.put(fluidId, new SimFluid(fluidId, lighter ? FluidPhase.GAS : FluidPhase.LIQUID, dens));
+            float visc = networkFluid.getFluid().getFluidType().getViscosity(networkFluid) / 1000f;
+            if (visc <= 0) visc = 1.0f;
+            fluids.put(fluidId, new SimFluid(fluidId, lighter ? FluidPhase.GAS : FluidPhase.LIQUID, dens, visc));
         }
 
         FluidSimulator simulator = new FluidSimulator(simConfig);

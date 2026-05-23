@@ -23,6 +23,10 @@ public class SimEdge {
     private final List<BlockPos> pipePositions;
     private final List<FluidFront> column;
 
+    private EdgePhase phase = EdgePhase.EMPTY;
+    private float frontPos = 0;
+    private NodeId upstreamNode = null;
+
     public SimEdge(int id, NodeId a, NodeId b, int length, int capacity,
                    float resistance, List<BlockPos> pipePositions) {
         this.id = id;
@@ -37,6 +41,20 @@ public class SimEdge {
 
     public int id() { return id; }
     public NodeId a() { return a; }
+
+    public EdgePhase phase() { return phase; }
+    public void setPhase(EdgePhase phase) { this.phase = phase; }
+
+    public float frontPos() { return frontPos; }
+    public void setFrontPos(float frontPos) { this.frontPos = frontPos; }
+
+    public NodeId upstreamNode() { return upstreamNode; }
+    public void setUpstreamNode(NodeId upstream) { this.upstreamNode = upstream; }
+
+    public NodeId downstreamNode() {
+        if (upstreamNode == null) return null;
+        return upstreamNode.equals(a) ? b : a;
+    }
     public NodeId b() { return b; }
     public int length() { return length; }
     public int capacity() { return capacity; }
