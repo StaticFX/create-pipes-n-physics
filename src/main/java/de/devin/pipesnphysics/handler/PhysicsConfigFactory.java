@@ -17,10 +17,12 @@ public final class PhysicsConfigFactory {
                 PipesNPhysicsConfig.GRAVITY_PRESSURE_PER_BLOCK.get().floatValue(),
                 PipesNPhysicsConfig.GRAVITY_DEAD_ZONE.get().floatValue(),
                 PipesNPhysicsConfig.MAX_GRAVITY_PRESSURE.get().floatValue(),
-                2.0f, // conductance — flow = COND * (|ΔΦ| - resistance)
+                1.0f,  // conductance — flow = COND * |ΔΦ|
                 PipesNPhysicsConfig.PIPE_BURST_THRESHOLD.get().floatValue(),
                 PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue(),
-                1000  // per-pipe capacity in mB
+                1000,  // per-pipe capacity in mB
+                10.0f, // taperMargin — head below which flow tapers
+                256.0f // defaultPumpHead — reach ~50 tiles at friction=5
         );
     }
 

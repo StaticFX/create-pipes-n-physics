@@ -14,7 +14,8 @@ public class FluidNetwork {
     private boolean dirty;
 
     private float[] flowRate;
-    private float[] potential;
+    private final Map<NodeId, Float> headAt;
+    private final Map<NodeId, Float> potentialAt;
 
     public FluidNetwork(Map<NodeId, SimNode> nodes, List<SimEdge> edges) {
         this.nodes = nodes;
@@ -29,7 +30,8 @@ public class FluidNetwork {
         }
 
         this.flowRate = new float[edges.size()];
-        this.potential = new float[nodes.size()];
+        this.headAt = new HashMap<>();
+        this.potentialAt = new HashMap<>();
     }
 
     public Map<NodeId, SimNode> nodes() { return nodes; }
@@ -45,20 +47,11 @@ public class FluidNetwork {
     public float flowRate(int edgeIndex) { return flowRate[edgeIndex]; }
     public void setFlowRate(int edgeIndex, float rate) { flowRate[edgeIndex] = rate; }
 
-    public float potential(NodeId node) {
-        int idx = 0;
-        for (NodeId id : nodes.keySet()) {
-            if (id.equals(node)) return potential[idx];
-            idx++;
-        }
-        return 0;
-    }
+    public float headAt(NodeId node) { return headAt.getOrDefault(node, 0f); }
+    public void setHeadAt(NodeId node, float value) { headAt.put(node, value); }
+    public Map<NodeId, Float> allHeads() { return headAt; }
 
-    public void setPotential(NodeId node, float value) {
-        int idx = 0;
-        for (NodeId id : nodes.keySet()) {
-            if (id.equals(node)) { potential[idx] = value; return; }
-            idx++;
-        }
-    }
+    public float potential(NodeId node) { return potentialAt.getOrDefault(node, 0f); }
+    public void setPotential(NodeId node, float value) { potentialAt.put(node, value); }
+    public Map<NodeId, Float> allPotentials() { return potentialAt; }
 }
