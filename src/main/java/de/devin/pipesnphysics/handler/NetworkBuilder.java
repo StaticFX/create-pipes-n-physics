@@ -78,7 +78,8 @@ public final class NetworkBuilder {
             double elevation = SableCompat.getWorldY(level, pos);
             SimNodeKind kind = classifyNode(pos, pipeConnections, pumpPositions, endpoints);
             float staticPressure = computeStaticPressure(level, pos, pumpPositions, endpoints, kind);
-            nodes.put(id, new SimNode(id, kind, elevation, staticPressure));
+            float head = computeHead(level, pos, pumpPositions, endpoints, kind, config);
+            nodes.put(id, new SimNode(id, kind, elevation, staticPressure, head));
         }
 
         // Debug: log raw data
@@ -283,6 +284,38 @@ public final class NetworkBuilder {
                     // (the gravity term handles the actual direction)
                     return 0; // gravity is handled by Φ, not staticPressure for sources
                 }
+            }
+        }
+
+        return 0;
+    }
+
+    private static float computeHead(Level level, BlockPos pos,
+                                       Map<BlockPos, BlockPos> pumpPositions,
+                                       Map<BlockPos, EndpointData> endpoints,
+                                       SimNodeKind kind, SimConfig config) {
+        // Pumps supply head = speed
+        if (kind == SimNodeKind.PUMP) {
+            for (var entry : pumpPositions.entrySet()) {
+                BlockPos pumpPos = entry.getKey();
+                if (pumpPos.distManhattan(pos) != 1) continue;
+                BlockEntity be = level.getBlockEntity(pumpPos);
+                if (be instanceof KineticBlockEntity kbe) {
+                    return Math.abs(kbe.getSpeed());
+                }
+            }
+            return config.defaultPumpHead();
+        }
+
+        // Sources supply head from the height of the fluid above the pipe
+        if (kind == SimNodeKind.SOURCE) {
+            for (var ep : endpoints.values()) {
+                if (!ep.pipePos.equals(pos)) continue;
+                double handlerY = SableCompat.getWorldY(level, ep.handlerPos);
+                double pipeY = SableCompat.getWorldY(level, pos);
+                float heightDiff = (float) Math.abs(handlerY - pipeY);
+                // Head from gravity: ρ·g·Δy (density assumed 1 for head budget)
+                return heightDiff * config.G();
             }
         }
 
