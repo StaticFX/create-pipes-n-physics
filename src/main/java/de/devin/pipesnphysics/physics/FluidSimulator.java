@@ -117,6 +117,14 @@ public final class FluidSimulator {
 
             // Friction reduces the effective potential difference, not the flow
             float effectiveDelta = Math.abs(deltaPhi) - edge.resistance();
+
+            org.apache.logging.log4j.LogManager.getLogger().debug(
+                    "Edge {}: elev_a={} elev_b={} sP_a={} sP_b={} density={} G={} phiA={} phiB={} dPhi={} resist={} effDelta={} fill={}",
+                    i, nodeA.elevation(), nodeB.elevation(),
+                    nodeA.staticPressure(), nodeB.staticPressure(),
+                    fluid.density(), config.G(), phiA, phiB, deltaPhi,
+                    edge.resistance(), effectiveDelta, edge.totalFill());
+
             if (effectiveDelta <= 0) {
                 net.setFlowRate(i, 0);
                 continue;

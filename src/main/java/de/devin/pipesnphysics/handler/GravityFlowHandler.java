@@ -117,7 +117,8 @@ public class GravityFlowHandler {
         }
 
         if (network.edges().isEmpty()) {
-            LOGGER.debug("Network at {} has no edges", startPos);
+            // Single-pipe network: transfer directly between endpoints
+            handleSingleNodeNetwork(level, network, startPos, currentTick);
             return;
         }
 
@@ -356,6 +357,53 @@ public class GravityFlowHandler {
                 if (pipe instanceof PipeFlowData data) {
                     data.pipesnphysics$setBreakdown(breakdown);
                     pipe.blockEntity.notifyUpdate();
+                }
+            }
+        }
+    }
+
+    /**
+     * Handle networks with only 1 pipe (no edges in contracted graph).
+     * Transfer directly between endpoint handlers adjacent to the single node.
+     */
+    private static void handleSingleNodeNetwork(Level level, FluidNetwork network,
+                                                 BlockPos startPos, long currentTick) {
+        if (network.nodes().isEmpty()) return;
+
+        SimNode node = network.nodes().values().iterator().next();
+        BlockPos nodePos = PipeGraphBuilder.posOf(node.id());
+
+        // Find all adjacent fluid handlers
+        List<HandlerInfo> handlers = new ArrayList<>();
+        for (Direction dir : Direction.values()) {
+            BlockPos neighbor = nodePos.relative(dir);
+            var handler = level.getCapability(Capabilities.FluidHandler.BLOCK, neighbor, dir.getOpposite());
+            if (handler != null) {
+                handlers.add(new HandlerInfo(node.id(), handler, neighbor));
+            }
+        }
+
+        if (handlers.size() < 2) return;
+        LOGGER.debug("SingleNode transfer at {} with {} handlers", nodePos, handlers.size());
+
+        // Find source (has fluid) and sink (can accept)
+        for (HandlerInfo src : handlers) {
+            for (int i = 0; i < src.handler.getTanks(); i++) {
+                FluidStack fluid = src.handler.getFluidInTank(i);
+                if (fluid.isEmpty()) continue;
+
+                for (HandlerInfo dst : handlers) {
+                    if (dst.pos.equals(src.pos)) continue;
+                    int accepted = dst.handler.fill(fluid.copyWithAmount(
+                            Math.min(fluid.getAmount(), 10)), FluidAction.SIMULATE);
+                    if (accepted <= 0) continue;
+
+                    FluidStack drained = src.handler.drain(
+                            fluid.copyWithAmount(accepted), FluidAction.EXECUTE);
+                    if (!drained.isEmpty()) {
+                        dst.handler.fill(drained, FluidAction.EXECUTE);
+                    }
+                    return;
                 }
             }
         }
