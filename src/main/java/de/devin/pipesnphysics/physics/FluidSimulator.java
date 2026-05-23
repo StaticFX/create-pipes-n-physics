@@ -5,11 +5,13 @@ import net.minecraft.core.BlockPos;
 import java.util.*;
 
 /**
- * Tick-based fluid simulation using the potential + head-budget model.
+ * Two-phase tick-based fluid simulation.
  *
- * Direction: Φ = staticPressure + phaseSign * density * G * elevation
- * Flow: Q = COND * |ΔΦ| * fullnessFactor * reachFactor, clamped to available volume
- * Reach: bounded by head budget consumed over friction + gravity
+ * Phase 1 (CHARGING): fluid front advances through pipe at speed driven by head and viscosity.
+ * Phase 2 (FLOWING): steady through-flow once a complete source→sink circuit exists.
+ *
+ * Direction from Φ = staticPressure + phaseSign * density * G * elevation.
+ * Reach bounded by head budget consumed over friction + gravity.
  */
 public final class FluidSimulator {
 
@@ -31,20 +33,338 @@ public final class FluidSimulator {
         List<BurstEvent> bursts = new ArrayList<>();
         List<CollisionEvent> collisions = new ArrayList<>();
 
-        // Step 1.5: Propagate head budgets from pumps/sources
+        // Step 1: Head propagation
         propagateHead(net, fluids);
 
-        // Step 2: Compute flow rates
-        computeFlowRates(net, fluids);
+        // Step 2: Per-edge phase dispatch
+        for (int i = 0; i < net.edges().size(); i++) {
+            SimEdge edge = net.edges().get(i);
+            String fluidId = edge.primaryFluid();
+            SimFluid fluid = fluidId != null ? fluids.get(fluidId) : null;
 
-        // Step 3: Advance fluid fronts
-        advanceFluid(net);
+            switch (edge.phase()) {
+                case EMPTY -> tickEmpty(net, edge, i, fluids);
+                case CHARGING -> tickCharging(net, edge, i, fluid);
+                case STALLED -> tickStalled(net, edge, i, fluid);
+                case FLOWING -> tickFlowing(net, edge, i, fluid);
+                case DRAINING -> tickDraining(net, edge, i);
+            }
+        }
 
-        // Step 4: Resolve nodes + detect collisions
+        // Step 3: Resolve nodes
         collisions.addAll(detectEdgeCollisions(net));
         collisions.addAll(resolveNodes(net, fluids));
 
         // Compute potentials for display
+        Map<NodeId, Float> potentials = computePotentials(net, fluids);
+
+        // Burst detection
+        for (int i = 0; i < net.edges().size(); i++) {
+            float absFlow = Math.abs(net.flowRate(i));
+            if (absFlow > config.burstThreshold()) {
+                SimEdge edge = net.edges().get(i);
+                bursts.add(new BurstEvent(edge.a(), absFlow, config.burstThreshold()));
+            }
+        }
+
+        return new SimResult(
+                Arrays.copyOf(net.flowRates(), net.flowRates().length),
+                bursts, collisions, potentials);
+    }
+
+    // -- Phase handlers --
+
+    private void tickEmpty(FluidNetwork net, SimEdge edge, int idx, Map<String, SimFluid> fluids) {
+        // Check if any adjacent node can start feeding this edge
+        for (NodeId nodeId : List.of(edge.a(), edge.b())) {
+            SimNode node = net.node(nodeId);
+            if (node == null) continue;
+            if (net.headAt(nodeId) <= 0) continue;
+
+            // Need a fluid source at this node
+            if (node.kind() == SimNodeKind.SOURCE || node.kind() == SimNodeKind.PUMP) {
+                // Find which fluid to charge with — check adjacent edges or use network fluid
+                String fluidId = findFluidAtNode(net, nodeId, fluids);
+                if (fluidId == null) continue;
+
+                edge.setPhase(EdgePhase.CHARGING);
+                edge.setUpstreamNode(nodeId);
+                edge.setFrontPos(0);
+                // Seed initial fluid
+                if (nodeId.equals(edge.a())) {
+                    edge.pushFromA(fluidId, 1);
+                } else {
+                    edge.pushFromB(fluidId, 1);
+                }
+                break;
+            }
+        }
+    }
+
+    private void tickCharging(FluidNetwork net, SimEdge edge, int idx, SimFluid fluid) {
+        if (fluid == null) { edge.setPhase(EdgePhase.EMPTY); return; }
+
+        NodeId upstream = edge.upstreamNode();
+        if (upstream == null) { edge.setPhase(EdgePhase.EMPTY); return; }
+
+        SimNode upNode = net.node(upstream);
+        float headAtUpstream = net.headAt(upstream);
+
+        // Head at the advancing front: subtract friction and gravity cost to frontPos
+        float frictionToFront = config.frictionPerBlock() * edge.frontPos();
+        float gravityToFront = 0;
+        if (edge.length() > 0) {
+            SimNode downNode = net.node(edge.downstreamNode());
+            if (downNode != null) {
+                float fracAdvanced = edge.frontPos() / edge.length();
+                float elevAtFront = (float) (upNode.elevation()
+                        + (downNode.elevation() - upNode.elevation()) * fracAdvanced);
+                gravityToFront = fluid.phase().sign() * fluid.density() * config.G()
+                        * (elevAtFront - (float) upNode.elevation());
+            }
+        }
+
+        float headAtFront = headAtUpstream - frictionToFront - gravityToFront;
+
+        if (headAtFront <= 0) {
+            edge.setPhase(EdgePhase.STALLED);
+            net.setFlowRate(idx, 0);
+            return;
+        }
+
+        // Front advance speed: tiles/tick = FRONT_K * headAtFront / viscosity
+        float v = Math.max(0, config.frontK() * headAtFront / fluid.viscosity());
+        edge.setFrontPos(edge.frontPos() + v);
+
+        // Update fill based on front position
+        float fillFraction = Math.clamp(edge.frontPos() / Math.max(1, edge.length()), 0, 1);
+        int targetFill = (int) (fillFraction * edge.capacity());
+        int currentFill = edge.totalFill();
+        String fluidId = edge.primaryFluid();
+
+        if (fluidId != null && targetFill > currentFill) {
+            if (upstream.equals(edge.a())) {
+                edge.pushFromA(fluidId, targetFill - currentFill);
+            } else {
+                edge.pushFromB(fluidId, targetFill - currentFill);
+            }
+        }
+
+        // Set a nominal flow rate for display
+        net.setFlowRate(idx, upstream.equals(edge.a()) ? v : -v);
+
+        // Check if front reached the downstream end
+        if (edge.frontPos() >= edge.length()) {
+            edge.setFrontPos(edge.length());
+
+            // Check if downstream connects to a sink or another path
+            NodeId downstream = edge.downstreamNode();
+            if (downstream != null) {
+                SimNode downNode = net.node(downstream);
+                if (downNode != null && (downNode.kind() == SimNodeKind.SOURCE
+                        || downNode.kind() == SimNodeKind.SINK
+                        || downNode.kind() == SimNodeKind.DEAD_END)) {
+                    // Circuit complete — transition to FLOWING
+                    edge.setPhase(EdgePhase.FLOWING);
+                    // Fill to capacity for steady flow
+                    int space = edge.capacity() - edge.totalFill();
+                    if (space > 0 && fluidId != null) {
+                        if (upstream.equals(edge.a())) {
+                            edge.pushFromA(fluidId, space);
+                        } else {
+                            edge.pushFromB(fluidId, space);
+                        }
+                    }
+                } else {
+                    // Junction — try to spawn charging into downstream edges
+                    for (int downEdgeIdx : net.edgesAt(downstream)) {
+                        SimEdge downEdge = net.edges().get(downEdgeIdx);
+                        if (downEdge == edge) continue;
+                        if (downEdge.phase() == EdgePhase.EMPTY) {
+                            downEdge.setPhase(EdgePhase.CHARGING);
+                            downEdge.setUpstreamNode(downstream);
+                            downEdge.setFrontPos(0);
+                            if (fluidId != null) {
+                                if (downstream.equals(downEdge.a())) {
+                                    downEdge.pushFromA(fluidId, 1);
+                                } else {
+                                    downEdge.pushFromB(fluidId, 1);
+                                }
+                            }
+                        }
+                    }
+                    // This edge is also flowing now (it reached a junction)
+                    edge.setPhase(EdgePhase.FLOWING);
+                    int space = edge.capacity() - edge.totalFill();
+                    if (space > 0 && fluidId != null) {
+                        if (upstream.equals(edge.a())) {
+                            edge.pushFromA(fluidId, space);
+                        } else {
+                            edge.pushFromB(fluidId, space);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void tickStalled(FluidNetwork net, SimEdge edge, int idx, SimFluid fluid) {
+        if (fluid == null) return;
+        NodeId upstream = edge.upstreamNode();
+        if (upstream == null) return;
+
+        // Recheck if head is now available (e.g. booster placed)
+        SimNode upNode = net.node(upstream);
+        float headAtUpstream = net.headAt(upstream);
+        float frictionToFront = config.frictionPerBlock() * edge.frontPos();
+
+        if (headAtUpstream - frictionToFront > 0) {
+            edge.setPhase(EdgePhase.CHARGING);
+        }
+
+        net.setFlowRate(idx, 0);
+    }
+
+    private void tickFlowing(FluidNetwork net, SimEdge edge, int idx, SimFluid fluid) {
+        if (fluid == null) {
+            net.setFlowRate(idx, 0);
+            return;
+        }
+
+        SimNode nodeA = net.node(edge.a());
+        SimNode nodeB = net.node(edge.b());
+
+        float phiA = computePhi(nodeA, fluid);
+        float phiB = computePhi(nodeB, fluid);
+        float deltaPhi = phiA - phiB;
+
+        if (Math.abs(deltaPhi) <= config.EPS()) {
+            net.setFlowRate(idx, 0);
+            return;
+        }
+
+        // Steady flow: COND / viscosity * |ΔΦ|
+        float Q = Math.clamp((config.conductance() / fluid.viscosity()) * Math.abs(deltaPhi),
+                0, config.maxFlow());
+
+        // fullnessFactor: stability feedback
+        float fullness = edge.capacity() > 0
+                ? (float) edge.totalFill() / edge.capacity()
+                : 0;
+        Q *= fullness;
+
+        // reachFactor: taper at head limit
+        NodeId upstream = deltaPhi > 0 ? edge.a() : edge.b();
+        NodeId downstream = deltaPhi > 0 ? edge.b() : edge.a();
+        float surplus = net.headAt(upstream)
+                - edgeCost(edge, net.node(upstream), net.node(downstream),
+                edge.primaryFluid(), Map.of(fluid.id(), fluid));
+        float reachFactor = Math.clamp(surplus / config.taperMargin(), 0, 1);
+        Q *= reachFactor;
+
+        // Clamp to available
+        Q = Math.min(Q, edge.totalFill());
+
+        net.setFlowRate(idx, Math.signum(deltaPhi) * Q);
+
+        // Advance fluid
+        int amount = (int) Q;
+        if (amount > 0) {
+            if (deltaPhi > 0) {
+                edge.drainFromA(amount);
+            } else {
+                edge.drainFromB(amount);
+            }
+        }
+
+        // Check circuit integrity — revert if head deficit exceeds hysteresis
+        if (surplus < -config.hysteresis()) {
+            edge.setPhase(EdgePhase.DRAINING);
+        }
+    }
+
+    private void tickDraining(FluidNetwork net, SimEdge edge, int idx) {
+        // Drain a bit each tick
+        int drain = Math.min(edge.totalFill(), Math.max(1, edge.capacity() / 20));
+        if (edge.totalFill() > 0) {
+            edge.drainFromA(drain / 2 + 1);
+            edge.drainFromB(drain / 2 + 1);
+        }
+
+        if (edge.totalFill() <= 0) {
+            edge.setPhase(EdgePhase.EMPTY);
+            edge.setFrontPos(0);
+            edge.setUpstreamNode(null);
+        }
+
+        net.setFlowRate(idx, 0);
+    }
+
+    // -- Helpers --
+
+    private float computePhi(SimNode node, SimFluid fluid) {
+        return node.staticPressure()
+                + fluid.phase().sign() * fluid.density() * config.G() * (float) node.elevation();
+    }
+
+    private void propagateHead(FluidNetwork net, Map<String, SimFluid> fluids) {
+        for (var entry : net.nodes().entrySet()) {
+            net.setHeadAt(entry.getKey(), entry.getValue().head());
+        }
+
+        boolean changed = true;
+        int maxPasses = 10;
+        while (changed && maxPasses-- > 0) {
+            changed = false;
+            for (int i = 0; i < net.edges().size(); i++) {
+                SimEdge edge = net.edges().get(i);
+                String fluidId = edge.primaryFluid();
+
+                for (boolean aToB : new boolean[]{true, false}) {
+                    NodeId from = aToB ? edge.a() : edge.b();
+                    NodeId to = aToB ? edge.b() : edge.a();
+                    float headFrom = net.headAt(from);
+                    if (headFrom <= 0) continue;
+
+                    float cost = edgeCost(edge, net.node(from), net.node(to), fluidId, fluids);
+                    float arriving = headFrom - cost;
+
+                    if (arriving > net.headAt(to)) {
+                        net.setHeadAt(to, arriving);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    private float edgeCost(SimEdge edge, SimNode from, SimNode to,
+                           String fluidId, Map<String, SimFluid> fluids) {
+        float friction = config.frictionPerBlock() * edge.length();
+        float gravityCost = 0;
+        if (fluidId != null) {
+            SimFluid fluid = fluids.get(fluidId);
+            if (fluid != null) {
+                float deltaY = (float) (to.elevation() - from.elevation());
+                gravityCost = fluid.phase().sign() * fluid.density() * config.G() * deltaY;
+            }
+        }
+        return friction + gravityCost;
+    }
+
+    private String findFluidAtNode(FluidNetwork net, NodeId nodeId, Map<String, SimFluid> fluids) {
+        // Check adjacent edges for fluid
+        for (int edgeIdx : net.edgesAt(nodeId)) {
+            SimEdge edge = net.edges().get(edgeIdx);
+            String f = edge.primaryFluid();
+            if (f != null) return f;
+        }
+        // Return first known fluid as fallback
+        if (!fluids.isEmpty()) return fluids.keySet().iterator().next();
+        return null;
+    }
+
+    private Map<NodeId, Float> computePotentials(FluidNetwork net, Map<String, SimFluid> fluids) {
         Map<NodeId, Float> potentials = new HashMap<>();
         for (var entry : net.nodes().entrySet()) {
             SimNode node = entry.getValue();
@@ -61,152 +381,7 @@ public final class FluidSimulator {
             potentials.put(entry.getKey(), maxPhi);
             net.setPotential(entry.getKey(), maxPhi);
         }
-
-        // Burst detection
-        for (int i = 0; i < net.edges().size(); i++) {
-            float absFlow = Math.abs(net.flowRate(i));
-            if (absFlow > config.burstThreshold()) {
-                SimEdge edge = net.edges().get(i);
-                bursts.add(new BurstEvent(edge.a(), absFlow, config.burstThreshold()));
-            }
-        }
-
-        return new SimResult(
-                Arrays.copyOf(net.flowRates(), net.flowRates().length),
-                bursts, collisions, potentials);
-    }
-
-    private float computePhi(SimNode node, SimFluid fluid) {
-        return node.staticPressure()
-                + fluid.phase().sign() * fluid.density() * config.G() * (float) node.elevation();
-    }
-
-    /**
-     * Propagate head budget from pumps/sources outward through the network.
-     * Head is consumed by friction (R_PER_TILE * length) and gravity lift,
-     * refunded by gravity drops.
-     */
-    private void propagateHead(FluidNetwork net, Map<String, SimFluid> fluids) {
-        // Initialize: sources/pumps start with their head budget
-        for (var entry : net.nodes().entrySet()) {
-            SimNode node = entry.getValue();
-            net.setHeadAt(entry.getKey(), node.head());
-        }
-
-        // Relaxation: BFS from nodes with head, propagate to neighbors
-        // Multiple passes to handle multi-path networks
-        boolean changed = true;
-        int maxPasses = 10;
-        while (changed && maxPasses-- > 0) {
-            changed = false;
-            for (int i = 0; i < net.edges().size(); i++) {
-                SimEdge edge = net.edges().get(i);
-                String fluidId = edge.primaryFluid();
-
-                // Propagate in both directions, take the better path
-                for (boolean aToB : new boolean[]{true, false}) {
-                    NodeId from = aToB ? edge.a() : edge.b();
-                    NodeId to = aToB ? edge.b() : edge.a();
-                    float headFrom = net.headAt(from);
-                    if (headFrom <= 0) continue;
-
-                    float cost = edgeCost(edge, net.node(from), net.node(to), fluidId, fluids);
-                    float headArriving = headFrom - cost;
-
-                    if (headArriving > net.headAt(to)) {
-                        net.setHeadAt(to, headArriving);
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Head cost to traverse an edge in a given direction.
-     * Friction always costs. Gravity costs for lift, refunds for drops.
-     */
-    private float edgeCost(SimEdge edge, SimNode from, SimNode to,
-                           String fluidId, Map<String, SimFluid> fluids) {
-        float friction = config.frictionPerBlock() * edge.length();
-
-        float gravityCost = 0;
-        if (fluidId != null) {
-            SimFluid fluid = fluids.get(fluidId);
-            if (fluid != null) {
-                float deltaY = (float) (to.elevation() - from.elevation());
-                gravityCost = fluid.phase().sign() * fluid.density() * config.G() * deltaY;
-            }
-        }
-
-        return friction + gravityCost;
-    }
-
-    private void computeFlowRates(FluidNetwork net, Map<String, SimFluid> fluids) {
-        for (int i = 0; i < net.edges().size(); i++) {
-            SimEdge edge = net.edges().get(i);
-            String fluidId = edge.primaryFluid();
-
-            if (fluidId == null) {
-                net.setFlowRate(i, 0);
-                continue;
-            }
-
-            SimFluid fluid = fluids.get(fluidId);
-            if (fluid == null) {
-                net.setFlowRate(i, 0);
-                continue;
-            }
-
-            SimNode nodeA = net.node(edge.a());
-            SimNode nodeB = net.node(edge.b());
-
-            float phiA = computePhi(nodeA, fluid);
-            float phiB = computePhi(nodeB, fluid);
-            float deltaPhi = phiA - phiB;
-
-            if (Math.abs(deltaPhi) <= config.EPS()) {
-                net.setFlowRate(i, 0);
-                continue;
-            }
-
-            // Base flow from potential difference
-            float Q = Math.clamp(config.conductance() * Math.abs(deltaPhi), 0, config.maxFlow());
-
-            // fullnessFactor: rate proportional to how full the edge is (stability)
-            float fullness = edge.capacity() > 0
-                    ? (float) edge.totalFill() / edge.capacity()
-                    : 0;
-            Q *= fullness;
-
-            // reachFactor: taper near head limit
-            NodeId upstream = deltaPhi > 0 ? edge.a() : edge.b();
-            float headIn = net.headAt(upstream);
-            float reachFactor = Math.clamp(headIn / config.taperMargin(), 0, 1);
-            Q *= reachFactor;
-
-            // Clamp to available fluid (can't move more than what's in the edge)
-            Q = Math.min(Q, edge.totalFill());
-
-            net.setFlowRate(i, Math.signum(deltaPhi) * Q);
-        }
-    }
-
-    private void advanceFluid(FluidNetwork net) {
-        for (int i = 0; i < net.edges().size(); i++) {
-            float rate = net.flowRate(i);
-            if (rate == 0) continue;
-
-            SimEdge edge = net.edges().get(i);
-            int amount = (int) Math.abs(rate);
-            if (amount <= 0) continue;
-
-            if (rate > 0) {
-                edge.drainFromA(amount);
-            } else {
-                edge.drainFromB(amount);
-            }
-        }
+        return potentials;
     }
 
     private List<CollisionEvent> detectEdgeCollisions(FluidNetwork net) {
@@ -277,16 +452,15 @@ public final class FluidSimulator {
 
             if (arriving.isEmpty()) continue;
 
-            // Distribute to outgoing edges
+            // Distribute to outgoing edges that need fluid
             List<Integer> outgoingEdges = new ArrayList<>();
             for (int edgeIdx : net.edgesAt(nodeId)) {
-                float rate = net.flowRate(edgeIdx);
                 SimEdge edge = net.edges().get(edgeIdx);
-                boolean flowsAwayFromNode =
-                        (rate > 0 && edge.a().equals(nodeId)) ||
-                        (rate < 0 && edge.b().equals(nodeId));
-                if (flowsAwayFromNode && edge.totalFill() < edge.capacity()) {
-                    outgoingEdges.add(edgeIdx);
+                if (edge.phase() == EdgePhase.FLOWING && edge.totalFill() < edge.capacity()) {
+                    float rate = net.flowRate(edgeIdx);
+                    boolean flowsAway = (rate > 0 && edge.a().equals(nodeId))
+                            || (rate < 0 && edge.b().equals(nodeId));
+                    if (flowsAway) outgoingEdges.add(edgeIdx);
                 }
             }
 

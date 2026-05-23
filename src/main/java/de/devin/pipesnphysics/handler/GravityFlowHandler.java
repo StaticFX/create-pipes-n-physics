@@ -33,6 +33,7 @@ public class GravityFlowHandler {
 
     private static final Map<BlockPos, Long> lastProcessedTick = new HashMap<>();
     private static final Map<BlockPos, Long> lastTransferTick = new HashMap<>();
+    private static final Map<BlockPos, FluidNetwork> cachedNetworks = new HashMap<>();
 
     private record ScheduledCheck(Level level, BlockPos pos) {
         @Override
@@ -61,6 +62,7 @@ public class GravityFlowHandler {
         lastProcessedTick.clear();
         lastTransferTick.clear();
         scheduledChecks.clear();
+        cachedNetworks.clear();
     }
 
     private static final int STALE_ENTRY_TICKS = 6000;
@@ -99,9 +101,13 @@ public class GravityFlowHandler {
         int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
         if (lastTick != null && currentTick - lastTick < recheckTicks) return;
 
-        // Build the contracted network
+        // Reuse cached network or build new one
         SimConfig config = PhysicsConfigFactory.simConfig();
-        FluidNetwork network = NetworkBuilder.build(level, startPos, config);
+        FluidNetwork network = cachedNetworks.get(startPos);
+        if (network == null) {
+            network = NetworkBuilder.build(level, startPos, config);
+            cachedNetworks.put(startPos, network);
+        }
 
         // Mark all pipes as processed
         for (SimEdge edge : network.edges()) {
@@ -138,8 +144,14 @@ public class GravityFlowHandler {
         FluidSimulator simulator = new FluidSimulator(config);
         SimResult result = simulator.tick(network, fluids);
 
-        LOGGER.debug("Sim at {}: edges={} flowRates={} fluid={}",
-                startPos, network.edges().size(),
+        StringBuilder phases = new StringBuilder();
+        for (SimEdge e : network.edges()) {
+            phases.append(e.phase().name().charAt(0)).append("(fp=")
+                    .append(String.format("%.1f", e.frontPos())).append(",fill=")
+                    .append(e.totalFill()).append(") ");
+        }
+        LOGGER.debug("Sim at {}: edges={} phases=[{}] flowRates={} fluid={}",
+                startPos, network.edges().size(), phases,
                 java.util.Arrays.toString(result.flowRates()),
                 networkFluid.getHoverName().getString());
 
@@ -207,7 +219,9 @@ public class GravityFlowHandler {
         boolean lighter = stack.getFluid().getFluidType().isLighterThanAir();
         float density = stack.getFluid().getFluidType().getDensity(stack) / 1000f;
         if (density <= 0) density = 1.0f;
-        fluids.put(id, new SimFluid(id, lighter ? FluidPhase.GAS : FluidPhase.LIQUID, density));
+        float viscosity = stack.getFluid().getFluidType().getViscosity(stack) / 1000f;
+        if (viscosity <= 0) viscosity = 1.0f;
+        fluids.put(id, new SimFluid(id, lighter ? FluidPhase.GAS : FluidPhase.LIQUID, density, viscosity));
     }
 
     private static void seedFluidIntoEdges(Level level, FluidNetwork network,
