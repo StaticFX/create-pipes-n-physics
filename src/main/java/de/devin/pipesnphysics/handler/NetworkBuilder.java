@@ -37,13 +37,21 @@ public final class NetworkBuilder {
 
         discoverRawNetwork(level, startPos, allPipes, pipeConnections, pumpPositions, endpoints);
 
-        // Expand across pumps
-        for (BlockPos pumpPos : new ArrayList<>(pumpPositions.keySet())) {
-            for (Direction side : Direction.values()) {
-                BlockPos otherSide = pumpPos.relative(side);
-                if (allPipes.contains(otherSide)) continue;
-                if (FluidPropagator.getPipe(level, otherSide) == null) continue;
-                discoverRawNetwork(level, otherSide, allPipes, pipeConnections, pumpPositions, endpoints);
+        // Expand across pumps — iterate until no new pumps are discovered
+        Set<BlockPos> expandedPumps = new HashSet<>();
+        boolean foundNew = true;
+        while (foundNew) {
+            foundNew = false;
+            for (BlockPos pumpPos : new ArrayList<>(pumpPositions.keySet())) {
+                if (!expandedPumps.add(pumpPos)) continue;
+                for (Direction side : Direction.values()) {
+                    BlockPos otherSide = pumpPos.relative(side);
+                    if (allPipes.contains(otherSide)) continue;
+                    if (FluidPropagator.getPipe(level, otherSide) == null) continue;
+                    int pumpsBefore = pumpPositions.size();
+                    discoverRawNetwork(level, otherSide, allPipes, pipeConnections, pumpPositions, endpoints);
+                    if (pumpPositions.size() > pumpsBefore) foundNew = true;
+                }
             }
         }
 
@@ -146,6 +154,33 @@ public final class NetworkBuilder {
                             PipeGraphBuilder.nodeOf(current),
                             length, capacity, friction,
                             path.subList(1, path.size() - 1))); // pipe positions (excluding nodes)
+                }
+            }
+        }
+
+        // Create edges through pumps: connect pipe nodes on opposite sides
+        for (BlockPos pumpPos : pumpPositions.keySet()) {
+            List<BlockPos> pumpAdjacentNodes = new ArrayList<>();
+            for (Direction side : Direction.values()) {
+                BlockPos adj = pumpPos.relative(side);
+                if (nodePositions.contains(adj)) {
+                    pumpAdjacentNodes.add(adj);
+                }
+            }
+            // Create edges between all pairs of pump-adjacent nodes
+            for (int i = 0; i < pumpAdjacentNodes.size(); i++) {
+                for (int j = i + 1; j < pumpAdjacentNodes.size(); j++) {
+                    BlockPos posA = pumpAdjacentNodes.get(i);
+                    BlockPos posB = pumpAdjacentNodes.get(j);
+                    // Only if not already connected via pipe connections
+                    List<BlockPos> connsA = pipeConnections.getOrDefault(posA, List.of());
+                    if (connsA.contains(posB)) continue;
+                    edges.add(new SimEdge(edgeId++,
+                            PipeGraphBuilder.nodeOf(posA),
+                            PipeGraphBuilder.nodeOf(posB),
+                            1, config.perPipeCapacity(),
+                            config.frictionPerBlock(),
+                            List.of())); // no intermediate pipe positions
                 }
             }
         }

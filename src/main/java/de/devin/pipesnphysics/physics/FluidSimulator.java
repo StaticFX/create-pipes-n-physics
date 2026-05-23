@@ -79,10 +79,14 @@ public final class FluidSimulator {
         for (NodeId nodeId : List.of(edge.a(), edge.b())) {
             SimNode node = net.node(nodeId);
             if (node == null) continue;
-            if (net.headAt(nodeId) <= 0) continue;
 
-            // Need a fluid source at this node
-            if (node.kind() == SimNodeKind.SOURCE || node.kind() == SimNodeKind.PUMP) {
+            // Sources always try to charge (gravity provides the drive).
+            // Pumps need head > 0 to start. Junctions relay from upstream.
+            boolean canFeed = node.kind() == SimNodeKind.SOURCE
+                    || (node.kind() == SimNodeKind.PUMP && net.headAt(nodeId) > 0);
+            if (!canFeed) continue;
+
+            {
                 // Find which fluid to charge with — check adjacent edges or use network fluid
                 String fluidId = findFluidAtNode(net, nodeId, fluids);
                 if (fluidId == null) continue;
