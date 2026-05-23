@@ -6,9 +6,9 @@ import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
-import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.physics.*;
+import de.devin.pipesnphysics.physics.FluidPhase;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
@@ -21,7 +21,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 
-import java.util.*;;
+import java.util.*;
 
 /**
  * Debug command: /pipegraph
@@ -101,144 +101,119 @@ public class DebugGraphCommand {
                     ep.handlerWorldY(), ep.pipeWorldY(), ep.isHandlerAbovePipe()));
         }
 
-        // Solve gravity flow
-        PhysicsConfig config = PhysicsConfigFactory.fromModConfig();
-        PipeFormulas formulas = new PipeFormulas(config);
-        NetworkSolver solver = new NetworkSolver(formulas);
-        GravityFlowResult flow = solver.solveGravityFlow(graph);
-
-        if (flow != null) {
-            send(player, "§e--- Gravity Flow ---");
-            BlockPos sourceHandler = PipeGraphBuilder.posOf(flow.source().handlerNode());
-            send(player, "§7Source: §f" + sourceHandler.toShortString()
-                    + " §7Y=§f" + String.format("%.1f", flow.sourceWorldY()));
-            send(player, "§7Valid sinks: §f" + flow.validSinks().size());
-            send(player, "§7Active pipes: §f" + flow.activePipes().size());
-
-            for (Map.Entry<NodeId, Float> entry : flow.pipePressures().entrySet()) {
-                BlockPos pos = PipeGraphBuilder.posOf(entry.getKey());
-                float pressure = entry.getValue();
-                FlowState flowState = flow.flowStates().get(entry.getKey());
-                String flowStr = flowState != null
-                        ? String.format(" §7flow=§f%.1f mB/t", flowState.flowRateMbPerTick())
-                        : "";
-                send(player, String.format("  §f%s §7pressure=§f%.1f%s",
-                        pos.toShortString(), pressure, flowStr));
+        // Detect fluid in the network
+        ServerLevel level = player.serverLevel();
+        net.neoforged.neoforge.fluids.FluidStack networkFluid = net.neoforged.neoforge.fluids.FluidStack.EMPTY;
+        for (NetworkEndpoint ep : graph.endpoints()) {
+            BlockPos hPos = PipeGraphBuilder.posOf(ep.handlerNode());
+            Direction hFace = PipeGraphBuilder.directionOf(ep.faceIndex()).getOpposite();
+            var hCap = level.getCapability(net.neoforged.neoforge.capabilities.Capabilities.FluidHandler.BLOCK, hPos, hFace);
+            if (hCap != null) {
+                for (int i = 0; i < hCap.getTanks(); i++) {
+                    if (!hCap.getFluidInTank(i).isEmpty()) { networkFluid = hCap.getFluidInTank(i); break; }
+                }
             }
-        } else {
-            send(player, "§7No gravity flow (pump present or no valid source/sink)");
+            if (!networkFluid.isEmpty()) break;
+        }
+        // Also check pipes for flowing fluid
+        if (networkFluid.isEmpty()) {
+            for (var entry : graph.nodes().entrySet()) {
+                if (!entry.getValue().isPipe()) continue;
+                BlockPos pPos = PipeGraphBuilder.posOf(entry.getKey());
+                var pipe = com.simibubi.create.content.fluids.FluidPropagator.getPipe(level, pPos);
+                if (pipe == null) continue;
+                for (Direction d : Direction.values()) {
+                    var flow = pipe.getFlow(d);
+                    if (flow != null && !flow.fluid.isEmpty()) { networkFluid = flow.fluid; break; }
+                }
+                if (!networkFluid.isEmpty()) break;
+            }
         }
 
-        // If looking at a pump or network has a pump, simulate pump BFS
-        debugPumpReach(player, player.serverLevel(), graph, targetPos);
+        float gravityDirection = 1.0f;
+        if (!networkFluid.isEmpty()) {
+            int density = networkFluid.getFluid().getFluidType().getDensity(networkFluid);
+            int viscosity = networkFluid.getFluid().getFluidType().getViscosity(networkFluid);
+            boolean lighterThanAir = networkFluid.getFluid().getFluidType().isLighterThanAir();
+            gravityDirection = PipeFormulas.gravityDirection(lighterThanAir);
+            String fluidName = networkFluid.getHoverName().getString();
+            String gasLabel = lighterThanAir ? " §e(GAS)" : "";
+            send(player, "§e--- Fluid ---");
+            send(player, "§7Name: §f" + fluidName + gasLabel);
+            send(player, "§7Density: §f" + density + " §7Viscosity: §f" + viscosity
+                    + " §7LighterThanAir: §f" + lighterThanAir
+                    + " §7Gravity: §f" + (gravityDirection > 0 ? "DOWN" : "UP"));
+        }
+
+        // Build contracted network and simulate
+        SimConfig simConfig = PhysicsConfigFactory.simConfig();
+        FluidNetwork network = NetworkBuilder.build(level, targetPos, simConfig);
+
+        send(player, "§e--- Contracted Network ---");
+        send(player, "§7Nodes: §f" + network.nodes().size()
+                + " §7Edges: §f" + network.edges().size());
+
+        for (var nodeEntry : network.nodes().entrySet()) {
+            SimNode node = nodeEntry.getValue();
+            BlockPos pos = PipeGraphBuilder.posOf(nodeEntry.getKey());
+            send(player, String.format("  §f%s §7kind=§f%s §7Y=§f%.1f §7staticP=§f%.1f",
+                    pos.toShortString(), node.kind(), node.elevation(), node.staticPressure()));
+        }
+
+        for (SimEdge edge : network.edges()) {
+            BlockPos posA = PipeGraphBuilder.posOf(edge.a());
+            BlockPos posB = PipeGraphBuilder.posOf(edge.b());
+            send(player, String.format("  §7Edge %d: §f%s §7↔ §f%s §7len=%d cap=%d fric=%.1f fill=%d",
+                    edge.id(), posA.toShortString(), posB.toShortString(),
+                    edge.length(), edge.capacity(), edge.resistance(), edge.totalFill()));
+        }
+
+        // Run simulation
+        Map<String, SimFluid> fluids = new HashMap<>();
+        if (!networkFluid.isEmpty()) {
+            String fluidId = networkFluid.getFluid().builtInRegistryHolder().key().location().toString();
+            boolean lighter = networkFluid.getFluid().getFluidType().isLighterThanAir();
+            float dens = networkFluid.getFluid().getFluidType().getDensity(networkFluid) / 1000f;
+            if (dens <= 0) dens = 1.0f;
+            fluids.put(fluidId, new SimFluid(fluidId, lighter ? FluidPhase.GAS : FluidPhase.LIQUID, dens));
+        }
+
+        FluidSimulator simulator = new FluidSimulator(simConfig);
+        SimResult simResult = simulator.tick(network, fluids);
+
+        send(player, "§e--- Simulation ---");
+        for (int i = 0; i < network.edges().size(); i++) {
+            SimEdge edge = network.edges().get(i);
+            float rate = simResult.flowRates()[i];
+            String dir = rate > 0 ? "a→b" : rate < 0 ? "b→a" : "none";
+            send(player, String.format("  §7Edge %d: §7flow=§f%.1f §7dir=§f%s",
+                    edge.id(), Math.abs(rate), dir));
+        }
+        if (!simResult.collisions().isEmpty()) {
+            send(player, "§c" + simResult.collisions().size() + " collision(s)!");
+        }
+
+        // Show pump info
+        for (Map.Entry<NodeId, PipeNode> entry : graph.nodes().entrySet()) {
+            if (!entry.getValue().isPump()) continue;
+            BlockPos pumpPos = PipeGraphBuilder.posOf(entry.getKey());
+            BlockEntity be = level.getBlockEntity(pumpPos);
+            if (!(be instanceof KineticBlockEntity kbe)) continue;
+            float speed = Math.abs(kbe.getSpeed());
+            if (speed == 0) continue;
+
+            BlockState pumpState = level.getBlockState(pumpPos);
+            if (!(pumpState.getBlock() instanceof PumpBlock)) continue;
+            Direction facing = pumpState.getValue(PumpBlock.FACING);
+
+            send(player, "§e--- Pump at " + pumpPos.toShortString() + " ---");
+            send(player, "§7RPM: §f" + String.format("%.0f", speed)
+                    + " §7Facing: §f" + facing
+                    + " §7Pressure: §f" + String.format("%.0f", speed) + " psi");
+        }
 
         send(player, "§e--- End ---");
         return 1;
-    }
-
-    private static void debugPumpReach(ServerPlayer player, ServerLevel level, PipeGraph graph, BlockPos targetPos) {
-        // Find the pump — either the target itself or from the graph
-        BlockPos pumpPos = null;
-        if (level.getBlockState(targetPos).getBlock() instanceof PumpBlock) {
-            pumpPos = targetPos;
-        } else {
-            for (Map.Entry<NodeId, PipeNode> entry : graph.nodes().entrySet()) {
-                if (entry.getValue().isPump()) {
-                    pumpPos = PipeGraphBuilder.posOf(entry.getKey());
-                    break;
-                }
-            }
-        }
-        if (pumpPos == null) return;
-
-        BlockEntity be = level.getBlockEntity(pumpPos);
-        if (!(be instanceof KineticBlockEntity kbe)) return;
-        float pumpBase = Math.abs(kbe.getSpeed());
-        if (pumpBase == 0) return;
-
-        BlockState pumpState = level.getBlockState(pumpPos);
-        if (!(pumpState.getBlock() instanceof PumpBlock)) return;
-        Direction facing = pumpState.getValue(PumpBlock.FACING);
-        double pumpWorldY = SableCompat.getWorldY(level, pumpPos);
-
-        PipeFormulas formulas = new PipeFormulas(PhysicsConfigFactory.fromModConfig());
-
-        send(player, "§e--- Pump at " + pumpPos.toShortString() + " ---");
-        send(player, "§7RPM: §f" + String.format("%.0f", pumpBase)
-                + " §7Facing: §f" + facing
-                + " §7Y: §f" + String.format("%.1f", pumpWorldY));
-
-        for (Direction side : new Direction[]{facing, facing.getOpposite()}) {
-            boolean isPull = side != facing;
-            String sideLabel = isPull ? "PULL" : "PUSH";
-            BlockPos startPos = pumpPos.relative(side);
-
-            FluidTransportBehaviour startPipe = FluidPropagator.getPipe(level, startPos);
-            if (startPipe == null) {
-                send(player, "§7  " + sideLabel + " side (" + side + "): §cno pipe at " + startPos.toShortString());
-                continue;
-            }
-
-            send(player, "§7  " + sideLabel + " side (" + side + "):");
-
-            Map<BlockPos, Float> frictionMap = new HashMap<>();
-            Map<BlockPos, Double> peakYMap = new HashMap<>();
-            Set<BlockPos> visited = new HashSet<>();
-            Queue<BlockPos> frontier = new ArrayDeque<>();
-            visited.add(pumpPos);
-            float startElev = SableCompat.getPipeElevation(level, pumpPos, side);
-            frictionMap.put(startPos, formulas.segmentFriction(startElev));
-            double startNodeY = SableCompat.getWorldY(level, startPos);
-            peakYMap.put(startPos, Math.max(pumpWorldY, startNodeY));
-            frontier.add(startPos);
-
-            int reachCount = 0;
-            while (!frontier.isEmpty()) {
-                BlockPos current = frontier.poll();
-                if (!visited.add(current)) continue;
-                FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, current);
-                if (pipe == null) continue;
-
-                float friction = frictionMap.getOrDefault(current, 0f);
-                double nodeY = SableCompat.getWorldY(level, current);
-                double peakY = peakYMap.getOrDefault(current, pumpWorldY);
-                float reachPressure = formulas.pumpPressure(pumpBase, pumpWorldY, peakY, friction);
-                float pressure = formulas.pumpPressure(pumpBase, pumpWorldY, nodeY, friction);
-                float gravAssist = formulas.config().pumpGravityEnabled()
-                        ? (float) (pumpWorldY - nodeY) * formulas.config().gravityPerBlock() * formulas.config().pumpGravityFactor()
-                        : 0;
-
-                String siphonTag = peakY > nodeY + 0.5 ? " §b(siphon)" : "";
-                send(player, String.format("    §f%s §7fric=§f%.1f §7grav=§f%+.1f §7pres=§f%.1f%s%s",
-                        current.toShortString(), friction, gravAssist, pressure,
-                        reachPressure <= 0 ? " §c(OUT OF RANGE)" : "", siphonTag));
-
-                if (reachPressure <= 0) continue;
-                reachCount++;
-
-                BlockState currentState = level.getBlockState(current);
-                for (Direction face : FluidPropagator.getPipeConnections(currentState, pipe)) {
-                    BlockPos next = current.relative(face);
-                    if (visited.contains(next)) continue;
-
-                    var handler = level.getCapability(
-                            net.neoforged.neoforge.capabilities.Capabilities.FluidHandler.BLOCK,
-                            next, face.getOpposite());
-                    if (handler != null) {
-                        send(player, String.format("    §a→ ENDPOINT at %s (fluid handler)", next.toShortString()));
-                        continue;
-                    }
-
-                    if (FluidPropagator.getPipe(level, next) == null) continue;
-                    float elev = SableCompat.getPipeElevation(level, current, face);
-                    frictionMap.put(next, friction + formulas.segmentFriction(elev));
-                    double nextY = SableCompat.getWorldY(level, next);
-                    peakYMap.put(next, Math.max(peakY, nextY));
-                    frontier.add(next);
-                }
-            }
-            send(player, "§7    Reachable pipes: §f" + reachCount);
-        }
     }
 
     private static void send(ServerPlayer player, String message) {

@@ -1,16 +1,17 @@
 package de.devin.pipesnphysics.physics;
 
+import java.util.List;
+
 /**
  * Pure physics formulas for pipe flow.
  * No Minecraft dependencies — all inputs are plain numbers.
  *
- * <p>Core model: {@code effectivePressure = headPressure - pathFriction}</p>
- *
- * <p>Friction scales with pipe elevation angle. Pipes steeper than
- * {@code minGravityAngle} are fully gravity-assisted (zero friction).
- * Below that threshold, friction ramps quadratically from zero to full
- * at 0° (flat). This means nearly any downhill pipe flows freely,
- * while only flat pipes incur full friction.</p>
+ * Core model:
+ * - Gravity adds pressure per downhill segment
+ * - Friction removes pressure on horizontal segments
+ * - Merging junctions sum incoming pressures
+ * - Splitting junctions divide pressure evenly
+ * - Pipes burst when pressure exceeds the configured threshold
  */
 public final class PipeFormulas {
 
@@ -28,8 +29,9 @@ public final class PipeFormulas {
 
     /**
      * Friction for a single pipe segment based on its elevation angle.
+     * Steeper pipes have less friction. Vertical pipes have zero friction.
      *
-     * @param elevationAngleDegrees world-space angle from horizontal (0° = flat, 90° = vertical)
+     * @param elevationAngleDegrees world-space angle from horizontal (0 = flat, 90 = vertical)
      * @return friction value for this segment
      */
     public float segmentFriction(float elevationAngleDegrees) {
@@ -59,67 +61,130 @@ public final class PipeFormulas {
     }
 
     /**
-     * Pressure at a node in a gravity-only network.
+     * Gravity pressure contribution for a single edge.
+     * For liquids (gravityDirection=+1): positive when going downhill.
+     * For gases (gravityDirection=-1): positive when going uphill.
      *
-     * @param sourceWorldY source fluid handler's world-space Y
-     * @param nodeWorldY   this pipe's world-space Y
-     * @param pathFriction accumulated friction from source to this node
-     * @return pressure (clamped to [0, maxPressure])
+     * @param fromWorldY upstream node's world Y
+     * @param toWorldY downstream node's world Y
+     * @param gravityDirection +1 for liquids (flow down), -1 for gases (flow up)
+     * @return gravity pressure delta for this edge
      */
-    public float gravityPressure(double sourceWorldY, double nodeWorldY, float pathFriction) {
-        float heightDiff = (float) (sourceWorldY - nodeWorldY);
-        if (heightDiff < config.deadZone()) return 0;
-        return Math.clamp(heightDiff * config.gravityPerBlock() - pathFriction, 0, config.maxPressure());
+    public float gravityDelta(double fromWorldY, double toWorldY, float gravityDirection) {
+        float heightDiff = (float) (fromWorldY - toWorldY);
+        if (Math.abs(heightDiff) < config.deadZone()) return 0;
+        return heightDiff * config.gravityPerBlock() * gravityDirection;
     }
 
     /**
-     * Convert linearly accumulated friction to diminishing (logarithmic) friction.
-     * Each additional pipe segment adds less friction than the last.
-     * Used when {@code frictionAffectsFlow} is enabled to soften the flow penalty.
-     *
-     * @param linearFriction total friction accumulated linearly along the path
-     * @return diminished friction value
+     * Gravity delta assuming liquid (downward flow). Convenience for default behavior.
      */
-    public float diminishingFriction(float linearFriction) {
-        float frictionPB = config.frictionPerBlock();
-        if (frictionPB < 0.001f) return 0;
-        float linearSegments = linearFriction / frictionPB;
-        return frictionPB * (float) Math.log(1 + linearSegments);
+    public float gravityDelta(double fromWorldY, double toWorldY) {
+        return gravityDelta(fromWorldY, toWorldY, 1.0f);
     }
 
     /**
-     * Compute the bottleneck flow pressure for a pump network.
-     * When {@code frictionAffectsFlow} is true, uses diminishing friction at the
-     * worst pipe to determine the uniform flow rate for the whole series.
-     * When false, returns pumpBase unchanged (vanilla-like: friction only limits range).
+     * Determine gravity direction for a fluid.
      *
-     * @param pumpBase        pump's base pressure (from RPM)
-     * @param maxLinearFriction highest accumulated friction among reachable pipes
-     * @param gravityAtWorst  gravity assist at the pipe with most friction
-     * @return uniform pressure to apply to all reachable pipes
+     * @param lighterThanAir true if the fluid is lighter than air (from FluidType.isLighterThanAir())
+     * @return +1 for liquids (flow down), -1 for gases (flow up)
      */
-    public float bottleneckFlowPressure(float pumpBase, float maxLinearFriction, float gravityAtWorst) {
-        if (!config.frictionAffectsFlow()) return pumpBase;
-        float diminished = diminishingFriction(maxLinearFriction);
-        return Math.max(0, pumpBase + gravityAtWorst - diminished);
+    public static float gravityDirection(boolean lighterThanAir) {
+        return lighterThanAir ? -1.0f : 1.0f;
     }
 
     /**
-     * Pressure at a node in a pump network with gravity assist.
-     * Not capped by maxPressure — pump pressure is driven by RPM,
-     * which can exceed the gravity pressure ceiling.
+     * Pressure delivered through an edge from upstream to downstream.
+     * Accounts for gravity direction, gravity magnitude, and friction.
      *
-     * @param pumpBase     pump's base pressure (from RPM/speed)
-     * @param pumpWorldY   pump's world-space Y
-     * @param nodeWorldY   this pipe's world-space Y
-     * @param pathFriction accumulated friction from pump to this node
-     * @return pressure (clamped to ≥ 0)
+     * @param outgoingPressure pressure leaving the upstream node on this edge
+     * @param fromWorldY upstream node's world Y
+     * @param toWorldY downstream node's world Y
+     * @param elevationAngleDegrees the edge's elevation angle
+     * @param viscosityMultiplier fluid viscosity scaling
+     * @param gravityDirection +1 for liquids, -1 for gases
+     * @return pressure arriving at the downstream node, clamped to >= 0
      */
-    public float pumpPressure(float pumpBase, double pumpWorldY, double nodeWorldY,
-                              float pathFriction) {
-        float gravityAssist = config.pumpGravityEnabled()
-                ? (float) (pumpWorldY - nodeWorldY) * config.gravityPerBlock() * config.pumpGravityFactor()
-                : 0;
-        return Math.max(0, pumpBase + gravityAssist - pathFriction);
+    public float edgeDeliveredPressure(float outgoingPressure, double fromWorldY, double toWorldY,
+                                       float elevationAngleDegrees, float viscosityMultiplier,
+                                       float gravityDirection) {
+        float gravity = gravityDelta(fromWorldY, toWorldY, gravityDirection);
+        float friction = segmentFriction(elevationAngleDegrees, viscosityMultiplier);
+        return Math.max(0, outgoingPressure + gravity - friction);
+    }
+
+    /**
+     * Edge delivered pressure assuming liquid (downward flow).
+     */
+    public float edgeDeliveredPressure(float outgoingPressure, double fromWorldY, double toWorldY,
+                                       float elevationAngleDegrees, float viscosityMultiplier) {
+        return edgeDeliveredPressure(outgoingPressure, fromWorldY, toWorldY,
+                elevationAngleDegrees, viscosityMultiplier, 1.0f);
+    }
+
+    /**
+     * Sum incoming pressures at a merge junction (2+ pipes into 1).
+     *
+     * @param incomingPressures pressures arriving from each incoming edge
+     * @return total merged pressure
+     */
+    public float junctionMergePressure(List<Float> incomingPressures) {
+        float total = 0;
+        for (float p : incomingPressures) {
+            total += p;
+        }
+        return total;
+    }
+
+    /**
+     * Divide pressure evenly at a split junction (1 pipe into 2+).
+     *
+     * @param pressure the node's total pressure
+     * @param fanOut number of outgoing edges
+     * @return pressure per outgoing edge
+     */
+    public float junctionSplitPressure(float pressure, int fanOut) {
+        if (fanOut <= 1) return pressure;
+        return pressure / fanOut;
+    }
+
+    /**
+     * Flow rate derived from pressure.
+     *
+     * @param pressure the pressure at a node
+     * @return flow rate in mB/t
+     */
+    public float flowFromPressure(float pressure) {
+        return pressure / 2f;
+    }
+
+    /**
+     * Check if a pipe would burst at the given pressure.
+     *
+     * @param pressure the pressure at the node
+     * @return true if pressure exceeds the burst threshold
+     */
+    public boolean wouldBurst(float pressure) {
+        return config.burstingEnabled() && pressure > config.burstThreshold();
+    }
+
+    /**
+     * Pump push pressure for the output side.
+     *
+     * @param pumpBase pump's base pressure from RPM
+     * @return pressure added to the push-side pipe
+     */
+    public float pumpPushPressure(float pumpBase) {
+        return pumpBase * config.pumpPushRatio();
+    }
+
+    /**
+     * Pump pull pressure for the input side.
+     *
+     * @param pumpBase pump's base pressure from RPM
+     * @return pressure added to the pull-side pipe
+     */
+    public float pumpPullPressure(float pumpBase) {
+        return pumpBase * config.pumpPullRatio();
     }
 }

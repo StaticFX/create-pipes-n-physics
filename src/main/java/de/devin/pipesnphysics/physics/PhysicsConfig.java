@@ -15,5 +15,12 @@ public record PhysicsConfig(
         float pumpGravityFactor,
         int maxGravityRange,
         boolean frictionAffectsFlow,
-        float viscosityScaling
+        float viscosityScaling,
+        float pumpPushRatio,
+        float pumpPullRatio,
+        float burstThreshold,
+        boolean burstingEnabled,
+        int burstWarningTicks,
+        int maxBurstsPerTick,
+        int maxCycleIterations
 ) {}

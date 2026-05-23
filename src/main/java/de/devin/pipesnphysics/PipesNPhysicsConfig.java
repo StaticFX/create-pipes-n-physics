@@ -22,6 +22,14 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.IntValue MAX_GRAVITY_RANGE;
     public static final ModConfigSpec.BooleanValue FRICTION_AFFECTS_FLOW;
     public static final ModConfigSpec.DoubleValue VISCOSITY_SCALING;
+    public static final ModConfigSpec.BooleanValue ENABLE_PIPE_BURSTING;
+    public static final ModConfigSpec.DoubleValue PIPE_BURST_THRESHOLD;
+    public static final ModConfigSpec.IntValue MAX_BURSTS_PER_TICK;
+    public static final ModConfigSpec.BooleanValue BURST_SPILLS_FLUID;
+    public static final ModConfigSpec.IntValue BURST_WARNING_TICKS;
+    public static final ModConfigSpec.DoubleValue PUMP_PUSH_RATIO;
+    public static final ModConfigSpec.DoubleValue PUMP_PULL_RATIO;
+    public static final ModConfigSpec.IntValue MAX_CYCLE_ITERATIONS;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
@@ -114,6 +122,37 @@ public class PipesNPhysicsConfig {
                         "0.3 = softened (lava has ~2.5x friction vs water).",
                         "Uses the fluid's viscosity from FluidType (water=1000, lava=6000).")
                 .defineInRange("viscosityScaling", 0.3, 0.0, 2.0);
+        ENABLE_PIPE_BURSTING = server
+                .comment("Enable pipe bursting when pressure exceeds the threshold.",
+                        "Burst pipes break, drop as items, and spill fluid into the world.")
+                .define("enablePipeBursting", true);
+        PIPE_BURST_THRESHOLD = server
+                .comment("Pressure threshold at which pipes burst.",
+                        "Pipes exceeding this pressure will show a warning, then break.")
+                .defineInRange("pipeBurstThreshold", 60.0, 1.0, 1000.0);
+        MAX_BURSTS_PER_TICK = server
+                .comment("Maximum pipe bursts processed per tick per network.",
+                        "Limits cascade bursting to prevent runaway destruction in a single tick.")
+                .defineInRange("maxBurstsPerTick", 3, 1, 10);
+        BURST_SPILLS_FLUID = server
+                .comment("Whether burst pipes spill fluid into the world.")
+                .define("burstSpillsFluid", true);
+        BURST_WARNING_TICKS = server
+                .comment("Ticks of sustained overpressure before a pipe actually bursts.",
+                        "During warning, pipes show cracks and particles. 0 = instant burst.")
+                .defineInRange("burstWarningTicks", 40, 0, 200);
+        PUMP_PUSH_RATIO = server
+                .comment("Fraction of pump pressure applied to the push (output) side.",
+                        "1.0 = full pump pressure on push side.")
+                .defineInRange("pumpPushRatio", 0.7, 0.0, 1.0);
+        PUMP_PULL_RATIO = server
+                .comment("Fraction of pump pressure applied to the pull (input/suction) side.",
+                        "0.3 = 30% of pump pressure creates suction behind the pump.")
+                .defineInRange("pumpPullRatio", 0.3, 0.0, 1.0);
+        MAX_CYCLE_ITERATIONS = server
+                .comment("Maximum iterations for pressure convergence in cyclic pipe networks.",
+                        "Higher = more accurate but slower. Most networks converge in 3-5 iterations.")
+                .defineInRange("maxCycleIterations", 10, 1, 100);
         server.pop();
 
         server.push("sableCompat");
