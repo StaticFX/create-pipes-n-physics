@@ -51,6 +51,17 @@ public class SimEdge {
     public NodeId upstreamNode() { return upstreamNode; }
     public void setUpstreamNode(NodeId upstream) { this.upstreamNode = upstream; }
 
+    /**
+     * Set the fluid type for this edge (visual/composition tracking only — pipes
+     * don't hold real inventory). Used during CHARGING to track what's flowing.
+     */
+    public void setPrimaryFluid(String fluidId) {
+        column.clear();
+        if (fluidId != null) {
+            column.add(new FluidFront(fluidId, 1));
+        }
+    }
+
 
 
     public NodeId downstreamNode() {

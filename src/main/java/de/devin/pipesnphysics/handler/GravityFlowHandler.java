@@ -5,6 +5,7 @@ import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.mixin.FluidTankAccessor;
+import de.devin.pipesnphysics.compat.CreatePipeRendering;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.physics.*;
 import net.minecraft.core.BlockPos;
@@ -31,12 +32,19 @@ public class GravityFlowHandler {
     private static final Logger LOGGER = LogManager.getLogger();
 
     private static final Set<ScheduledCheck> scheduledChecks = new HashSet<>();
-    public static volatile boolean suppressWipeReschedule = false;
 
     private static final Map<BlockPos, Long> lastProcessedTick = new HashMap<>();
     private static final Map<BlockPos, Long> lastTransferTick = new HashMap<>();
     private static final Map<BlockPos, FluidNetwork> cachedNetworks = new HashMap<>();
     private static final Set<BlockPos> activeNetworks = new HashSet<>();
+    /** Saved edge states from cleared networks, keyed by node-pair for matching across rebuilds. */
+    private static final Map<Long, EdgeSnapshot> savedEdgeStates = new HashMap<>();
+
+    private record EdgeSnapshot(EdgePhase phase, float frontPos, NodeId upstream, String fluid) {}
+
+    private static long edgeKey(SimEdge edge) {
+        return 31L * edge.a().hashCode() + edge.b().hashCode();
+    }
 
     private record ScheduledCheck(Level level, BlockPos pos) {
         @Override
@@ -59,9 +67,16 @@ public class GravityFlowHandler {
 
     public static void clearCooldown(BlockPos pos) {
         lastProcessedTick.remove(pos);
-        // Clear the ENTIRE cached network (stored under all its positions), not just one entry
+        // Save edge states before clearing so they survive the rebuild
         FluidNetwork net = cachedNetworks.remove(pos);
         if (net != null) {
+            for (SimEdge edge : net.edges()) {
+                if (edge.phase() != EdgePhase.EMPTY) {
+                    savedEdgeStates.put(edgeKey(edge), new EdgeSnapshot(
+                            edge.phase(), edge.frontPos(),
+                            edge.upstreamNode(), edge.primaryFluid()));
+                }
+            }
             cachedNetworks.values().removeIf(n -> n == net);
         }
     }
@@ -72,6 +87,7 @@ public class GravityFlowHandler {
         scheduledChecks.clear();
         cachedNetworks.clear();
         activeNetworks.clear();
+        savedEdgeStates.clear();
     }
 
     private static final int STALE_ENTRY_TICKS = 6000;
@@ -126,6 +142,26 @@ public class GravityFlowHandler {
         FluidNetwork network = cachedNetworks.get(startPos);
         if (network == null) {
             network = NetworkBuilder.build(level, startPos, config);
+
+            // Restore edge state from saved snapshots (survive cache clears / rebuilds)
+            for (SimEdge newEdge : network.edges()) {
+                long key = edgeKey(newEdge);
+                // Try both key orderings since edgeKey is order-dependent
+                EdgeSnapshot snap = savedEdgeStates.remove(key);
+                if (snap == null) {
+                    long reverseKey = 31L * newEdge.b().hashCode() + newEdge.a().hashCode();
+                    snap = savedEdgeStates.remove(reverseKey);
+                }
+                if (snap != null) {
+                    newEdge.setPhase(snap.phase());
+                    newEdge.setFrontPos(snap.frontPos());
+                    newEdge.setUpstreamNode(snap.upstream());
+                    if (snap.fluid() != null) {
+                        newEdge.setPrimaryFluid(snap.fluid());
+                    }
+                }
+            }
+
             for (var entry : network.nodes().entrySet()) {
                 cachedNetworks.put(PipeGraphBuilder.posOf(entry.getKey()), network);
             }
@@ -168,10 +204,13 @@ public class GravityFlowHandler {
         FluidSimulator simulator = new FluidSimulator(config);
         SimResult result = simulator.tick(network, fluids);
 
-        // Compute true bottleneck: min of ALL edge rates. Zero means the circuit
-        // isn't complete (some edge still charging or stalled).
+        // Compute bottleneck: min of all edge rates, but ONLY if the entire circuit
+        // is primed (all edges FLOWING). Transfer doesn't start until the charging
+        // visual has completed across every edge in the network.
         float bottleneck = 0;
-        if (network.edges().size() > 0) {
+        boolean allFlowing = !network.edges().isEmpty()
+                && network.edges().stream().allMatch(e -> e.phase() == EdgePhase.FLOWING);
+        if (allFlowing) {
             bottleneck = Float.MAX_VALUE;
             for (float rate : result.flowRates()) {
                 float abs = Math.abs(rate);
@@ -180,14 +219,15 @@ public class GravityFlowHandler {
             if (bottleneck == Float.MAX_VALUE) bottleneck = 0;
         }
 
-        // Only apply visuals when the circuit is complete (bottleneck > 0).
-        // Setting pressure on pipes with an incomplete circuit causes Create's
-        // internal logic to transfer fluid independently, bypassing our engine.
-        if (bottleneck > 0) {
-            applyVisuals(level, network, result, networkFluid);
+        boolean hasCharging = network.edges().stream()
+                .anyMatch(e -> e.phase() == EdgePhase.CHARGING);
+
+        // Apply visuals when the circuit is flowing OR charging (for front animation).
+        // Idle/stalled networks get wiped so Create doesn't do independent transfers.
+        if (bottleneck > 0 || hasCharging) {
+            CreatePipeRendering.applyVisuals(level, network, result, networkFluid);
         } else {
-            // Wipe any stale pressure from previous cycles
-            suppressWipeReschedule = true;
+            CreatePipeRendering.suppressWipeReschedule = true;
             try {
                 for (SimEdge edge : network.edges()) {
                     for (BlockPos pos : edge.pipePositions()) {
@@ -196,7 +236,7 @@ public class GravityFlowHandler {
                     }
                 }
             } finally {
-                suppressWipeReschedule = false;
+                CreatePipeRendering.suppressWipeReschedule = false;
             }
         }
 
@@ -220,15 +260,15 @@ public class GravityFlowHandler {
         }
 
         // Store breakdowns on pipe block entities for goggle display
-        storeBreakdowns(level, network, result);
+        CreatePipeRendering.storeBreakdowns(level, network, result);
 
         // Track active state using the canonical key (same as transfer tick).
-        // Networks with nonzero flow process every tick for smooth transfer.
+        // Networks with nonzero flow OR charging edges process every tick.
         boolean hasFlow = false;
         for (float rate : result.flowRates()) {
             if (Math.abs(rate) > 0) { hasFlow = true; break; }
         }
-        if (transferred || hasFlow) {
+        if (transferred || hasFlow || hasCharging) {
             activeNetworks.add(transferKey);
             scheduledChecks.add(new ScheduledCheck(level, startPos));
         } else {
@@ -306,7 +346,7 @@ public class GravityFlowHandler {
 
         for (var entry : network.nodes().entrySet()) {
             SimNode node = entry.getValue();
-            if (node.kind() != SimNodeKind.TANK) continue;
+            if (node.kind() != SimNodeKind.SOURCE) continue;
 
             BlockPos nodePos = PipeGraphBuilder.posOf(entry.getKey());
 
@@ -347,46 +387,6 @@ public class GravityFlowHandler {
                         pressure, pressure));
                 break;
             }
-        }
-    }
-
-    private static void applyVisuals(Level level, FluidNetwork network, SimResult result,
-                                      FluidStack networkFluid) {
-        suppressWipeReschedule = true;
-        try {
-            for (int i = 0; i < network.edges().size(); i++) {
-                SimEdge edge = network.edges().get(i);
-                float rate = result.flowRates()[i];
-
-                for (BlockPos pos : edge.pipePositions()) {
-                    FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, pos);
-                    if (pipe == null) continue;
-
-                    if (edge.isEmpty() || (rate == 0 && edge.phase() != EdgePhase.FLOWING)) {
-                        if (pipe.hasAnyPressure()) pipe.wipePressure();
-                        continue;
-                    }
-
-                    float pressure = Math.abs(rate);
-                    if (!pipe.hasAnyPressure()) {
-                        // Set pressure in the flow direction
-                        // For each pipe, determine inbound/outbound from the edge direction
-                        for (Direction dir : Direction.values()) {
-                            var conn = pipe.getConnection(dir);
-                            if (conn == null) continue;
-                            BlockPos neighbor = pos.relative(dir);
-                            // Check if this direction is along the edge
-                            if (edge.pipePositions().contains(neighbor)
-                                    || PipeGraphBuilder.posOf(edge.a()).equals(neighbor)
-                                    || PipeGraphBuilder.posOf(edge.b()).equals(neighbor)) {
-                                pipe.addPressure(dir, rate > 0, pressure);
-                            }
-                        }
-                    }
-                }
-            }
-        } finally {
-            suppressWipeReschedule = false;
         }
     }
 
@@ -435,7 +435,7 @@ public class GravityFlowHandler {
                 }
                 if (!hasDrive) {
                     for (var other : network.nodes().values()) {
-                        if (other.kind() == SimNodeKind.TANK
+                        if (other.kind() == SimNodeKind.SOURCE
                                 && other.elevation() > node.elevation() + 0.5) {
                             hasDrive = true; break;
                         }
@@ -564,17 +564,34 @@ public class GravityFlowHandler {
     }
 
     private static void storeBreakdowns(Level level, FluidNetwork network, SimResult result) {
+        // Compute pump contribution from any PUMP nodes in the network
+        float totalPumpHead = 0;
+        for (SimNode n : network.nodes().values()) {
+            if (n.kind() == SimNodeKind.PUMP) totalPumpHead += n.staticPressure();
+        }
+
         for (int i = 0; i < network.edges().size(); i++) {
             SimEdge edge = network.edges().get(i);
             float rate = Math.abs(result.flowRates()[i]);
 
-            Float phiA = result.potentials().get(edge.a());
-            Float phiB = result.potentials().get(edge.b());
-            float gravity = (phiA != null ? phiA : 0) - (phiB != null ? phiB : 0);
+            // Compute gravity contribution from elevation difference
+            SimNode nodeA = network.node(edge.a());
+            SimNode nodeB = network.node(edge.b());
+            float gravityHead = 0;
+            if (nodeA != null && nodeB != null) {
+                float deltaY = (float) Math.abs(nodeA.elevation() - nodeB.elevation());
+                gravityHead = PhysicsConfigFactory.simConfig().G() * deltaY;
+            }
 
+            // Net = flow rate (mB/tick). The goggle displays this as the transfer rate.
             PressureBreakdown breakdown = new PressureBreakdown(
-                    Math.abs(gravity), 0, 0, 0,
-                    edge.resistance(), rate, false, false);
+                    gravityHead,
+                    totalPumpHead,
+                    0, 0,
+                    edge.resistance(),
+                    rate,       // net = actual flow rate
+                    rate > PhysicsConfigFactory.simConfig().maxFlow() * 0.95f,
+                    false);
 
             for (BlockPos pos : edge.pipePositions()) {
                 FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, pos);
@@ -659,9 +676,11 @@ public class GravityFlowHandler {
 
     /**
      * Refresh PUMP node staticPressure and head from current pump speed.
-     * Handles the case where the network was built before kinetic energy propagated.
+     * staticPressure = raw RPM (drives Φ and throughput).
+     * head = RPM * pumpHeadMultiplier (drives reach budget).
      */
     private static void updatePumpSpeeds(Level level, FluidNetwork network) {
+        SimConfig config = PhysicsConfigFactory.simConfig();
         for (var entry : network.nodes().entrySet()) {
             SimNode node = entry.getValue();
             if (node.kind() != SimNodeKind.PUMP) continue;
@@ -669,9 +688,10 @@ public class GravityFlowHandler {
             var be = level.getBlockEntity(nodePos);
             if (be instanceof com.simibubi.create.content.kinetics.base.KineticBlockEntity kbe) {
                 float speed = Math.abs(kbe.getSpeed());
-                if (speed != node.staticPressure()) {
+                float head = speed * config.pumpHeadMultiplier();
+                if (speed != node.staticPressure() || head != node.head()) {
                     entry.setValue(new SimNode(node.id(), node.kind(), node.elevation(),
-                            speed, speed, node.pushSidePos()));
+                            speed, head, node.pushSidePos()));
                 }
             }
         }

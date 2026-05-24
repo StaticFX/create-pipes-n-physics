@@ -295,7 +295,7 @@ public final class NetworkBuilder {
         // Handler-position nodes (the node IS the tank/handler block)
         for (var ep : endpoints.values()) {
             if (ep.handlerPos.equals(pos)) {
-                return ep.isTank ? SimNodeKind.TANK : SimNodeKind.SOURCE;
+                return SimNodeKind.SOURCE;
             }
         }
 
@@ -320,15 +320,10 @@ public final class NetworkBuilder {
             return 0;
         }
 
-        // Sources get pressure from the height difference to their handler
+        // SOURCE nodes: tanks get dynamic pressure from fill level (ρ·G·fillHeight),
+        // other endpoints (basins, drains) get 0 (gravity handled by Φ elevation term).
+        // Updated each tick by GravityFlowHandler.updateTankPressures.
         if (kind == SimNodeKind.SOURCE) {
-            return 0; // gravity is handled by Φ, not staticPressure for sources
-        }
-
-        // Tanks get dynamic pressure from fill level: ρ·G·fillHeight
-        // Initial value computed here; updated each tick by GravityFlowHandler
-        if (kind == SimNodeKind.TANK) {
-            // Check if pos IS a tank (handler-position node)
             var directBE = level.getBlockEntity(pos);
             if (directBE instanceof FluidTankBlockEntity tankBE) {
                 FluidTankAccessor accessor = (FluidTankAccessor) tankBE;
@@ -338,7 +333,6 @@ public final class NetworkBuilder {
                         ? (float) inv.getFluidAmount() / inv.getCapacity() : 0;
                 return config.G() * fillFrac * tankHeight;
             }
-            // Check neighbors (pipe-position TANK nodes)
             for (var ep : endpoints.values()) {
                 if (!ep.pipePos.equals(pos)) continue;
                 var be = level.getBlockEntity(ep.handlerPos);
@@ -351,6 +345,7 @@ public final class NetworkBuilder {
                     return config.G() * fillFrac * tankHeight;
                 }
             }
+            return 0;
         }
 
         return 0;
@@ -360,32 +355,19 @@ public final class NetworkBuilder {
                                        Map<BlockPos, BlockPos> pumpPositions,
                                        Map<BlockPos, EndpointData> endpoints,
                                        SimNodeKind kind, SimConfig config) {
-        // Pumps supply head = speed (reach budget for downstream edges)
+        // Pumps supply head = speed * multiplier (reach budget for downstream edges).
+        // The multiplier extends reach at low RPM without inflating staticPressure (which drives Φ/throughput).
         if (kind == SimNodeKind.PUMP) {
             BlockEntity be = level.getBlockEntity(pos);
             if (be instanceof KineticBlockEntity kbe) {
-                return Math.abs(kbe.getSpeed());
+                return Math.abs(kbe.getSpeed()) * config.pumpHeadMultiplier();
             }
             return config.defaultPumpHead();
         }
 
-        // Sources supply head from the height of the fluid above the pipe
+        // SOURCE nodes: tanks supply head from fill level, others from height difference.
         if (kind == SimNodeKind.SOURCE) {
-            for (var ep : endpoints.values()) {
-                if (!ep.pipePos.equals(pos)) continue;
-                double handlerY = SableCompat.getWorldY(level, ep.handlerPos);
-                double pipeY = SableCompat.getWorldY(level, pos);
-                float heightDiff = (float) Math.abs(handlerY - pipeY);
-                return heightDiff * config.G();
-            }
-        }
-
-        // Tanks supply head from fill level: ρ·G·fillHeight
-        // Gravity contributes through edgeCost (downhill refunds head, uphill costs it),
-        // so the head budget naturally accounts for elevation during propagation.
-        // Initial value; updated per-tick by GravityFlowHandler.updateTankPressures
-        if (kind == SimNodeKind.TANK) {
-            // Check if pos IS a tank (handler-position node)
+            // Check if this is a tank (dynamic fill-based head)
             var directBE = level.getBlockEntity(pos);
             if (directBE instanceof FluidTankBlockEntity tankBE) {
                 FluidTankAccessor accessor = (FluidTankAccessor) tankBE;
@@ -395,7 +377,7 @@ public final class NetworkBuilder {
                         ? (float) inv.getFluidAmount() / inv.getCapacity() : 0;
                 return config.G() * fillFrac * tankHeight;
             }
-            // Check neighbors (pipe-position TANK nodes)
+            // Check neighbors for tank or height difference
             for (var ep : endpoints.values()) {
                 if (!ep.pipePos.equals(pos)) continue;
                 var be = level.getBlockEntity(ep.handlerPos);
@@ -407,6 +389,11 @@ public final class NetworkBuilder {
                             ? (float) inv.getFluidAmount() / inv.getCapacity() : 0;
                     return config.G() * fillFrac * tankHeight;
                 }
+                // Non-tank endpoint: head from height difference
+                double handlerY = SableCompat.getWorldY(level, ep.handlerPos);
+                double pipeY = SableCompat.getWorldY(level, pos);
+                float heightDiff = (float) Math.abs(handlerY - pipeY);
+                return heightDiff * config.G();
             }
         }
 
