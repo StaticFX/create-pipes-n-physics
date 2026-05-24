@@ -34,7 +34,7 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
     @Inject(method = "wipePressure", at = @At("TAIL"))
     private void onWipePressure(CallbackInfo ci) {
         if (pipesnphysics$wiping) return; // prevent recursion
-        if (GravityFlowHandler.suppressWipeReschedule) return; // suppress during reapplication
+        if (de.devin.pipesnphysics.compat.CreatePipeRendering.suppressWipeReschedule) return;
         Level level = blockEntity.getLevel();
         if (level != null && !level.isClientSide()) {
             GravityFlowHandler.clearCooldown(blockEntity.getBlockPos());

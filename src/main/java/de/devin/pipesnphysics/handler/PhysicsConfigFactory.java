@@ -23,8 +23,10 @@ public final class PhysicsConfigFactory {
                 1000,  // per-pipe capacity in mB
                 10.0f, // taperMargin — head below which flow tapers
                 256.0f, // defaultPumpHead — reach ~50 tiles at friction=5
-                2.0f,  // frontK — ~2 tiles/tick at full head with water viscosity
-                5.0f   // hysteresis — head margin before FLOWING→DRAINING
+                0.1f,  // frontK — visible charging: gravity ~1.5 tiles/tick, strong pump ~27 tiles/tick
+                5.0f,  // hysteresis — head margin before FLOWING→DRAINING
+                4.0f,  // pumpHeadMultiplier — head = RPM * 4; at 16 RPM reach = 12.8 blocks
+                10.0f  // pumpThroughputScale — max mB/t = RPM * 10; merges with maxFlow at ~50 RPM
         );
     }
 

@@ -125,12 +125,14 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                 }
             }
         }
-        int remainingRange = computeRemainingRange();
-        boolean isPumpDriven = remainingRange >= 0;
+        boolean isPumpDriven = breakdown != null && breakdown.pumpContribution() > 0;
         boolean isGravityDriven = !isPumpDriven && (breakdown != null || inboundPressure > 0);
 
-        float pressure = breakdown != null ? breakdown.net() : inboundPressure;
-        float transferRate = pressure / 2f;
+        // breakdown.net() is the actual flow rate (mB/t) from the sim
+        float flowRateMbT = breakdown != null ? breakdown.net() : (inboundPressure / 2f);
+        float pressure = breakdown != null
+                ? (breakdown.gravityContribution() + breakdown.pumpContribution() - breakdown.friction())
+                : inboundPressure;
 
         // Pressure (always shown)
         langTranslate("gui.goggles.pressure")
@@ -141,7 +143,7 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         if (breakdown != null && breakdown.bursting()) pressureColor = ChatFormatting.RED;
 
         lang()
-                .text(pressureColor, String.format("%.1f", pressure))
+                .text(pressureColor, String.format("%.1f", Math.abs(pressure)))
                 .add(langTranslate("gui.goggles.pressure_unit")
                         .style(ChatFormatting.DARK_GRAY))
                 .forGoggles(tooltip, 1);
@@ -159,7 +161,7 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                 .forGoggles(tooltip);
 
         lang()
-                .add(lang().text(ChatFormatting.GOLD, String.format("%.1f", transferRate))
+                .add(lang().text(ChatFormatting.GOLD, String.format("%.1f", flowRateMbT))
                         .add(CreateLang.translate("generic.unit.millibuckets")))
                 .add(langTranslate("gui.goggles.per_tick")
                         .style(ChatFormatting.DARK_GRAY))

@@ -14,6 +14,8 @@ package de.devin.pipesnphysics.physics;
  * @param defaultPumpHead default head a pump supplies
  * @param frontK front-advance coefficient: tiles/tick = frontK * headAtFront / viscosity
  * @param hysteresis head margin before FLOWING reverts to DRAINING (anti-flap)
+ * @param pumpHeadMultiplier multiplier from RPM to head budget (reach = RPM * this / frictionPerBlock)
+ * @param pumpThroughputScale max mB/t per RPM (pump throughput cap = RPM * this)
  */
 public record SimConfig(
         float G,
@@ -26,5 +28,7 @@ public record SimConfig(
         float taperMargin,
         float defaultPumpHead,
         float frontK,
-        float hysteresis
+        float hysteresis,
+        float pumpHeadMultiplier,
+        float pumpThroughputScale
 ) {}

@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.test.helper;
 
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pipes.FluidPipeBlockEntity;
+import com.simibubi.create.content.fluids.pipes.StraightPipeBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTestHelper;
@@ -95,7 +96,7 @@ public class TestHelper {
         return pipes.toArray(new FluidPipeBlockEntity[0]);
     }
 
-    private static FluidPipeBlockEntity getPipeHandlerOrFail(GameTestHelper helper, BlockPos pos) {
+    public static FluidPipeBlockEntity getPipeHandlerOrFail(GameTestHelper helper, BlockPos pos) {
         var pipe = helper.getLevel().getBlockEntity(pos);
 
         if (pipe == null) {
@@ -107,6 +108,25 @@ public class TestHelper {
         }
 
         return (FluidPipeBlockEntity) pipe;
+    }
+
+    public static FluidTransportBehaviour getPipeBehaviourOrFail(GameTestHelper helper, BlockPos pos) {
+        var pipe = helper.getLevel().getBlockEntity(pos);
+
+        if (pipe == null) {
+            helper.fail("No pipe handler at " + pos);
+        }
+
+        if ((pipe instanceof FluidPipeBlockEntity)) {
+            return BlockEntityBehaviour.get(pipe, FluidTransportBehaviour.TYPE);
+        }
+
+        if (pipe instanceof StraightPipeBlockEntity) {
+            return BlockEntityBehaviour.get(pipe, FluidTransportBehaviour.TYPE);
+        }
+
+        helper.fail("Block at " + pos + " is not a fluid pipe");
+        return null;
     }
 
     public static int getFillAmountOfTank(GameTestHelper helper, BlockPos pos) {

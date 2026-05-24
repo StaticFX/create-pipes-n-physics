@@ -10,7 +10,8 @@
     "GravityFlowMixin",
     "FluidTransportDataMixin",
     "FluidTankAccessor",
-    "OpenEndedPipeMixin"
+    "OpenEndedPipeMixin",
+    "PipeConnectionAccessor"
   ],
   "client": [
     "PonderSceneRegistryMixin"
