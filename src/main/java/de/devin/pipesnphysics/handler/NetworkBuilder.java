@@ -3,6 +3,8 @@ package de.devin.pipesnphysics.handler;
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
+import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
+import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.physics.*;
@@ -55,25 +57,60 @@ public final class NetworkBuilder {
             }
         }
 
+        // Discover endpoints adjacent to pumps (tank directly next to a pump with no
+        // pipe in between). The BFS skips pump neighbors with `continue`, so a tank
+        // directly touching a pump is never found by the pipe BFS.
+        for (BlockPos pumpPos : pumpPositions.keySet()) {
+            for (Direction side : Direction.values()) {
+                BlockPos neighbor = pumpPos.relative(side);
+                if (allPipes.contains(neighbor) || endpoints.containsKey(neighbor)) continue;
+                if (!level.isLoaded(neighbor)) continue;
+                var handler = level.getCapability(Capabilities.FluidHandler.BLOCK, neighbor, side.getOpposite());
+                if (handler != null) {
+                    boolean isTank = level.getBlockEntity(neighbor) instanceof FluidTankBlockEntity;
+                    endpoints.put(neighbor.immutable(),
+                            new EndpointData(pumpPos.immutable(), neighbor.immutable(), side, isTank));
+                }
+            }
+        }
+
+        // Add handler-position virtual connections for all endpoints.
+        // This gives proper graph structure (e.g. Tank-Pipe-Tank → 2 handler nodes, 1 edge).
+        Set<BlockPos> handlerNodePositions = new LinkedHashSet<>();
+        for (var ep : endpoints.values()) {
+            handlerNodePositions.add(ep.handlerPos);
+            pipeConnections.computeIfAbsent(ep.pipePos, k -> new ArrayList<>()).add(ep.handlerPos);
+            pipeConnections.computeIfAbsent(ep.handlerPos, k -> new ArrayList<>()).add(ep.pipePos);
+        }
+
+        // Add pump positions as virtual graph nodes.
+        // Each pump becomes a proper node that splits the run — two pumps produce
+        // two nodes and three edges. This lets propagateHead sum them naturally
+        // (pump 1 lifts head, friction eats some, pump 2 lifts again).
+        Set<BlockPos> pumpNodePositions = new LinkedHashSet<>();
+        for (BlockPos pumpPos : pumpPositions.keySet()) {
+            pumpNodePositions.add(pumpPos);
+            for (Direction side : Direction.values()) {
+                BlockPos adj = pumpPos.relative(side);
+                if (allPipes.contains(adj)) {
+                    pipeConnections.computeIfAbsent(adj, k -> new ArrayList<>()).add(pumpPos);
+                    pipeConnections.computeIfAbsent(pumpPos, k -> new ArrayList<>()).add(adj);
+                }
+            }
+        }
+
         // Phase 2: Identify nodes (anything that isn't a simple pass-through)
-        Set<BlockPos> nodePositions = new HashSet<>();
+        Set<BlockPos> nodePositions = new LinkedHashSet<>();
         for (BlockPos pipe : allPipes) {
             List<BlockPos> conns = pipeConnections.getOrDefault(pipe, List.of());
             if (conns.size() != 2) {
                 nodePositions.add(pipe);
             }
         }
-        // Pumps and endpoint-adjacent pipes are also nodes
-        for (BlockPos pump : pumpPositions.keySet()) {
-            // Pipes adjacent to pumps are nodes
-            for (Direction side : Direction.values()) {
-                BlockPos adj = pump.relative(side);
-                if (allPipes.contains(adj)) nodePositions.add(adj);
-            }
-        }
-        for (var ep : endpoints.values()) {
-            nodePositions.add(ep.pipePos);
-        }
+        // Pump positions are always nodes
+        nodePositions.addAll(pumpNodePositions);
+        // Handler-position nodes
+        nodePositions.addAll(handlerNodePositions);
         // If no nodes found, pick any pipe
         if (nodePositions.isEmpty() && !allPipes.isEmpty()) {
             nodePositions.add(allPipes.iterator().next());
@@ -85,20 +122,21 @@ public final class NetworkBuilder {
             NodeId id = PipeGraphBuilder.nodeOf(pos);
             double elevation = SableCompat.getWorldY(level, pos);
             SimNodeKind kind = classifyNode(pos, pipeConnections, pumpPositions, endpoints);
-            float staticPressure = computeStaticPressure(level, pos, pumpPositions, endpoints, kind);
+            float staticPressure = computeStaticPressure(level, pos, pumpPositions, endpoints, kind, config);
             float head = computeHead(level, pos, pumpPositions, endpoints, kind, config);
-            nodes.put(id, new SimNode(id, kind, elevation, staticPressure, head));
-        }
 
-        // Debug: log raw data
-        org.apache.logging.log4j.LogManager.getLogger().debug(
-                "NetworkBuilder: pipes={} nodes={} conns={} endpoints={}",
-                allPipes.size(), nodePositions.size(),
-                pipeConnections.entrySet().stream()
-                        .map(e -> e.getKey().toShortString() + "→" + e.getValue().stream()
-                                .map(BlockPos::toShortString).toList())
-                        .toList(),
-                endpoints.size());
+            // For PUMP nodes, store the push-side BlockPos for asymmetric Φ
+            BlockPos pushSidePos = null;
+            if (kind == SimNodeKind.PUMP) {
+                BlockState pumpState = level.getBlockState(pos);
+                if (pumpState.getBlock() instanceof PumpBlock) {
+                    Direction facing = pumpState.getValue(PumpBlock.FACING);
+                    pushSidePos = pos.relative(facing).immutable();
+                }
+            }
+
+            nodes.put(id, new SimNode(id, kind, elevation, staticPressure, head, pushSidePos));
+        }
 
         // Phase 4: Contract pipe runs into edges
         List<SimEdge> edges = new ArrayList<>();
@@ -109,18 +147,20 @@ public final class NetworkBuilder {
             List<BlockPos> conns = pipeConnections.getOrDefault(nodePos, List.of());
             for (BlockPos neighbor : conns) {
                 if (nodePositions.contains(neighbor) && !visitedPipes.contains(neighbor)) {
-                    // Direct node-to-node edge (single pipe between two nodes)
-                    List<BlockPos> path = List.of(nodePos, neighbor);
+                    // Direct node-to-node edge
+                    List<BlockPos> pipesOnly = new ArrayList<>();
+                    if (allPipes.contains(nodePos)) pipesOnly.add(nodePos);
+                    if (allPipes.contains(neighbor)) pipesOnly.add(neighbor);
                     float friction = config.frictionPerBlock();
                     edges.add(new SimEdge(edgeId++,
                             PipeGraphBuilder.nodeOf(nodePos),
                             PipeGraphBuilder.nodeOf(neighbor),
                             1, config.perPipeCapacity(),
-                            friction, path));
+                            friction, pipesOnly));
                     continue;
                 }
                 if (visitedPipes.contains(neighbor)) continue;
-                if (!allPipes.contains(neighbor)) continue;
+                if (!allPipes.contains(neighbor) && !nodePositions.contains(neighbor)) continue;
 
                 // Walk along the pipe run until we hit another node
                 List<BlockPos> path = new ArrayList<>();
@@ -134,7 +174,7 @@ public final class NetworkBuilder {
                     List<BlockPos> nextConns = pipeConnections.getOrDefault(current, List.of());
                     BlockPos next = null;
                     for (BlockPos c : nextConns) {
-                        if (!c.equals(prev) && allPipes.contains(c)) {
+                        if (!c.equals(prev) && (allPipes.contains(c) || nodePositions.contains(c))) {
                             next = c;
                             break;
                         }
@@ -145,42 +185,19 @@ public final class NetworkBuilder {
 
                 if (current != null && nodePositions.contains(current)) {
                     path.add(current);
-                    int length = path.size() - 2; // exclude the two endpoint nodes
-                    length = Math.max(1, length);
+                    // Collect only actual pipe positions (exclude handler nodes)
+                    List<BlockPos> pipesInPath = new ArrayList<>();
+                    for (int pi = 1; pi < path.size() - 1; pi++) {
+                        if (allPipes.contains(path.get(pi))) pipesInPath.add(path.get(pi));
+                    }
+                    int length = Math.max(1, pipesInPath.size());
                     float friction = config.frictionPerBlock() * length;
                     int capacity = config.perPipeCapacity() * length;
                     edges.add(new SimEdge(edgeId++,
                             PipeGraphBuilder.nodeOf(nodePos),
                             PipeGraphBuilder.nodeOf(current),
                             length, capacity, friction,
-                            path.subList(1, path.size() - 1))); // pipe positions (excluding nodes)
-                }
-            }
-        }
-
-        // Create edges through pumps: connect pipe nodes on opposite sides
-        for (BlockPos pumpPos : pumpPositions.keySet()) {
-            List<BlockPos> pumpAdjacentNodes = new ArrayList<>();
-            for (Direction side : Direction.values()) {
-                BlockPos adj = pumpPos.relative(side);
-                if (nodePositions.contains(adj)) {
-                    pumpAdjacentNodes.add(adj);
-                }
-            }
-            // Create edges between all pairs of pump-adjacent nodes
-            for (int i = 0; i < pumpAdjacentNodes.size(); i++) {
-                for (int j = i + 1; j < pumpAdjacentNodes.size(); j++) {
-                    BlockPos posA = pumpAdjacentNodes.get(i);
-                    BlockPos posB = pumpAdjacentNodes.get(j);
-                    // Only if not already connected via pipe connections
-                    List<BlockPos> connsA = pipeConnections.getOrDefault(posA, List.of());
-                    if (connsA.contains(posB)) continue;
-                    edges.add(new SimEdge(edgeId++,
-                            PipeGraphBuilder.nodeOf(posA),
-                            PipeGraphBuilder.nodeOf(posB),
-                            1, config.perPipeCapacity(),
-                            config.frictionPerBlock(),
-                            List.of())); // no intermediate pipe positions
+                            pipesInPath));
                 }
             }
         }
@@ -197,8 +214,6 @@ public final class NetworkBuilder {
             }
         }
 
-        org.apache.logging.log4j.LogManager.getLogger().debug(
-                "NetworkBuilder: raw_edges={} deduped_edges={}", edges.size(), dedupedEdges.size());
         return new FluidNetwork(nodes, dedupedEdges);
     }
 
@@ -222,6 +237,13 @@ public final class NetworkBuilder {
             List<BlockPos> connections = new ArrayList<>();
 
             BlockState currentState = level.getBlockState(current);
+
+            // Pumps have FluidTransportBehaviour too — they show up as pipes.
+            // Detect when the current position IS a pump (not just a neighbor).
+            if (currentState.getBlock() instanceof PumpBlock) {
+                BlockEntity be = level.getBlockEntity(current);
+                pumpPositions.put(current.immutable(), current.immutable());
+            }
             for (Direction face : FluidPropagator.getPipeConnections(currentState, pipe)) {
                 BlockPos neighbor = current.relative(face);
                 if (!level.isLoaded(neighbor)) continue;
@@ -229,18 +251,19 @@ public final class NetworkBuilder {
                 BlockState neighborState = level.getBlockState(neighbor);
 
                 if (neighborState.getBlock() instanceof PumpBlock) {
-                    BlockEntity be = level.getBlockEntity(neighbor);
-                    if (be instanceof KineticBlockEntity kbe && kbe.getSpeed() != 0) {
-                        pumpPositions.put(neighbor.immutable(), current.immutable());
-                    }
+                    // Always include pump blocks in the topology so the network
+                    // structure is correct even before kinetic energy propagates.
+                    // Unpowered pumps get pumpHead=0 (check valve blocks flow).
+                    pumpPositions.put(neighbor.immutable(), current.immutable());
                     continue;
                 }
 
                 var handler = level.getCapability(
                         Capabilities.FluidHandler.BLOCK, neighbor, face.getOpposite());
                 if (handler != null) {
+                    boolean isTank = level.getBlockEntity(neighbor) instanceof FluidTankBlockEntity;
                     endpoints.put(neighbor.immutable(),
-                            new EndpointData(current.immutable(), neighbor.immutable(), face));
+                            new EndpointData(current.immutable(), neighbor.immutable(), face, isTank));
                     continue;
                 }
 
@@ -252,7 +275,7 @@ public final class NetworkBuilder {
 
                 if (FluidPropagator.isOpenEnd(level, current, face)) {
                     endpoints.put(neighbor.immutable(),
-                            new EndpointData(current.immutable(), neighbor.immutable(), face));
+                            new EndpointData(current.immutable(), neighbor.immutable(), face, false));
                 }
             }
 
@@ -264,20 +287,15 @@ public final class NetworkBuilder {
                                              Map<BlockPos, List<BlockPos>> pipeConnections,
                                              Map<BlockPos, BlockPos> pumpPositions,
                                              Map<BlockPos, EndpointData> endpoints) {
-        // Check if adjacent to an endpoint — all endpoints are potential source/sinks.
-        // Direction is determined by Φ, not by static classification.
-        // Mark as SOURCE so fluid gets seeded into adjacent edges.
-        // Endpoint takes priority over pump adjacency.
-        for (var ep : endpoints.values()) {
-            if (ep.pipePos.equals(pos)) {
-                return SimNodeKind.SOURCE;
-            }
+        // Pump positions are PUMP nodes
+        if (pumpPositions.containsKey(pos)) {
+            return SimNodeKind.PUMP;
         }
 
-        // Check if adjacent to a pump (only if not also an endpoint)
-        for (BlockPos pumpPos : pumpPositions.keySet()) {
-            if (pumpPos.distManhattan(pos) == 1) {
-                return SimNodeKind.PUMP;
+        // Handler-position nodes (the node IS the tank/handler block)
+        for (var ep : endpoints.values()) {
+            if (ep.handlerPos.equals(pos)) {
+                return ep.isTank ? SimNodeKind.TANK : SimNodeKind.SOURCE;
             }
         }
 
@@ -290,34 +308,47 @@ public final class NetworkBuilder {
     private static float computeStaticPressure(Level level, BlockPos pos,
                                                 Map<BlockPos, BlockPos> pumpPositions,
                                                 Map<BlockPos, EndpointData> endpoints,
-                                                SimNodeKind kind) {
-        // Pumps contribute their speed as static pressure
+                                                SimNodeKind kind, SimConfig config) {
+        // Pump nodes get staticPressure = speed. This is the pump's contribution
+        // to Φ — it creates a real potential peak at the pump position, driving flow
+        // away on downstream edges. The check valve prevents backflow through the pump.
         if (kind == SimNodeKind.PUMP) {
-            for (var entry : pumpPositions.entrySet()) {
-                BlockPos pumpPos = entry.getKey();
-                if (pumpPos.distManhattan(pos) != 1) continue;
-                BlockEntity be = level.getBlockEntity(pumpPos);
-                if (be instanceof KineticBlockEntity kbe) {
-                    BlockState pumpState = level.getBlockState(pumpPos);
-                    if (pumpState.getBlock() instanceof PumpBlock) {
-                        Direction facing = pumpState.getValue(PumpBlock.FACING);
-                        BlockPos pushSide = pumpPos.relative(facing);
-                        // Only the push side gets positive pressure
-                        if (pushSide.equals(pos)) {
-                            return Math.abs(kbe.getSpeed());
-                        }
-                    }
-                }
+            BlockEntity be = level.getBlockEntity(pos);
+            if (be instanceof KineticBlockEntity kbe) {
+                return Math.abs(kbe.getSpeed());
             }
+            return 0;
         }
 
         // Sources get pressure from the height difference to their handler
         if (kind == SimNodeKind.SOURCE) {
+            return 0; // gravity is handled by Φ, not staticPressure for sources
+        }
+
+        // Tanks get dynamic pressure from fill level: ρ·G·fillHeight
+        // Initial value computed here; updated each tick by GravityFlowHandler
+        if (kind == SimNodeKind.TANK) {
+            // Check if pos IS a tank (handler-position node)
+            var directBE = level.getBlockEntity(pos);
+            if (directBE instanceof FluidTankBlockEntity tankBE) {
+                FluidTankAccessor accessor = (FluidTankAccessor) tankBE;
+                int tankHeight = accessor.pipesnphysics$getHeight();
+                var inv = accessor.pipesnphysics$getTankInventory();
+                float fillFrac = inv.getCapacity() > 0
+                        ? (float) inv.getFluidAmount() / inv.getCapacity() : 0;
+                return config.G() * fillFrac * tankHeight;
+            }
+            // Check neighbors (pipe-position TANK nodes)
             for (var ep : endpoints.values()) {
-                if (ep.pipePos.equals(pos)) {
-                    // Static pressure from tank height above pipe
-                    // (the gravity term handles the actual direction)
-                    return 0; // gravity is handled by Φ, not staticPressure for sources
+                if (!ep.pipePos.equals(pos)) continue;
+                var be = level.getBlockEntity(ep.handlerPos);
+                if (be instanceof FluidTankBlockEntity tankBE2) {
+                    FluidTankAccessor accessor = (FluidTankAccessor) tankBE2;
+                    int tankHeight = accessor.pipesnphysics$getHeight();
+                    var inv = accessor.pipesnphysics$getTankInventory();
+                    float fillFrac = inv.getCapacity() > 0
+                            ? (float) inv.getFluidAmount() / inv.getCapacity() : 0;
+                    return config.G() * fillFrac * tankHeight;
                 }
             }
         }
@@ -329,15 +360,11 @@ public final class NetworkBuilder {
                                        Map<BlockPos, BlockPos> pumpPositions,
                                        Map<BlockPos, EndpointData> endpoints,
                                        SimNodeKind kind, SimConfig config) {
-        // Pumps supply head = speed
+        // Pumps supply head = speed (reach budget for downstream edges)
         if (kind == SimNodeKind.PUMP) {
-            for (var entry : pumpPositions.entrySet()) {
-                BlockPos pumpPos = entry.getKey();
-                if (pumpPos.distManhattan(pos) != 1) continue;
-                BlockEntity be = level.getBlockEntity(pumpPos);
-                if (be instanceof KineticBlockEntity kbe) {
-                    return Math.abs(kbe.getSpeed());
-                }
+            BlockEntity be = level.getBlockEntity(pos);
+            if (be instanceof KineticBlockEntity kbe) {
+                return Math.abs(kbe.getSpeed());
             }
             return config.defaultPumpHead();
         }
@@ -349,15 +376,44 @@ public final class NetworkBuilder {
                 double handlerY = SableCompat.getWorldY(level, ep.handlerPos);
                 double pipeY = SableCompat.getWorldY(level, pos);
                 float heightDiff = (float) Math.abs(handlerY - pipeY);
-                // Head from gravity: ρ·g·Δy (density assumed 1 for head budget)
                 return heightDiff * config.G();
+            }
+        }
+
+        // Tanks supply head from fill level: ρ·G·fillHeight
+        // Gravity contributes through edgeCost (downhill refunds head, uphill costs it),
+        // so the head budget naturally accounts for elevation during propagation.
+        // Initial value; updated per-tick by GravityFlowHandler.updateTankPressures
+        if (kind == SimNodeKind.TANK) {
+            // Check if pos IS a tank (handler-position node)
+            var directBE = level.getBlockEntity(pos);
+            if (directBE instanceof FluidTankBlockEntity tankBE) {
+                FluidTankAccessor accessor = (FluidTankAccessor) tankBE;
+                int tankHeight = accessor.pipesnphysics$getHeight();
+                var inv = accessor.pipesnphysics$getTankInventory();
+                float fillFrac = inv.getCapacity() > 0
+                        ? (float) inv.getFluidAmount() / inv.getCapacity() : 0;
+                return config.G() * fillFrac * tankHeight;
+            }
+            // Check neighbors (pipe-position TANK nodes)
+            for (var ep : endpoints.values()) {
+                if (!ep.pipePos.equals(pos)) continue;
+                var be = level.getBlockEntity(ep.handlerPos);
+                if (be instanceof FluidTankBlockEntity tankBE2) {
+                    FluidTankAccessor accessor = (FluidTankAccessor) tankBE2;
+                    int tankHeight = accessor.pipesnphysics$getHeight();
+                    var inv = accessor.pipesnphysics$getTankInventory();
+                    float fillFrac = inv.getCapacity() > 0
+                            ? (float) inv.getFluidAmount() / inv.getCapacity() : 0;
+                    return config.G() * fillFrac * tankHeight;
+                }
             }
         }
 
         return 0;
     }
 
-    record EndpointData(BlockPos pipePos, BlockPos handlerPos, Direction face) {}
+    record EndpointData(BlockPos pipePos, BlockPos handlerPos, Direction face, boolean isTank) {}
 
     // Keep static helpers for compatibility
     public static NodeId nodeOf(BlockPos pos) {

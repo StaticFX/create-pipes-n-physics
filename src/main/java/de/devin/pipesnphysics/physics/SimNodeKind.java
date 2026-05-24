@@ -8,5 +8,6 @@ public enum SimNodeKind {
     SOURCE,
     SINK,
     PUMP,
+    TANK,
     DEAD_END
 }

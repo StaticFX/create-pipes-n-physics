@@ -16,8 +16,8 @@ public final class PhysicsConfigFactory {
         return new SimConfig(
                 PipesNPhysicsConfig.GRAVITY_PRESSURE_PER_BLOCK.get().floatValue(),
                 PipesNPhysicsConfig.GRAVITY_DEAD_ZONE.get().floatValue(),
-                PipesNPhysicsConfig.MAX_GRAVITY_PRESSURE.get().floatValue(),
-                1.0f,  // conductance — flow = COND * |ΔΦ|
+                500.0f, // maxFlow — max mB per edge per sim tick (uncoupled from display pressure cap)
+                10.0f,  // conductance — flow = COND * |ΔΦ| / viscosity
                 PipesNPhysicsConfig.PIPE_BURST_THRESHOLD.get().floatValue(),
                 PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue(),
                 1000,  // per-pipe capacity in mB
