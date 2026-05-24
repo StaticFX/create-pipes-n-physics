@@ -4,6 +4,8 @@ import com.simibubi.create.foundation.data.CreateRegistrate;
 import com.simibubi.create.foundation.item.ItemDescription;
 import com.simibubi.create.foundation.item.KineticStats;
 import com.simibubi.create.foundation.item.TooltipModifier;
+import de.devin.pipesnphysics.test.pump.GravityGameTests;
+import de.devin.pipesnphysics.test.pump.PipeGameTests;
 import net.createmod.catnip.lang.FontHelper;
 import net.minecraft.resources.ResourceLocation;
 import de.devin.pipesnphysics.client.ClientEvents;
@@ -45,8 +47,11 @@ public class PipesNPhysics {
 
         modBus.addListener(this::onCommonSetup);
         modBus.addListener(this::onClientSetup);
-        modBus.addListener(RegisterGameTestsEvent.class, event ->
-                event.register(PipesNPhysicsGameTests.class));
+        modBus.addListener(RegisterGameTestsEvent.class, event -> {
+                    event.register(GravityGameTests.class);
+                    event.register(PipeGameTests.class);
+                }
+        );
 
         NeoForge.EVENT_BUS.register(GravityFlowHandler.class);
         NeoForge.EVENT_BUS.register(PipeSwapHandler.class);

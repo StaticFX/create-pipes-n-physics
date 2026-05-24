@@ -51,6 +51,8 @@ public class SimEdge {
     public NodeId upstreamNode() { return upstreamNode; }
     public void setUpstreamNode(NodeId upstream) { this.upstreamNode = upstream; }
 
+
+
     public NodeId downstreamNode() {
         if (upstreamNode == null) return null;
         return upstreamNode.equals(a) ? b : a;
