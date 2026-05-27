@@ -76,41 +76,84 @@ public final class FluidSimulator {
     // -- Phase handlers --
 
     private void tickEmpty(FluidNetwork net, SimEdge edge, int idx, Map<String, SimFluid> fluids) {
-        // Determine which node should feed (charge) this edge.
-        // Pump push-side edges charge FROM the pump (it pushes toward the other end).
-        // All other edges charge from non-pump nodes (TANK, SOURCE, JUNCTION).
+        // Only start charging if there's an actual potential difference to drive flow.
+        // This prevents settled circuits from looping EMPTY→CHARGING→FLOWING→DRAINING.
         NodeId feedNode = null;
+        NodeId otherNode = null;
 
-        // 1. Check if a pump wants to push through this edge (pump push-side first)
+        // 1. Pump push-side: only if pump is powered AND has fluid to move.
+        //    A pump with nothing on its pull side shouldn't pressurize empty pipes.
         for (NodeId nodeId : List.of(edge.a(), edge.b())) {
             SimNode node = net.node(nodeId);
-            if (node != null && node.kind() == SimNodeKind.PUMP && node.pushSidePos() != null) {
-                NodeId otherEnd = nodeId.equals(edge.a()) ? edge.b() : edge.a();
-                if (isPushSide(node, otherEnd)) {
-                    feedNode = nodeId; break;
+            if (node != null && node.kind() == SimNodeKind.PUMP
+                    && node.pushSidePos() != null && node.staticPressure() > 0) {
+                NodeId other = nodeId.equals(edge.a()) ? edge.b() : edge.a();
+                if (isPushSide(node, other) && pumpHasFluidSource(net, nodeId)) {
+                    feedNode = nodeId;
+                    otherNode = other;
+                    break;
                 }
             }
         }
 
-        // 2. Otherwise, non-pump nodes feed (pull-side of pump, gravity, tank pressure)
+        // 2. Non-pump SOURCE nodes (tanks, etc.) — only if they have head.
+        //    If the other end is a pump, only charge if we're on the pump's PULL side
+        //    (feeding the intake). Don't charge on the push side (that's reverse flow).
         if (feedNode == null) {
             for (NodeId nodeId : List.of(edge.a(), edge.b())) {
                 SimNode node = net.node(nodeId);
                 if (node == null || node.kind() == SimNodeKind.PUMP) continue;
-                boolean canFeed = node.kind() == SimNodeKind.SOURCE
-                        || node.kind() == SimNodeKind.SOURCE
-                        || (node.kind() == SimNodeKind.JUNCTION && net.headAt(nodeId) > 0);
-                if (canFeed) { feedNode = nodeId; break; }
+                NodeId other = nodeId.equals(edge.a()) ? edge.b() : edge.a();
+                SimNode otherSim = net.node(other);
+                // If other end is a pump: only allow if we're on its pull side
+                if (otherSim != null && otherSim.kind() == SimNodeKind.PUMP
+                        && otherSim.pushSidePos() != null) {
+                    // isPushSide(pump, us) = pump pushes toward us = we're the push target = reverse
+                    if (isPushSide(otherSim, nodeId)) continue;
+                }
+                if (node.kind() == SimNodeKind.SOURCE && net.headAt(nodeId) > 0) {
+                    feedNode = nodeId;
+                    otherNode = other;
+                    break;
+                }
+                if (node.kind() == SimNodeKind.JUNCTION && net.headAt(nodeId) > 0) {
+                    feedNode = nodeId;
+                    otherNode = other;
+                    break;
+                }
             }
         }
-        if (feedNode != null) {
-            String fluidId = findFluidAtNode(net, feedNode, fluids);
-            if (fluidId != null) {
-                edge.setPhase(EdgePhase.CHARGING);
-                edge.setUpstreamNode(feedNode);
-                edge.setFrontPos(0);
-                edge.setPrimaryFluid(fluidId);
-            }
+
+        if (feedNode == null) return;
+
+        // Gates to prevent the EMPTY→CHARGING→FLOWING→DRAINING→EMPTY loop:
+        // 1. Non-pump SOURCE must have fluid (staticPressure > 0).
+        // 2. For gravity edges (no pump involved), feed's head must exceed the cost to
+        //    reach the other end. This prevents a full sink at low elevation from
+        //    charging back toward an empty source at high elevation.
+        SimNode feedSim = net.node(feedNode);
+        if (feedSim != null && feedSim.kind() == SimNodeKind.SOURCE
+                && feedSim.staticPressure() <= 0) {
+            return;
+        }
+        SimNode otherSim = net.node(otherNode);
+        boolean pumpInvolved = (feedSim != null && feedSim.kind() == SimNodeKind.PUMP)
+                || (otherSim != null && otherSim.kind() == SimNodeKind.PUMP);
+        if (!pumpInvolved && feedSim != null && otherSim != null) {
+            // Use elevation-based Φ: a SOURCE at low elevation should not charge uphill
+            float feedElev = (float) feedSim.elevation();
+            float otherElev = (float) otherSim.elevation();
+            float feedPhi = feedSim.staticPressure() + config.G() * feedElev;
+            float otherPhi = otherSim.staticPressure() + config.G() * otherElev;
+            if (feedPhi - otherPhi <= config.EPS()) return;
+        }
+
+        String fluidId = findFluidAtNode(net, feedNode, fluids);
+        if (fluidId != null) {
+            edge.setPhase(EdgePhase.CHARGING);
+            edge.setUpstreamNode(feedNode);
+            edge.setFrontPos(0);
+            edge.setPrimaryFluid(fluidId);
         }
     }
 
@@ -139,24 +182,16 @@ public final class FluidSimulator {
 
         float headAtFront = headAtUpstream - frictionToFront - gravityToFront;
 
-        // Whether this is a pump-driven edge (affects velocity scaling)
-        boolean chargeReachApplies = upNode != null && upNode.kind() == SimNodeKind.PUMP;
-        // Stall when head is exhausted — bounded reach applies to ALL flows.
-        // Pumps get reach from head budget, tanks from fill level, gravity from elevation.
-        if (headAtFront <= 0) {
-            edge.setPhase(EdgePhase.STALLED);
-            net.setFlowRate(idx, 0);
-            return;
-        }
-
-        // Front advance speed: tiles/tick = FRONT_K * headAtFront / viscosity.
-        // For pump-driven flow, divide heavily so fluid visibly crawls through pipes.
+        // Front always advances (visual priming). Speed scales with available head,
+        // with a minimum base advance so pipes always visually prime.
+        // Reach is checked at FLOWING time, not during the visual front advance.
         float v;
-        float velocityHead = headAtFront;
-        if (chargeReachApplies && config.pumpHeadMultiplier() > 0) {
-            velocityHead = headAtFront / (config.pumpHeadMultiplier() * 20f);
+        if (headAtFront > 0) {
+            v = config.frontK() * headAtFront / fluid.viscosity();
+        } else {
+            // Base advance: slow crawl even past the head limit (visual only, no real flow)
+            v = config.frontK() * 0.1f / fluid.viscosity();
         }
-        v = Math.max(0, config.frontK() * velocityHead / fluid.viscosity());
         edge.setFrontPos(edge.frontPos() + v);
 
         // Pipes don't hold real inventory — frontPos is purely visual/timing.
@@ -184,6 +219,7 @@ public final class FluidSimulator {
             } else {
                 // Reached a valid node (SOURCE, PUMP, JUNCTION).
                 // This edge is now primed — transition to FLOWING.
+                // Flow rate computed next tick by normal tickFlowing dispatch.
                 edge.setPhase(EdgePhase.FLOWING);
 
                 // If the downstream is a pass-through (PUMP/JUNCTION), also
@@ -246,36 +282,36 @@ public final class FluidSimulator {
         float deltaPhi = phiA - phiB;
 
         if (Math.abs(deltaPhi) <= config.EPS()) {
+            // No driving force — source empty or pressures equalized.
+            edge.setPhase(EdgePhase.DRAINING);
             net.setFlowRate(idx, 0);
             return;
         }
 
-        // Steady flow: COND / viscosity * |ΔΦ|
-        float Q = Math.clamp((config.conductance() / fluid.viscosity()) * Math.abs(deltaPhi),
-                0, config.maxFlow());
-
-        // Pump throughput cap: limits flow proportional to pump RPM.
-        // Prevents low-RPM pumps from hitting maxFlow due to gravity assist or high ΔΦ.
-        float pumpCap = config.maxFlow();
+        // Regime split: pump-driven edges use RPM * flowPerRPM (throughput scales with speed).
+        // Gravity/equalization edges use conductance * ΔΦ (throughput scales with pressure diff).
+        boolean hasPump = false;
+        float pumpFlow = 0;
         for (SimNode n : net.nodes().values()) {
             if (n.kind() == SimNodeKind.PUMP && n.staticPressure() > 0) {
-                float cap = n.staticPressure() * config.pumpThroughputScale();
-                pumpCap = Math.min(pumpCap, cap);
+                hasPump = true;
+                // Back-derive RPM from head: RPM = head / speedToHead
+                float rpm = n.staticPressure() / config.speedToHead();
+                pumpFlow = Math.max(pumpFlow, rpm * config.flowPerRPM());
             }
         }
-        Q = Math.min(Q, pumpCap);
 
-        // Pipes don't hold real inventory — conservation is enforced at boundary
-        // handlers (src.drain / dst.fill). ΔΦ naturally drops to 0 as destination
-        // fills past the pump's head, providing stability feedback.
+        float Q;
+        if (hasPump) {
+            // Pump regime: throughput = RPM * flowPerRPM, capped at bore
+            Q = Math.min(pumpFlow, config.maxFlow());
+        } else {
+            // Gravity regime: throughput = conductance * |ΔΦ| / viscosity, capped at bore
+            Q = Math.clamp((config.conductance() / fluid.viscosity()) * Math.abs(deltaPhi),
+                    0, config.maxFlow());
+        }
 
         net.setFlowRate(idx, Math.signum(deltaPhi) * Q);
-
-        // FLOWING edges stay full — actual fluid transfer happens at boundary nodes
-        // (GravityFlowHandler.transferFluid). No drain here.
-
-        // FLOWING edges persist — they don't revert to DRAINING.
-        // The flow rate naturally drops to 0 when ΔΦ hits EPS.
     }
 
     private void tickDraining(FluidNetwork net, SimEdge edge, int idx) {
@@ -299,37 +335,50 @@ public final class FluidSimulator {
     }
 
     /**
-     * Compute Φ at a node for a specific edge. For PUMP nodes, staticPressure only
-     * applies on the push side. On the pull side, Φ = gravity only.
-     *
-     * @param node     the node to compute Φ for
-     * @param otherEnd the NodeId of the OTHER endpoint of this edge
-     * @param fluid    the fluid
+     * Compute Φ at a node for a specific edge.
+     * PUMP push side: headAt already includes the pump's own head (seeded in propagateHead),
+     *   so Φ = headAt + gravity. No double-count of staticPressure.
+     * PUMP pull side: suction = -staticPressure + gravity.
+     * SOURCE: staticPressure (tank fill pressure) + gravity.
      */
-    /**
-     * Compute Φ at a node for a specific edge. For PUMP nodes, the push side uses
-     * accumulated head (from upstream tanks + prior pumps) plus this pump's own boost.
-     * The pull side uses suction (-speed) to draw fluid in.
-     */
-    private float computePhiForEdge(SimNode node, NodeId otherEnd, SimFluid fluid) {
-        return computePhiForEdge(null, node, otherEnd, fluid);
-    }
-
     private float computePhiForEdge(FluidNetwork net, SimNode node, NodeId otherEnd, SimFluid fluid) {
         float gravity = fluid.phase().sign() * fluid.density() * config.G() * (float) node.elevation();
         if (node.kind() == SimNodeKind.PUMP && node.pushSidePos() != null) {
             boolean isPushSide = isPushSide(node, otherEnd);
             if (isPushSide) {
-                // Push side: Φ = accumulated head + pump speed + gravity.
-                // headAt carries upstream pump contributions for series stacking.
-                // For single pumps it also includes source tank pressure (minor coupling).
-                float accumulated = (net != null) ? net.headAt(node.id()) : 0;
-                return accumulated + node.staticPressure() + gravity;
+                // Push side: headAt already includes pump head + upstream contributions
+                float head = (net != null) ? net.headAt(node.id()) : node.staticPressure();
+                return head + gravity;
             } else {
                 return -node.staticPressure() + gravity; // pull: suction
             }
         }
         return node.staticPressure() + gravity;
+    }
+
+    /**
+     * Check if a pump has any fluid source on its pull side (reachable via non-push edges).
+     * A pump with nothing to pull shouldn't start charging its push side.
+     */
+    private boolean pumpHasFluidSource(FluidNetwork net, NodeId pumpId) {
+        SimNode pump = net.node(pumpId);
+        if (pump == null) return false;
+
+        // Check all edges connected to the pump
+        for (int edgeIdx : net.edgesAt(pumpId)) {
+            SimEdge adj = net.edges().get(edgeIdx);
+            NodeId otherEnd = adj.a().equals(pumpId) ? adj.b() : adj.a();
+
+            // Skip push-side edges — we want the pull side
+            if (isPushSide(pump, otherEnd)) continue;
+
+            // The pull-side leads to a SOURCE with fluid?
+            SimNode other = net.node(otherEnd);
+            if (other != null && other.kind() == SimNodeKind.SOURCE && other.staticPressure() > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isClosedPump(SimNode n) {

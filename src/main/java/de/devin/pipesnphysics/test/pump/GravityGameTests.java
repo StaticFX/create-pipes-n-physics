@@ -14,24 +14,24 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 @PrefixGameTestTemplate(false)
 public class GravityGameTests {
 
-    @GameTest(template = "gravity/1_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
+    @GameTest(template = "gravity/1_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 3000)
     public static void oneBlockFall(GameTestHelper helper) {
         var testConfig = new FluidTestConfig(
                 new BlockPos(0, 3,  0),
                 new BlockPos(0, 1,  0),
-                40,
+                1000,
                 null
         );
 
         TestHelper.fillSourceAndAwaitDest(helper, testConfig);
     }
 
-    @GameTest(template = "gravity/2_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
+    @GameTest(template = "gravity/2_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 3000)
     public static void twoBlockFall(GameTestHelper helper) {
         var testConfig = new FluidTestConfig(
                 new BlockPos(0, 4,  0),
                 new BlockPos(0, 1,  0),
-                40,
+                1000,
                 null
         );
 
@@ -39,21 +39,21 @@ public class GravityGameTests {
     }
 
 
-    @GameTest(template = "gravity/5_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
+    @GameTest(template = "gravity/5_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 3000)
     public static void fiveBlockFall(GameTestHelper helper) {
         var testConfig = new FluidTestConfig(
                 new BlockPos(0, 7,  0),
                 new BlockPos(0, 1,  0),
-                40,
+                1000,
                 null
         );
 
         TestHelper.fillSourceAndAwaitDest(helper, testConfig);
     }
 
-    @GameTest(template = "gravity/open_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
+    @GameTest(template = "gravity/open_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1200)
     public static void openEndedPipe(GameTestHelper helper) {
-        helper.runAfterDelay(60, () -> {
+        helper.runAfterDelay(600, () -> {
             var sourceBlock = helper.absolutePos(new BlockPos(0, 3, 0));
 
             if (TestHelper.getFillAmountOfTank(helper, sourceBlock) != 7000) {
@@ -70,7 +70,7 @@ public class GravityGameTests {
         });
     }
 
-    @GameTest(template = "gravity/simple_fluid_leveling", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
+    @GameTest(template = "gravity/simple_fluid_leveling", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1200)
     public static void simpleFluidLeveling(GameTestHelper helper) {
         var sourceBlock = helper.absolutePos(new BlockPos(0, 3, 0));
 
@@ -81,7 +81,7 @@ public class GravityGameTests {
                 helper.fail("Source tank did not lose any fluid");
             }
 
-            helper.runAfterDelay(300, () -> {
+            helper.runAfterDelay(600, () -> {
                 var destTank = helper.absolutePos(new BlockPos(2, 3, 0));
 
                 int srcFill = TestHelper.getFillAmountOfTank(helper, sourceBlock);

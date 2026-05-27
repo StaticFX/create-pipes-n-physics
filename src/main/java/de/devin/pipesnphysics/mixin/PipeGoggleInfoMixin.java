@@ -18,7 +18,7 @@ import de.devin.pipesnphysics.handler.PhysicsConfigFactory;
 import de.devin.pipesnphysics.physics.PipeFlowData;
 import de.devin.pipesnphysics.physics.PipeFormulas;
 import de.devin.pipesnphysics.physics.PressureBreakdown;
-import de.devin.pipesnphysics.handler.GravityFlowHandler;
+import de.devin.pipesnphysics.handler.FluidTransportHandler;
 import net.createmod.catnip.lang.LangBuilder;
 import net.createmod.catnip.lang.LangNumberFormat;
 import net.minecraft.ChatFormatting;
@@ -112,8 +112,8 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                 float scaling = PipesNPhysicsConfig.VISCOSITY_SCALING.get().floatValue();
                 float effectiveMult = 1.0f + (viscosityMult - 1.0f) * scaling;
 
-                lang().text(ChatFormatting.DARK_GRAY, "  " + density + " kg/m\u00B3")
-                        .add(lang().text(ChatFormatting.DARK_GRAY, "  \u00B7 "))
+                lang().text(ChatFormatting.DARK_GRAY, "  " + density + " kg/m³")
+                        .add(lang().text(ChatFormatting.DARK_GRAY, "  · "))
                         .add(lang().text(ChatFormatting.DARK_GRAY, viscosity + " cP"))
                         .forGoggles(tooltip, 1);
 

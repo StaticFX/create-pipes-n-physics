@@ -188,8 +188,18 @@ public class DebugGraphCommand {
             SimEdge edge = network.edges().get(i);
             float rate = simResult.flowRates()[i];
             String dir = rate > 0 ? "a→b" : rate < 0 ? "b→a" : "none";
-            send(player, String.format("  §7Edge %d: §7flow=§f%.1f §7dir=§f%s",
-                    edge.id(), Math.abs(rate), dir));
+            String phaseColor = switch (edge.phase()) {
+                case EMPTY -> "§8";
+                case CHARGING -> "§e";
+                case STALLED -> "§c";
+                case FLOWING -> "§a";
+                case DRAINING -> "§6";
+            };
+            send(player, String.format("  §7Edge %d: %s%s §7front=§f%.1f§7/§f%d §7flow=§f%.1f §7dir=§f%s §7head=§f%.2f",
+                    edge.id(), phaseColor, edge.phase().name(),
+                    edge.frontPos(), edge.length(),
+                    Math.abs(rate), dir,
+                    network.headAt(edge.upstreamNode() != null ? edge.upstreamNode() : edge.a())));
         }
         if (!simResult.collisions().isEmpty()) {
             send(player, "§c" + simResult.collisions().size() + " collision(s)!");

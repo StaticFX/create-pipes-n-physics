@@ -13,7 +13,7 @@ import de.devin.pipesnphysics.client.PumpRangeRenderer;
 import de.devin.pipesnphysics.client.ponder.PipesNPhysicsPonderPlugin;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.handler.DebugGraphCommand;
-import de.devin.pipesnphysics.handler.GravityFlowHandler;
+import de.devin.pipesnphysics.handler.FluidTransportHandler;
 import de.devin.pipesnphysics.handler.PipeSwapHandler;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
@@ -53,13 +53,13 @@ public class PipesNPhysics {
                 }
         );
 
-        NeoForge.EVENT_BUS.register(GravityFlowHandler.class);
+        NeoForge.EVENT_BUS.register(FluidTransportHandler.class);
         NeoForge.EVENT_BUS.register(PipeSwapHandler.class);
         NeoForge.EVENT_BUS.addListener((RegisterCommandsEvent event) ->
                 DebugGraphCommand.register(event.getDispatcher()));
         NeoForge.EVENT_BUS.addListener((ServerStoppedEvent event) -> {
             SableCompat.clearCaches();
-            GravityFlowHandler.clearAllCooldowns();
+            FluidTransportHandler.clearAllCooldowns();
         });
 
         if (FMLEnvironment.dist.isClient()) {

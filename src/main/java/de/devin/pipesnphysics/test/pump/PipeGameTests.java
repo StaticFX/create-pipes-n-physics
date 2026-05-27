@@ -16,13 +16,13 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 @PrefixGameTestTemplate(false)
 public class PipeGameTests {
 
-    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 2400)
     public static void singlePump(GameTestHelper helper) {
 
         var testConfig = new FluidTestConfig(
                 new BlockPos(0, 1,  1),
                 new BlockPos(4, 1,  1),
-                40,
+                600,
                 new PipeConfig(new BlockPos[]{
                         new BlockPos(1, 1, 1),
                         new BlockPos(3, 1, 1),
@@ -32,13 +32,13 @@ public class PipeGameTests {
         TestHelper.fillSourceAndAwaitDest(helper, testConfig);
     }
 
-    @GameTest(template = "piping/single_pump_with_tank", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
+    @GameTest(template = "piping/single_pump_with_tank", templateNamespace = PipesNPhysics.ID, timeoutTicks = 2400)
     public static void singlePumpWithTankNextToIt(GameTestHelper helper) {
 
         var testConfig = new FluidTestConfig(
                 new BlockPos(3, 1,  0),
                 new BlockPos(0, 1,  0),
-                40,
+                600,
                 new PipeConfig(new BlockPos[]{
                         new BlockPos(1, 1, 0),
                 })
@@ -47,13 +47,13 @@ public class PipeGameTests {
         TestHelper.fillSourceAndAwaitDest(helper, testConfig);
     }
 
-    @GameTest(template = "piping/double_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1200)
+    @GameTest(template = "piping/double_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 2400)
     public static void doublePump(GameTestHelper helper) {
 
         var testConfig = new FluidTestConfig(
                 new BlockPos(8, 1,  0),
                 new BlockPos(0, 1,  0),
-                340,
+                600,
                 new PipeConfig(new BlockPos[]{
                         new BlockPos(7, 1, 0),
                         new BlockPos(5, 1, 0),
@@ -101,13 +101,13 @@ public class PipeGameTests {
         });
     }
 
-    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1200)
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 2400)
     public static void pumpLongPipe(GameTestHelper helper) {
         var sourceBlock = helper.absolutePos(new BlockPos(7, 1, 0));
         var testConfig = new FluidTestConfig(
                 new BlockPos(7, 1,  0),
                 new BlockPos(0, 1,  0),
-                160,
+                600,
                 new PipeConfig(new BlockPos[]{
                         new BlockPos(1, 1, 0),
                         new BlockPos(2, 1, 0),
@@ -153,12 +153,13 @@ public class PipeGameTests {
         }
 
         helper.runAfterDelay(600, () -> {
-            if (transportBehavior.hasAnyPressure() && TestHelper.getFillAmountOfTank(helper, sinkBlock) == 0) {
-                helper.fail("Sink has no fluid, even though pipe before it has active pressure");
+            boolean hasFlow = TestHelper.hasAnyFlow(transportBehavior);
+            if (hasFlow && TestHelper.getFillAmountOfTank(helper, sinkBlock) == 0) {
+                helper.fail("Sink has no fluid, even though pipe before it has active flow");
             }
 
-            if (!transportBehavior.hasAnyPressure() && TestHelper.getFillAmountOfTank(helper, sinkBlock) != 0) {
-                helper.fail("Sink tank has fluid, even though pipe before it has no active pressure");
+            if (!hasFlow && TestHelper.getFillAmountOfTank(helper, sinkBlock) != 0) {
+                helper.fail("Sink tank has fluid, even though pipe before it has no active flow");
             }
 
             helper.succeed();

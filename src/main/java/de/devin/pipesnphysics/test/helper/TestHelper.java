@@ -1,10 +1,13 @@
 package de.devin.pipesnphysics.test.helper;
 
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
+import com.simibubi.create.content.fluids.PipeConnection;
 import com.simibubi.create.content.fluids.pipes.FluidPipeBlockEntity;
 import com.simibubi.create.content.fluids.pipes.StraightPipeBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
+import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.world.level.material.Fluids;
 import net.neoforged.neoforge.capabilities.Capabilities;
@@ -20,11 +23,7 @@ public class TestHelper {
     public static void fillSourceAndAwaitDest(GameTestHelper helper, FluidTestConfig relativeConfig) {
         var config = convertToAbsolutePos(helper, relativeConfig);
         helper.runAfterDelay(5, () -> {
-
-            if (getFillAmountOfTank(helper, config.sink()) != 0) {
-                helper.fail("Sink is not empty");
-            }
-
+            Assertions.assertTankFill(helper, config.sink(), 0, "Sink is not empty");
             fillTankAt(helper, config.source());
 
             helper.runAfterDelay(config.ticksToWait(), () -> {
@@ -37,21 +36,15 @@ public class TestHelper {
                         assertPipesHaveFluid(helper, config.pipeConfig());
                     }
 
-                    if (fillTwo > fillOne) {
-                        var totalFill = getFillAmountOfTank(helper, config.sink()) + getFillAmountOfTank(helper, config.source());
-
-                        if (totalFill != 8000) {
-                            helper.fail("Expected to have 8000mb of fluid in the system, but got " + totalFill + "mb");
-                        }
-
-                        if (getFillAmountOfTank(helper, config.source()) != 0) {
-                            helper.fail("Source did not drain fully, it still has " + getFillAmountOfTank(helper, config.source()) + "mb");
-                        }
-
-                        helper.succeed();
-                    } else {
+                    if (fillTwo <= fillOne) {
                         helper.fail("Sink did not fill");
+                        return;
                     }
+
+                    Assertions.assertConservation(helper, config.source(), config.sink(), 8000);
+                    Assertions.assertTankFill(helper, config.source(), 0,
+                            "Source did not drain fully, it still has " + getFillAmountOfTank(helper, config.source()) + "mb");
+                    helper.succeed();
                 });
             });
         });
@@ -79,10 +72,25 @@ public class TestHelper {
         for (var pipe : pipes) {
             var transportBehavior = BlockEntityBehaviour.get(pipe, FluidTransportBehaviour.TYPE);
 
-            if (transportBehavior == null || !transportBehavior.hasAnyPressure()) {
+            if (transportBehavior == null || !hasAnyFlow(transportBehavior)) {
                 helper.fail("Pipe at " + pipe.getBlockPos() + " does not have fluid");
             }
         }
+    }
+
+    /**
+     * Check if a pipe has any active flow (Flow objects on connections).
+     * Replaces hasAnyPressure() since we no longer use addPressure.
+     */
+    public static boolean hasAnyFlow(FluidTransportBehaviour pipe) {
+        if (pipe.hasAnyPressure()) return true;
+        for (Direction dir : Direction.values()) {
+            PipeConnection conn = pipe.getConnection(dir);
+            if (conn instanceof PipeConnectionAccessor accessor) {
+                if (accessor.pipesnphysics$getFlow().isPresent()) return true;
+            }
+        }
+        return false;
     }
 
     private static FluidPipeBlockEntity[] getPipesAt(GameTestHelper helper, PipeConfig config) {

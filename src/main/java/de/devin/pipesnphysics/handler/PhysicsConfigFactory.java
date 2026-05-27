@@ -7,6 +7,9 @@ import de.devin.pipesnphysics.physics.SimConfig;
 /**
  * Reads from NeoForge mod config and produces immutable config snapshots.
  * Call once per computation so config changes take effect immediately.
+ *
+ * Unit system: head is in "blocks of water column" (G=1, ρ_water=1).
+ * A full 1-block tank produces 1 head. 256 RPM pump produces 32 head (=32 block lift).
  */
 public final class PhysicsConfigFactory {
 
@@ -14,19 +17,19 @@ public final class PhysicsConfigFactory {
 
     public static SimConfig simConfig() {
         return new SimConfig(
-                PipesNPhysicsConfig.GRAVITY_PRESSURE_PER_BLOCK.get().floatValue(),
-                PipesNPhysicsConfig.GRAVITY_DEAD_ZONE.get().floatValue(),
-                500.0f, // maxFlow — max mB per edge per sim tick (uncoupled from display pressure cap)
-                10.0f,  // conductance — flow = COND * |ΔΦ| / viscosity
-                PipesNPhysicsConfig.PIPE_BURST_THRESHOLD.get().floatValue(),
-                PipesNPhysicsConfig.PIPE_FRICTION_PER_BLOCK.get().floatValue(),
-                1000,  // per-pipe capacity in mB
-                10.0f, // taperMargin — head below which flow tapers
-                256.0f, // defaultPumpHead — reach ~50 tiles at friction=5
-                0.1f,  // frontK — visible charging: gravity ~1.5 tiles/tick, strong pump ~27 tiles/tick
-                5.0f,  // hysteresis — head margin before FLOWING→DRAINING
-                4.0f,  // pumpHeadMultiplier — head = RPM * 4; at 16 RPM reach = 12.8 blocks
-                10.0f  // pumpThroughputScale — max mB/t = RPM * 10; merges with maxFlow at ~50 RPM
+                1.0f,       // G — 1 block of water = 1 head (defines the unit)
+                0.01f,      // EPS — tanks settle within ~80 mB
+                128.0f,     // maxFlow — bore limit mB/t; strongest pump saturates one pipe
+                100.0f,     // conductance — gravity equalize ~100 mB/t at ΔΦ=1
+                512.0f,     // burstThreshold — 4× maxFlow (rare)
+                0.1f,       // frictionPerBlock — reach = head/0.1 = 10× head
+                35,         // perPipeCapacity — bore: (3/16)² × 1000 ≈ 35 mB/block
+                1.0f,       // taperMargin — reach tapers over the last block
+                32.0f,      // defaultPumpHead — fallback (256 RPM equivalent)
+                0.5f,       // frontK — head 8 → 4 blocks/t charge speed
+                1.0f,       // hysteresis — only drain on real deficit, not flicker
+                0.125f,     // speedToHead — 256 RPM → 32 head (= 32-block lift)
+                0.5f        // flowPerRPM — 256 RPM → 128 mB/t = maxFlow
         );
     }
 
