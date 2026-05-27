@@ -156,7 +156,7 @@ public final class NetworkBuilder {
                             PipeGraphBuilder.nodeOf(nodePos),
                             PipeGraphBuilder.nodeOf(neighbor),
                             1, config.perPipeCapacity(),
-                            friction, pipesOnly));
+                            friction, buildPipeEntries(pipesOnly, nodePos, neighbor)));
                     continue;
                 }
                 if (visitedPipes.contains(neighbor)) continue;
@@ -197,7 +197,7 @@ public final class NetworkBuilder {
                             PipeGraphBuilder.nodeOf(nodePos),
                             PipeGraphBuilder.nodeOf(current),
                             length, capacity, friction,
-                            pipesInPath));
+                            buildPipeEntries(pipesInPath, nodePos, current)));
                 }
             }
         }
@@ -309,20 +309,19 @@ public final class NetworkBuilder {
                                                 Map<BlockPos, BlockPos> pumpPositions,
                                                 Map<BlockPos, EndpointData> endpoints,
                                                 SimNodeKind kind, SimConfig config) {
-        // Pump nodes get staticPressure = speed. This is the pump's contribution
-        // to Φ — it creates a real potential peak at the pump position, driving flow
-        // away on downstream edges. The check valve prevents backflow through the pump.
+        // Pump staticPressure in blocks-of-water-column via speedToHead.
+        // Same unit as tank head, so pumps and tanks are directly comparable in Φ.
         if (kind == SimNodeKind.PUMP) {
             BlockEntity be = level.getBlockEntity(pos);
             if (be instanceof KineticBlockEntity kbe) {
-                return Math.abs(kbe.getSpeed());
+                return Math.abs(kbe.getSpeed()) * config.speedToHead();
             }
             return 0;
         }
 
         // SOURCE nodes: tanks get dynamic pressure from fill level (ρ·G·fillHeight),
         // other endpoints (basins, drains) get 0 (gravity handled by Φ elevation term).
-        // Updated each tick by GravityFlowHandler.updateTankPressures.
+        // Updated each tick by FluidTransportHandler.updateTankPressures.
         if (kind == SimNodeKind.SOURCE) {
             var directBE = level.getBlockEntity(pos);
             if (directBE instanceof FluidTankBlockEntity tankBE) {
@@ -355,12 +354,11 @@ public final class NetworkBuilder {
                                        Map<BlockPos, BlockPos> pumpPositions,
                                        Map<BlockPos, EndpointData> endpoints,
                                        SimNodeKind kind, SimConfig config) {
-        // Pumps supply head = speed * multiplier (reach budget for downstream edges).
-        // The multiplier extends reach at low RPM without inflating staticPressure (which drives Φ/throughput).
+        // Pump head = RPM * speedToHead. Same unit as staticPressure and tank head.
         if (kind == SimNodeKind.PUMP) {
             BlockEntity be = level.getBlockEntity(pos);
             if (be instanceof KineticBlockEntity kbe) {
-                return Math.abs(kbe.getSpeed()) * config.pumpHeadMultiplier();
+                return Math.abs(kbe.getSpeed()) * config.speedToHead();
             }
             return config.defaultPumpHead();
         }
@@ -409,5 +407,37 @@ public final class NetworkBuilder {
 
     public static BlockPos posOf(NodeId node) {
         return PipeGraphBuilder.posOf(node);
+    }
+
+    /**
+     * Build PipeEntry list from ordered positions. Each entry gets the direction
+     * toward the previous position (from = toward A) and toward the next (to = toward B).
+     * @param nodeA position of node A (before the first pipe)
+     * @param nodeB position of node B (after the last pipe)
+     */
+    private static List<PipeEntry> buildPipeEntries(List<BlockPos> pipePositions,
+                                                     BlockPos nodeA, BlockPos nodeB) {
+        List<PipeEntry> entries = new ArrayList<>();
+        for (int i = 0; i < pipePositions.size(); i++) {
+            BlockPos pos = pipePositions.get(i);
+            BlockPos prev = (i > 0) ? pipePositions.get(i - 1) : nodeA;
+            BlockPos next = (i < pipePositions.size() - 1) ? pipePositions.get(i + 1) : nodeB;
+            Direction from = directionBetween(pos, prev);
+            Direction to = directionBetween(pos, next);
+            entries.add(new PipeEntry(pos, from, to));
+        }
+        return entries;
+    }
+
+    private static Direction directionBetween(BlockPos from, BlockPos to) {
+        int dx = to.getX() - from.getX();
+        int dy = to.getY() - from.getY();
+        int dz = to.getZ() - from.getZ();
+        // Return the dominant axis direction
+        if (Math.abs(dx) >= Math.abs(dy) && Math.abs(dx) >= Math.abs(dz))
+            return dx > 0 ? Direction.EAST : Direction.WEST;
+        if (Math.abs(dy) >= Math.abs(dz))
+            return dy > 0 ? Direction.UP : Direction.DOWN;
+        return dz > 0 ? Direction.SOUTH : Direction.NORTH;
     }
 }

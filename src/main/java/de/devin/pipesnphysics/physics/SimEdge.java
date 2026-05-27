@@ -1,6 +1,7 @@
 package de.devin.pipesnphysics.physics;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -9,8 +10,8 @@ import java.util.List;
  * An edge in the contracted fluid network. Represents a branch — a maximal
  * run of pipe cells between two nodes. Mutable: fluid state changes each tick.
  *
- * The column model tracks ordered fluid fronts from side a toward side b.
- * When two incompatible fronts meet mid-pipe, a collision is emitted.
+ * Pipes are ordered from node A toward node B. Each PipeEntry knows its
+ * connection faces (from=toward A, to=toward B).
  */
 public class SimEdge {
 
@@ -20,7 +21,7 @@ public class SimEdge {
     private final int length;
     private final int capacity;
     private final float resistance;
-    private final List<BlockPos> pipePositions;
+    private final List<PipeEntry> pipes;
     private final List<FluidFront> column;
 
     private EdgePhase phase = EdgePhase.EMPTY;
@@ -28,14 +29,14 @@ public class SimEdge {
     private NodeId upstreamNode = null;
 
     public SimEdge(int id, NodeId a, NodeId b, int length, int capacity,
-                   float resistance, List<BlockPos> pipePositions) {
+                   float resistance, List<PipeEntry> pipes) {
         this.id = id;
         this.a = a;
         this.b = b;
         this.length = length;
         this.capacity = capacity;
         this.resistance = resistance;
-        this.pipePositions = List.copyOf(pipePositions);
+        this.pipes = List.copyOf(pipes);
         this.column = new ArrayList<>();
     }
 
@@ -72,7 +73,8 @@ public class SimEdge {
     public int length() { return length; }
     public int capacity() { return capacity; }
     public float resistance() { return resistance; }
-    public List<BlockPos> pipePositions() { return pipePositions; }
+    public List<PipeEntry> pipes() { return pipes; }
+    public List<BlockPos> pipePositions() { return pipes.stream().map(PipeEntry::pos).toList(); }
     public List<FluidFront> column() { return column; }
 
     public int totalFill() {
@@ -173,8 +175,8 @@ public class SimEdge {
      * Map a fill fraction (0..1 along the edge) to a world BlockPos.
      */
     public BlockPos positionAt(float fraction) {
-        if (pipePositions.isEmpty()) return BlockPos.ZERO;
-        int index = Math.clamp((int) (fraction * pipePositions.size()), 0, pipePositions.size() - 1);
-        return pipePositions.get(index);
+        if (pipes.isEmpty()) return BlockPos.ZERO;
+        int index = Math.clamp((int) (fraction * pipes.size()), 0, pipes.size() - 1);
+        return pipes.get(index).pos();
     }
 }

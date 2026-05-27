@@ -7,14 +7,14 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.state.BlockState;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
-import de.devin.pipesnphysics.handler.GravityFlowHandler;
+import de.devin.pipesnphysics.handler.FluidTransportHandler;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 
 /**
  * Replaces Create's pump pressure distribution.
  * All flow logic (pressure, fluid transfer, gas support) is handled
- * by GravityFlowHandler's unified solver and transfer system.
+ * by FluidTransportHandler's unified solver and transfer system.
  */
 @Mixin(value = PumpBlockEntity.class, remap = false)
 public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
@@ -42,7 +42,7 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
         }
 
         BlockPos pipePos = worldPosition.relative(side);
-        GravityFlowHandler.clearCooldown(pipePos);
-        GravityFlowHandler.scheduleCheck(self.getLevel(), pipePos);
+        FluidTransportHandler.clearCooldown(pipePos);
+        FluidTransportHandler.scheduleCheck(self.getLevel(), pipePos);
     }
 }

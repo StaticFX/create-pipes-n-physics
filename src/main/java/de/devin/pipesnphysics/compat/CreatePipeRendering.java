@@ -15,181 +15,149 @@ import net.neoforged.neoforge.fluids.FluidStack;
 import java.util.Optional;
 
 /**
- * Translates the physics engine's SimResult into Create's pipe rendering model.
- * This is the only place that touches Create's FluidTransportBehaviour visual API
- * (addPressure, wipePressure). The physics engine itself never references these.
+ * Translates the physics engine's SimResult into Create's pipe rendering.
+ * Sets Flow objects directly on PipeConnections — Create's tick is cancelled
+ * for managed pipes (via GravityFlowMixin), so our Flow objects persist.
+ * No addPressure/wipePressure interaction at all.
  */
 public final class CreatePipeRendering {
 
-    /**
-     * Flag to prevent recursion: wipePressure → GravityFlowMixin.onWipePressure
-     * → scheduleCheck → applyVisuals → wipePressure.
-     */
-    public static volatile boolean suppressWipeReschedule = false;
-
-    /** Max progress per pipe — leaves a 1-pixel gap at the pipe end (15/16 of the block). */
+    /** Max progress per pipe — leaves a 1-pixel gap at the pipe end. */
     private static final float MAX_PIPE_PROGRESS = 15f / 16f;
 
     private CreatePipeRendering() {}
 
     /**
-     * Apply visual pressure to Create's pipe rendering based on sim flow rates.
-     * During CHARGING, fluid smoothly advances through each pipe block using
-     * sub-pipe fractional progress. FLOWING edges are fully filled.
+     * Set Flow objects on pipes based on simulation state.
+     * Create's tick is cancelled for these pipes, so flows persist until we clear them.
      */
     public static void applyVisuals(Level level, FluidNetwork network, SimResult result,
                                      FluidStack networkFluid) {
-        // Only use addPressure when all edges are FLOWING (circuit fully primed).
-        // While any edge is still CHARGING, addPressure on FLOWING edges triggers
-        // Create's wipe cycle which resets the CHARGING edges.
-        boolean allFlowing = network.edges().stream()
-                .allMatch(e -> e.phase() == EdgePhase.FLOWING);
+        for (int i = 0; i < network.edges().size(); i++) {
+            SimEdge edge = network.edges().get(i);
+            float rate = result.flowRates()[i];
+            int pipeCount = edge.pipePositions().size();
 
-        suppressWipeReschedule = true;
-        try {
-            for (int i = 0; i < network.edges().size(); i++) {
-                SimEdge edge = network.edges().get(i);
-                float rate = result.flowRates()[i];
-                int pipeCount = edge.pipePositions().size();
+            // Determine flow direction
+            boolean isCharging = edge.phase() == EdgePhase.CHARGING;
+            boolean isDraining = edge.phase() == EdgePhase.DRAINING;
+            boolean flowFromA;
 
-                // Determine flow direction (which end is upstream).
-                // During CHARGING rate=0, so derive from upstreamNode instead.
-                boolean isCharging = edge.phase() == EdgePhase.CHARGING;
-                boolean flowFromA;
-                if (isCharging && edge.upstreamNode() != null) {
-                    flowFromA = edge.upstreamNode().equals(edge.a());
-                } else {
-                    flowFromA = rate > 0;
+            if (isCharging || isDraining) {
+                flowFromA = edge.upstreamNode().equals(edge.a());
+            } else {
+                flowFromA = rate > 0;
+            }
+
+            float frontPos = Math.clamp(edge.frontPos(), 0f, edge.length());
+
+            boolean frontFromA = edge.upstreamNode() != null
+                    && edge.upstreamNode().equals(edge.a());
+            // During DRAINING, fluid recedes from the source end first (no more
+            // fluid coming in), leaving the sink end last. Flip the front direction.
+            if (isDraining) frontFromA = !frontFromA;
+
+            for (int pi = 0; pi < pipeCount; pi++) {
+                PipeEntry entry = edge.pipes().get(pi);
+                FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, entry.pos());
+                if (pipe == null) continue;
+
+                if (edge.isEmpty()
+                        || (rate == 0 && !isCharging && !isDraining
+                            && edge.phase() != EdgePhase.FLOWING)) {
+                    clearPipeFlows(pipe);
+                    continue;
                 }
 
-                // frontPos ranges 0..length (length == pipeCount).
-                // Each unit of frontPos corresponds to one pipe block.
-                float frontPos = Math.clamp(edge.frontPos(), 0f, edge.length());
-                boolean frontFromA = edge.upstreamNode() != null
-                        && edge.upstreamNode().equals(edge.a());
-
-                for (int pi = 0; pi < pipeCount; pi++) {
-                    BlockPos pos = edge.pipePositions().get(pi);
-                    FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, pos);
-                    if (pipe == null) continue;
-
-                    if (edge.isEmpty()
-                            || (rate == 0 && edge.phase() != EdgePhase.FLOWING
-                                         && edge.phase() != EdgePhase.CHARGING)) {
-                        clearPipeVisuals(pipe);
-                        continue;
-                    }
-
-                    // Compute fill progress for this pipe (0 = empty, MAX = full)
-                    float pipeProgress;
-                    if (!isCharging) {
-                        // FLOWING/STALLED: all pipes fully filled
+                // Compute fill progress for this pipe
+                float pipeProgress;
+                if (!isCharging && !isDraining) {
+                    pipeProgress = MAX_PIPE_PROGRESS;
+                } else {
+                    float dist = frontFromA ? pi : (pipeCount - 1 - pi);
+                    if (frontPos >= dist + 1) {
                         pipeProgress = MAX_PIPE_PROGRESS;
+                    } else if (frontPos > dist) {
+                        pipeProgress = (frontPos - dist) * MAX_PIPE_PROGRESS;
                     } else {
-                        // CHARGING: smooth per-pipe progress based on frontPos
-                        // "distance from upstream" for this pipe index
-                        float dist = frontFromA ? pi : (pipeCount - 1 - pi);
-                        if (frontPos >= dist + 1) {
-                            // Fully behind the front
-                            pipeProgress = MAX_PIPE_PROGRESS;
-                        } else if (frontPos > dist) {
-                            // Leading pipe — fractional fill
-                            pipeProgress = (frontPos - dist) * MAX_PIPE_PROGRESS;
-                        } else {
-                            // Ahead of front — empty
-                            pipeProgress = 0;
-                        }
+                        pipeProgress = 0;
                     }
+                }
 
-                    if (pipeProgress <= 0) {
-                        clearPipeVisuals(pipe);
-                        continue;
+                if (pipeProgress <= 0) {
+                    clearPipeFlows(pipe);
+                    continue;
+                }
+
+                float inboundProgress = Math.min(1.0f, pipeProgress * 2f);
+                float outboundProgress = Math.max(0f, (pipeProgress - 0.5f) * 2f);
+
+                // entry.from() = face toward A, entry.to() = face toward B
+                // When flowFromA: from-face is inbound (upstream), to-face is outbound
+                // When !flowFromA: to-face is inbound, from-face is outbound
+                Direction inboundDir = flowFromA ? entry.from() : entry.to();
+                Direction outboundDir = flowFromA ? entry.to() : entry.from();
+
+                PipeConnection inConn = pipe.getConnection(inboundDir);
+                PipeConnection outConn = pipe.getConnection(outboundDir);
+
+                if (!networkFluid.isEmpty()) {
+                    boolean changed = false;
+                    if (inConn != null && inboundProgress > 0) {
+                        changed |= setFlow(inConn, true, networkFluid, inboundProgress);
                     }
-
-                    // Apply pressure and flow on connected faces
-                    float pressure = Math.max(1, Math.abs(rate));
-                    boolean needsPressure = !pipe.hasAnyPressure();
-
-                    BlockPos prevPos = (pi > 0)
-                            ? edge.pipePositions().get(pi - 1)
-                            : PipeGraphBuilder.posOf(edge.a());
-                    BlockPos nextPos = (pi < pipeCount - 1)
-                            ? edge.pipePositions().get(pi + 1)
-                            : PipeGraphBuilder.posOf(edge.b());
-
-                    // Create renders each pipe as two halves: inbound (face→center)
-                    // and outbound (center→face). To show smooth end-to-end fill,
-                    // fill the inbound half first, then the outbound half.
-                    float inboundProgress = Math.min(1.0f, pipeProgress * 2f);
-                    float outboundProgress = Math.max(0f, (pipeProgress - 0.5f) * 2f);
-
-                    for (Direction dir : Direction.values()) {
-                        PipeConnection conn = pipe.getConnection(dir);
-                        if (conn == null) continue;
-                        BlockPos neighbor = pos.relative(dir);
-
-                        boolean isUpstreamFace;
-                        if (neighbor.equals(prevPos)) {
-                            isUpstreamFace = flowFromA;
-                        } else if (neighbor.equals(nextPos)) {
-                            isUpstreamFace = !flowFromA;
-                        } else {
-                            continue;
-                        }
-
-                        // Only addPressure when the entire network is FLOWING.
-                        // Any addPressure while edges are still CHARGING triggers
-                        // Create's wipe cycle that resets charging progress.
-                        if (needsPressure && isUpstreamFace && allFlowing) {
-                            pipe.addPressure(dir, true, pressure);
-                        }
-
-                        if (!networkFluid.isEmpty()) {
-                            // Upstream face: inbound flow (renders face→center)
-                            // Downstream face: outbound flow (renders center→face)
-                            float faceProgress = isUpstreamFace ? inboundProgress : outboundProgress;
-                            if (faceProgress > 0) {
-                                setFlowOnConnection(conn, isUpstreamFace, networkFluid, faceProgress);
-                            }
-                        }
+                    if (outConn != null && outboundProgress > 0) {
+                        changed |= setFlow(outConn, false, networkFluid, outboundProgress);
                     }
+                    if (changed) pipe.blockEntity.notifyUpdate();
                 }
             }
-        } finally {
-            suppressWipeReschedule = false;
         }
     }
 
-    /**
-     * Clear pressure from a pipe so it renders as empty.
-     */
-    private static void clearPipeVisuals(FluidTransportBehaviour pipe) {
-        if (pipe.hasAnyPressure()) pipe.wipePressure();
-    }
-
-    /**
-     * Set or update the Flow object on a pipe connection.
-     * Progress controls how far the fluid extends into this pipe (0..MAX_PIPE_PROGRESS).
-     * Always corrects the inbound direction (addPressure may have set it wrong).
-     */
-    private static void setFlowOnConnection(PipeConnection conn, boolean inbound,
-                                             FluidStack fluid, float progress) {
-        if (!(conn instanceof PipeConnectionAccessor accessor)) return;
+    /** Set or update Flow on a connection. Returns true if state changed. */
+    private static boolean setFlow(PipeConnection conn, boolean inbound,
+                                    FluidStack fluid, float progress) {
+        if (!(conn instanceof PipeConnectionAccessor accessor)) return false;
         Optional<PipeConnection.Flow> current = accessor.pipesnphysics$getFlow();
         if (current.isEmpty()) {
             PipeConnection.Flow flow = conn.new Flow(inbound, fluid.copy());
             flow.progress.setValue(progress);
             flow.complete = progress >= MAX_PIPE_PROGRESS;
             accessor.pipesnphysics$setFlow(Optional.of(flow));
+            return true;
         } else {
             PipeConnection.Flow flow = current.get();
-            // Always correct direction (addPressure uses uniform inbound, we fix it here)
+            boolean changed = flow.inbound != inbound;
             flow.inbound = inbound;
             if (Math.abs(flow.progress.getValue() - progress) > 0.01f) {
                 flow.progress.setValue(progress);
                 flow.complete = progress >= MAX_PIPE_PROGRESS;
+                changed = true;
+            }
+            return changed;
+        }
+    }
+
+    /** Clear Flow from a connection. Returns true if something was cleared. */
+    private static boolean clearFlow(PipeConnection conn) {
+        if (conn instanceof PipeConnectionAccessor accessor) {
+            if (accessor.pipesnphysics$getFlow().isPresent()) {
+                accessor.pipesnphysics$setFlow(Optional.empty());
+                return true;
             }
         }
+        return false;
+    }
+
+    /** Clear all flows from a pipe, syncing to client if anything changed. */
+    private static void clearPipeFlows(FluidTransportBehaviour pipe) {
+        boolean changed = false;
+        for (Direction dir : Direction.values()) {
+            PipeConnection conn = pipe.getConnection(dir);
+            if (conn != null) changed |= clearFlow(conn);
+        }
+        if (changed) pipe.blockEntity.notifyUpdate();
     }
 
     /**
