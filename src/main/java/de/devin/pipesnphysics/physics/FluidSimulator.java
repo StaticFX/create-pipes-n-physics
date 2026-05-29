@@ -45,10 +45,9 @@ public final class FluidSimulator {
 
             switch (edge.phase()) {
                 case EMPTY -> tickEmpty(net, edge, i, fluids);
-                case CHARGING -> tickCharging(net, edge, i, fluid);
+                case CHARGING, DRAINING -> tickFront(net, edge, i, fluid);
                 case STALLED -> tickStalled(net, edge, i, fluid);
                 case FLOWING -> tickFlowing(net, edge, i, fluid);
-                case DRAINING -> tickDraining(net, edge, i);
             }
         }
 
@@ -99,6 +98,7 @@ public final class FluidSimulator {
         // 2. Non-pump SOURCE nodes (tanks, etc.) — only if they have head.
         //    If the other end is a pump, only charge if we're on the pump's PULL side
         //    (feeding the intake). Don't charge on the push side (that's reverse flow).
+        //    The Φ gate is checked per candidate so both directions are tried.
         if (feedNode == null) {
             for (NodeId nodeId : List.of(edge.a(), edge.b())) {
                 SimNode node = net.node(nodeId);
@@ -108,15 +108,21 @@ public final class FluidSimulator {
                 // If other end is a pump: only allow if we're on its pull side
                 if (otherSim != null && otherSim.kind() == SimNodeKind.PUMP
                         && otherSim.pushSidePos() != null) {
-                    // isPushSide(pump, us) = pump pushes toward us = we're the push target = reverse
                     if (isPushSide(otherSim, nodeId)) continue;
                 }
-                if (node.kind() == SimNodeKind.SOURCE && net.headAt(nodeId) > 0) {
-                    feedNode = nodeId;
-                    otherNode = other;
-                    break;
-                }
-                if (node.kind() == SimNodeKind.JUNCTION && net.headAt(nodeId) > 0) {
+                if ((node.kind() == SimNodeKind.SOURCE || node.kind() == SimNodeKind.JUNCTION)
+                        && net.headAt(nodeId) > 0) {
+                    // Gate: SOURCE must have fluid
+                    if (node.kind() == SimNodeKind.SOURCE && node.staticPressure() <= 0) continue;
+                    // Gate: feed Φ must exceed other Φ (prevents wrong-direction charging)
+                    boolean pumpInvolved = (otherSim != null && otherSim.kind() == SimNodeKind.PUMP);
+                    if (!pumpInvolved && otherSim != null) {
+                        float feedPhi = node.staticPressure()
+                                + config.G() * (float) node.elevation();
+                        float otherPhi = otherSim.staticPressure()
+                                + config.G() * (float) otherSim.elevation();
+                        if (feedPhi - otherPhi <= config.EPS()) continue;
+                    }
                     feedNode = nodeId;
                     otherNode = other;
                     break;
@@ -125,28 +131,6 @@ public final class FluidSimulator {
         }
 
         if (feedNode == null) return;
-
-        // Gates to prevent the EMPTY→CHARGING→FLOWING→DRAINING→EMPTY loop:
-        // 1. Non-pump SOURCE must have fluid (staticPressure > 0).
-        // 2. For gravity edges (no pump involved), feed's head must exceed the cost to
-        //    reach the other end. This prevents a full sink at low elevation from
-        //    charging back toward an empty source at high elevation.
-        SimNode feedSim = net.node(feedNode);
-        if (feedSim != null && feedSim.kind() == SimNodeKind.SOURCE
-                && feedSim.staticPressure() <= 0) {
-            return;
-        }
-        SimNode otherSim = net.node(otherNode);
-        boolean pumpInvolved = (feedSim != null && feedSim.kind() == SimNodeKind.PUMP)
-                || (otherSim != null && otherSim.kind() == SimNodeKind.PUMP);
-        if (!pumpInvolved && feedSim != null && otherSim != null) {
-            // Use elevation-based Φ: a SOURCE at low elevation should not charge uphill
-            float feedElev = (float) feedSim.elevation();
-            float otherElev = (float) otherSim.elevation();
-            float feedPhi = feedSim.staticPressure() + config.G() * feedElev;
-            float otherPhi = otherSim.staticPressure() + config.G() * otherElev;
-            if (feedPhi - otherPhi <= config.EPS()) return;
-        }
 
         String fluidId = findFluidAtNode(net, feedNode, fluids);
         if (fluidId != null) {
@@ -157,103 +141,138 @@ public final class FluidSimulator {
         }
     }
 
-    private void tickCharging(FluidNetwork net, SimEdge edge, int idx, SimFluid fluid) {
+    /**
+     * Unified CHARGING / DRAINING tick. Both phases use the same ΔΦ-driven
+     * speed — CHARGING advances the front, DRAINING recedes it.
+     */
+    private void tickFront(FluidNetwork net, SimEdge edge, int idx, SimFluid fluid) {
         if (fluid == null) { edge.setPhase(EdgePhase.EMPTY); return; }
 
+        boolean draining = edge.phase() == EdgePhase.DRAINING;
+
+        SimNode nodeA = net.node(edge.a());
+        SimNode nodeB = net.node(edge.b());
+        float phiA = computePhiForEdge(net, nodeA, edge.b(), fluid);
+        float phiB = computePhiForEdge(net, nodeB, edge.a(), fluid);
+        float deltaPhi = phiA - phiB;
+
+        // Charging: speed from ΔΦ (pressure difference drives the front).
+        // Draining: speed from the higher endpoint's absolute pressure — the
+        // pipe empties at a rate proportional to how pressurised the system is,
+        // not the near-zero ΔΦ that triggered the drain.
+        float drive = draining
+                ? Math.max(nodeA.staticPressure(), nodeB.staticPressure())
+                : Math.abs(deltaPhi);
+        float speed = config.frontK() * Math.max(drive, config.EPS()) / fluid.viscosity();
+
+        if (draining) {
+            edge.setFrontPos(Math.max(0, edge.frontPos() - speed));
+            edge.advanceVisualFront(-speed);
+            net.setFlowRate(idx, 0);
+
+            if (edge.visualFrontPos() <= 0) {
+                edge.setPhase(EdgePhase.EMPTY);
+                edge.setFrontPos(0);
+                edge.resetVisualFront();
+                edge.setUpstreamNode(null);
+                edge.setPrimaryFluid(null);
+            }
+            return;
+        }
+
+        // --- CHARGING ---
         NodeId upstream = edge.upstreamNode();
         if (upstream == null) { edge.setPhase(EdgePhase.EMPTY); return; }
 
-        SimNode upNode = net.node(upstream);
-        float headAtUpstream = net.headAt(upstream);
+        boolean primed = net.flowRate(idx) != 0;
 
-        // Head at the advancing front: subtract friction and gravity cost to frontPos
-        float frictionToFront = config.frictionPerBlock() * edge.frontPos();
-        float gravityToFront = 0;
-        if (edge.length() > 0) {
-            SimNode downNode = net.node(edge.downstreamNode());
-            if (downNode != null) {
-                float fracAdvanced = edge.frontPos() / edge.length();
-                float elevAtFront = (float) (upNode.elevation()
-                        + (downNode.elevation() - upNode.elevation()) * fracAdvanced);
-                gravityToFront = fluid.phase().sign() * fluid.density() * config.G()
-                        * (elevAtFront - (float) upNode.elevation());
+        if (primed && Math.abs(deltaPhi) <= config.EPS()) {
+            edge.setPhase(EdgePhase.DRAINING);
+            net.setFlowRate(idx, 0);
+            return;
+        }
+
+        edge.setFrontPos(edge.frontPos() + speed);
+        edge.advanceVisualFront(speed);
+
+        if (primed) {
+            float Q = computeQ(net, fluid, deltaPhi);
+            float newRate = Math.signum(deltaPhi) * Q;
+
+            if (Math.signum(newRate) != Math.signum(net.flowRate(idx))) {
+                edge.setUpstreamNode(newRate > 0 ? edge.a() : edge.b());
+                edge.resetVisualFront();
+                edge.setFrontPos(0);
             }
-        }
 
-        float headAtFront = headAtUpstream - frictionToFront - gravityToFront;
-
-        // Front always advances (visual priming). Speed scales with available head,
-        // with a minimum base advance so pipes always visually prime.
-        // Reach is checked at FLOWING time, not during the visual front advance.
-        float v;
-        if (headAtFront > 0) {
-            v = config.frontK() * headAtFront / fluid.viscosity();
+            net.setFlowRate(idx, newRate);
         } else {
-            // Base advance: slow crawl even past the head limit (visual only, no real flow)
-            v = config.frontK() * 0.1f / fluid.viscosity();
+            net.setFlowRate(idx, 0);
         }
-        edge.setFrontPos(edge.frontPos() + v);
 
-        // Pipes don't hold real inventory — frontPos is purely visual/timing.
-        // Conservation happens at boundary handlers only.
-        String fluidId = edge.primaryFluid();
-
-        // CHARGING has zero through-flow (spec §5.1) — the circuit isn't complete yet.
-        // Transfer only starts once all edges transition to FLOWING.
-        net.setFlowRate(idx, 0);
-
-        // Check if front reached the downstream end
         if (edge.frontPos() >= edge.length()) {
-            edge.setFrontPos(edge.length());
+            float excess = edge.frontPos() - edge.length();
+            String fluidId = edge.primaryFluid();
 
             NodeId downstream = edge.downstreamNode();
             if (downstream == null) return;
-
             SimNode downNode = net.node(downstream);
             if (downNode == null) return;
 
-            if (downNode.kind() == SimNodeKind.DEAD_END) {
+            if (downNode.kind() == SimNodeKind.DEAD_END || isClosedPump(downNode)) {
                 edge.setPhase(EdgePhase.STALLED);
-            } else if (isClosedPump(downNode)) {
-                edge.setPhase(EdgePhase.STALLED);
-            } else {
-                // Reached a valid node (SOURCE, PUMP, JUNCTION).
-                // This edge is now primed — transition to FLOWING.
-                // Flow rate computed next tick by normal tickFlowing dispatch.
-                edge.setPhase(EdgePhase.FLOWING);
+                return;
+            }
 
-                // If the downstream is a pass-through (PUMP/JUNCTION), also
-                // start charging the next edges in the path.
-                if (downNode.kind() == SimNodeKind.PUMP
-                        || downNode.kind() == SimNodeKind.JUNCTION) {
-                    for (int downEdgeIdx : net.edgesAt(downstream)) {
-                        SimEdge downEdge = net.edges().get(downEdgeIdx);
-                        if (downEdge == edge) continue;
-                        if (downEdge.phase() == EdgePhase.EMPTY) {
-                            downEdge.setPhase(EdgePhase.CHARGING);
-                            downEdge.setUpstreamNode(downstream);
-                            downEdge.setFrontPos(0);
-                            if (fluidId != null) {
-                                downEdge.setPrimaryFluid(fluidId);
-                            }
-                        }
+            if (Math.abs(deltaPhi) > config.EPS()) {
+                net.setFlowRate(idx, Math.signum(deltaPhi) * computeQ(net, fluid, deltaPhi));
+                edge.setFrontPos(excess);
+            } else {
+                net.setFlowRate(idx, 0);
+                edge.setPhase(EdgePhase.DRAINING);
+            }
+
+            if (downNode.kind() == SimNodeKind.PUMP || downNode.kind() == SimNodeKind.JUNCTION) {
+                for (int downEdgeIdx : net.edgesAt(downstream)) {
+                    SimEdge downEdge = net.edges().get(downEdgeIdx);
+                    if (downEdge == edge) continue;
+                    if (downEdge.phase() == EdgePhase.EMPTY) {
+                        downEdge.setPhase(EdgePhase.CHARGING);
+                        downEdge.setUpstreamNode(downstream);
+                        downEdge.setFrontPos(0);
+                        if (fluidId != null) downEdge.setPrimaryFluid(fluidId);
                     }
                 }
             }
         }
     }
 
+    private float computeQ(FluidNetwork net, SimFluid fluid, float deltaPhi) {
+        float Q = Math.clamp(
+                (config.conductance() / fluid.viscosity()) * Math.abs(deltaPhi),
+                0, config.maxFlow());
+
+        for (SimNode n : net.nodes().values()) {
+            if (n.kind() == SimNodeKind.PUMP && n.staticPressure() > 0) {
+                float rpm = n.staticPressure() / config.speedToHead();
+                float pumpQ = Math.min(rpm * config.flowPerRPM(), config.maxFlow());
+                Q = Math.max(Q, pumpQ);
+                break;
+            }
+        }
+        return Q;
+    }
+
     private void tickStalled(FluidNetwork net, SimEdge edge, int idx, SimFluid fluid) {
         if (fluid == null) return;
-        NodeId upstream = edge.upstreamNode();
-        if (upstream == null) return;
 
-        // Recheck if head is now available (e.g. booster placed)
-        SimNode upNode = net.node(upstream);
-        float headAtUpstream = net.headAt(upstream);
-        float frictionToFront = config.frictionPerBlock() * edge.frontPos();
+        SimNode nodeA = net.node(edge.a());
+        SimNode nodeB = net.node(edge.b());
+        if (nodeA == null || nodeB == null) return;
 
-        if (headAtUpstream - frictionToFront > 0) {
+        float phiA = computePhiForEdge(net, nodeA, edge.b(), fluid);
+        float phiB = computePhiForEdge(net, nodeB, edge.a(), fluid);
+        if (Math.abs(phiA - phiB) > config.EPS()) {
             edge.setPhase(EdgePhase.CHARGING);
         }
 
@@ -314,18 +333,6 @@ public final class FluidSimulator {
         net.setFlowRate(idx, Math.signum(deltaPhi) * Q);
     }
 
-    private void tickDraining(FluidNetwork net, SimEdge edge, int idx) {
-        // Pipes don't hold real inventory — just transition back to EMPTY.
-        // The visual "draining" is handled by frontPos receding in the renderer.
-        edge.setFrontPos(Math.max(0, edge.frontPos() - 1));
-        if (edge.frontPos() <= 0) {
-            edge.setPhase(EdgePhase.EMPTY);
-            edge.setFrontPos(0);
-            edge.setUpstreamNode(null);
-            edge.setPrimaryFluid(null);
-        }
-        net.setFlowRate(idx, 0);
-    }
 
     // -- Helpers --
 

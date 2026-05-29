@@ -12,6 +12,9 @@ import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
 import net.neoforged.neoforge.fluids.FluidStack;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import java.util.Optional;
 
 /**
@@ -22,10 +25,49 @@ import java.util.Optional;
  */
 public final class CreatePipeRendering {
 
+    private static final Logger LOGGER = LogManager.getLogger();
+
     /** Max progress per pipe — leaves a 1-pixel gap at the pipe end. */
     private static final float MAX_PIPE_PROGRESS = 15f / 16f;
 
     private CreatePipeRendering() {}
+
+    // ---- Per-pipe progress helpers ----
+
+    /**
+     * Compute visual fill progress for a single pipe based on the fluid front
+     * position. Pipes behind the front are fully filled, the pipe AT the front
+     * is partially filled, and pipes ahead of the front are empty.
+     *
+     * @param frontPos   how far the front has advanced (0..edgeLength)
+     * @param pipeIndex  this pipe's index in the edge (0-based, ordered A→B)
+     * @param pipeCount  total number of pipes in the edge
+     * @param frontFromA true if the front advances from node A toward node B
+     * @return fill progress in the range 0..MAX_PIPE_PROGRESS
+     */
+    static float pipeProgressFromFront(float frontPos, int pipeIndex,
+                                       int pipeCount, boolean frontFromA) {
+        float dist = frontFromA ? pipeIndex : (pipeCount - 1 - pipeIndex);
+        if (frontPos >= dist + 1) return MAX_PIPE_PROGRESS;
+        if (frontPos > dist) return (frontPos - dist) * MAX_PIPE_PROGRESS;
+        return 0;
+    }
+
+    /**
+     * Source-side connection progress. Fills first: 0→1 covers face→center.
+     */
+    static float sourceSideProgress(float pipeProgress) {
+        return Math.min(1.0f, pipeProgress * 2f);
+    }
+
+    /**
+     * Exit-side connection progress. Fills second (after source reaches center).
+     */
+    static float exitSideProgress(float pipeProgress) {
+        return Math.max(0f, (pipeProgress - 0.5f) * 2f);
+    }
+
+    // ---- Main visual application ----
 
     /**
      * Set Flow objects on pipes based on simulation state.
@@ -49,13 +91,18 @@ public final class CreatePipeRendering {
                 flowFromA = rate > 0;
             }
 
-            float frontPos = Math.clamp(edge.frontPos(), 0f, edge.length());
+            // Use visualFrontPos for rendering — it only advances during CHARGING
+            // (no cycling reset), so pipes stay filled once the front passes them.
+            float frontPos = Math.clamp(edge.visualFrontPos(), 0f, edge.length());
 
             boolean frontFromA = edge.upstreamNode() != null
                     && edge.upstreamNode().equals(edge.a());
-            // During DRAINING, fluid recedes from the source end first (no more
-            // fluid coming in), leaving the sink end last. Flip the front direction.
-            if (isDraining) frontFromA = !frontFromA;
+            if (isDraining) {
+                // Flip within-pipe direction so fluid drains forward (out the exit)
+                flowFromA = !flowFromA;
+                // Flip pipe order so source-end pipes empty first
+                frontFromA = !frontFromA;
+            }
 
             for (int pi = 0; pi < pipeCount; pi++) {
                 PipeEntry entry = edge.pipes().get(pi);
@@ -69,19 +116,14 @@ public final class CreatePipeRendering {
                     continue;
                 }
 
-                // Compute fill progress for this pipe
+                // Compute per-pipe fill progress from the front position.
+                // CHARGING/DRAINING: front tracks which pipe the fluid is in.
+                // FLOWING (fallback): all pipes fully filled.
                 float pipeProgress;
-                if (!isCharging && !isDraining) {
-                    pipeProgress = MAX_PIPE_PROGRESS;
+                if (isCharging || isDraining) {
+                    pipeProgress = pipeProgressFromFront(frontPos, pi, pipeCount, frontFromA);
                 } else {
-                    float dist = frontFromA ? pi : (pipeCount - 1 - pi);
-                    if (frontPos >= dist + 1) {
-                        pipeProgress = MAX_PIPE_PROGRESS;
-                    } else if (frontPos > dist) {
-                        pipeProgress = (frontPos - dist) * MAX_PIPE_PROGRESS;
-                    } else {
-                        pipeProgress = 0;
-                    }
+                    pipeProgress = MAX_PIPE_PROGRESS;
                 }
 
                 if (pipeProgress <= 0) {
@@ -89,31 +131,44 @@ public final class CreatePipeRendering {
                     continue;
                 }
 
-                float inboundProgress = Math.min(1.0f, pipeProgress * 2f);
-                float outboundProgress = Math.max(0f, (pipeProgress - 0.5f) * 2f);
+                float srcProgress = sourceSideProgress(pipeProgress);
+                float exitProgress = exitSideProgress(pipeProgress);
 
-                // entry.from() = face toward A, entry.to() = face toward B
-                // When flowFromA: from-face is inbound (upstream), to-face is outbound
-                // When !flowFromA: to-face is inbound, from-face is outbound
-                Direction inboundDir = flowFromA ? entry.from() : entry.to();
-                Direction outboundDir = flowFromA ? entry.to() : entry.from();
+                Direction srcDir = flowFromA ? entry.from() : entry.to();
+                Direction exitDir = flowFromA ? entry.to() : entry.from();
 
-                PipeConnection inConn = pipe.getConnection(inboundDir);
-                PipeConnection outConn = pipe.getConnection(outboundDir);
+                PipeConnection srcConn = pipe.getConnection(srcDir);
+                PipeConnection exitConn = pipe.getConnection(exitDir);
+
+                if (level.getGameTime() % 40 == 0) {
+                    LOGGER.info("[SRV] pipe={} pipeProgress={} src={} srcDir={} srcConn={} exit={} exitDir={} exitConn={}",
+                            entry.pos(), pipeProgress, srcProgress, srcDir, srcConn != null,
+                            exitProgress, exitDir, exitConn != null);
+                }
 
                 if (!networkFluid.isEmpty()) {
                     boolean changed = false;
-                    if (inConn != null && inboundProgress > 0) {
-                        changed |= setFlow(inConn, true, networkFluid, inboundProgress);
+                    if (srcConn != null) {
+                        if (srcProgress > 0) {
+                            changed |= setFlow(srcConn, true, networkFluid, srcProgress);
+                        } else {
+                            changed |= clearFlow(srcConn);
+                        }
                     }
-                    if (outConn != null && outboundProgress > 0) {
-                        changed |= setFlow(outConn, false, networkFluid, outboundProgress);
+                    if (exitConn != null) {
+                        if (exitProgress > 0) {
+                            changed |= setFlow(exitConn, false, networkFluid, exitProgress);
+                        } else {
+                            changed |= clearFlow(exitConn);
+                        }
                     }
                     if (changed) pipe.blockEntity.notifyUpdate();
                 }
             }
         }
     }
+
+    // ---- Flow object management ----
 
     /** Set or update Flow on a connection. Returns true if state changed. */
     private static boolean setFlow(PipeConnection conn, boolean inbound,
@@ -122,7 +177,9 @@ public final class CreatePipeRendering {
         Optional<PipeConnection.Flow> current = accessor.pipesnphysics$getFlow();
         if (current.isEmpty()) {
             PipeConnection.Flow flow = conn.new Flow(inbound, fluid.copy());
-            flow.progress.setValue(progress);
+            // startWithValue sets BOTH previous and current — no interpolation
+            // artifacts on the first frame, and correct NBT serialization.
+            flow.progress.startWithValue(progress);
             flow.complete = progress >= MAX_PIPE_PROGRESS;
             accessor.pipesnphysics$setFlow(Optional.of(flow));
             return true;
@@ -130,9 +187,10 @@ public final class CreatePipeRendering {
             PipeConnection.Flow flow = current.get();
             boolean changed = flow.inbound != inbound;
             flow.inbound = inbound;
-            if (Math.abs(flow.progress.getValue() - progress) > 0.01f) {
-                flow.progress.setValue(progress);
-                flow.complete = progress >= MAX_PIPE_PROGRESS;
+            float old = (float) flow.progress.getValue();
+            flow.progress.startWithValue(progress);
+            flow.complete = progress >= MAX_PIPE_PROGRESS;
+            if (Math.abs(old - progress) > 0.001f) {
                 changed = true;
             }
             return changed;

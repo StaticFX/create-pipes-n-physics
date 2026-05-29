@@ -26,6 +26,8 @@ public class SimEdge {
 
     private EdgePhase phase = EdgePhase.EMPTY;
     private float frontPos = 0;
+    /** Visual front that only advances (never resets on cycle). Used by rendering. */
+    private float visualFrontPos = 0;
     private NodeId upstreamNode = null;
 
     public SimEdge(int id, NodeId a, NodeId b, int length, int capacity,
@@ -48,6 +50,13 @@ public class SimEdge {
 
     public float frontPos() { return frontPos; }
     public void setFrontPos(float frontPos) { this.frontPos = frontPos; }
+
+    /** Visual front — only advances during CHARGING, recedes during DRAINING. */
+    public float visualFrontPos() { return visualFrontPos; }
+    public void advanceVisualFront(float v) {
+        this.visualFrontPos = Math.clamp(this.visualFrontPos + v, 0, this.length);
+    }
+    public void resetVisualFront() { this.visualFrontPos = 0; }
 
     public NodeId upstreamNode() { return upstreamNode; }
     public void setUpstreamNode(NodeId upstream) { this.upstreamNode = upstream; }

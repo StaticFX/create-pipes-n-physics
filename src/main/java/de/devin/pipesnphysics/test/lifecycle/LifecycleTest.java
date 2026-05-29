@@ -39,8 +39,8 @@ public class LifecycleTest {
             LifecycleAssertions.awaitCharging(helper, src, 100, () -> {
                 Assertions.assertTankFill(helper, src, 8000, "No transfer during CHARGING");
 
-                LifecycleAssertions.awaitAllFlowing(helper, src, 2000, () -> {
-                    Assertions.assertTankAbove(helper, src, 7000, "Source mostly full after charging");
+                LifecycleAssertions.awaitCircuitPrimed(helper, src, 2000, () -> {
+                    Assertions.assertTankAbove(helper, src, 7000, "Source mostly full after priming");
 
                     LifecycleAssertions.awaitSinkReceiving(helper, dst, src, 200, () -> {
                         Assertions.assertConservation(helper, src, dst, 8000);

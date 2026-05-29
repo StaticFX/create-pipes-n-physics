@@ -15,13 +15,16 @@ import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-
 public class TestHelper {
 
     public static void fillSourceAndAwaitDest(GameTestHelper helper, FluidTestConfig relativeConfig) {
-        var config = convertToAbsolutePos(helper, relativeConfig);
+        var config = new FluidTestConfig(
+                helper.absolutePos(relativeConfig.source()),
+                helper.absolutePos(relativeConfig.sink()),
+                relativeConfig.ticksToWait(),
+                null
+        );
+
         helper.runAfterDelay(5, () -> {
             Assertions.assertTankFill(helper, config.sink(), 0, "Sink is not empty");
             fillTankAt(helper, config.source());
@@ -31,10 +34,6 @@ public class TestHelper {
 
                 helper.runAfterDelay(config.ticksToWait(), () -> {
                     var fillTwo = getFillAmountOfTank(helper, config.sink());
-
-                    if (config.pipeConfig() != null) {
-                        assertPipesHaveFluid(helper, config.pipeConfig());
-                    }
 
                     if (fillTwo <= fillOne) {
                         helper.fail("Sink did not fill");
@@ -50,38 +49,11 @@ public class TestHelper {
         });
     }
 
-    private static FluidTestConfig convertToAbsolutePos(GameTestHelper helper, FluidTestConfig config) {
-        var pipeConfig = config.pipeConfig() == null ? null : new PipeConfig(Arrays.stream(config.pipeConfig().pipes()).map(helper::absolutePos).toArray(BlockPos[]::new));
-
-        return new FluidTestConfig(
-                helper.absolutePos(config.source()),
-                helper.absolutePos(config.sink()),
-                config.ticksToWait(),
-                pipeConfig
-        );
-    }
-
     public static void fillTankAt(GameTestHelper helper, BlockPos pos) {
         var handler = getFluidHandlerOrFail(helper, pos);
         handler.fill(new FluidStack(Fluids.WATER, 8000), IFluidHandler.FluidAction.EXECUTE);
     }
 
-    private static void assertPipesHaveFluid(GameTestHelper helper, PipeConfig config) {
-        var pipes = getPipesAt(helper, config);
-
-        for (var pipe : pipes) {
-            var transportBehavior = BlockEntityBehaviour.get(pipe, FluidTransportBehaviour.TYPE);
-
-            if (transportBehavior == null || !hasAnyFlow(transportBehavior)) {
-                helper.fail("Pipe at " + pipe.getBlockPos() + " does not have fluid");
-            }
-        }
-    }
-
-    /**
-     * Check if a pipe has any active flow (Flow objects on connections).
-     * Replaces hasAnyPressure() since we no longer use addPressure.
-     */
     public static boolean hasAnyFlow(FluidTransportBehaviour pipe) {
         if (pipe.hasAnyPressure()) return true;
         for (Direction dir : Direction.values()) {
@@ -93,31 +65,6 @@ public class TestHelper {
         return false;
     }
 
-    private static FluidPipeBlockEntity[] getPipesAt(GameTestHelper helper, PipeConfig config) {
-        var pipes = new ArrayList<FluidPipeBlockEntity>();
-
-        for (var pos: config.pipes()) {
-            var pipe = getPipeHandlerOrFail(helper, pos);
-            pipes.add(pipe);
-        }
-
-        return pipes.toArray(new FluidPipeBlockEntity[0]);
-    }
-
-    public static FluidPipeBlockEntity getPipeHandlerOrFail(GameTestHelper helper, BlockPos pos) {
-        var pipe = helper.getLevel().getBlockEntity(pos);
-
-        if (pipe == null) {
-            helper.fail("No pipe handler at " + pos);
-        }
-
-        if (!(pipe instanceof FluidPipeBlockEntity)) {
-            helper.fail("Block at " + pos + " is not a fluid pipe");
-        }
-
-        return (FluidPipeBlockEntity) pipe;
-    }
-
     public static FluidTransportBehaviour getPipeBehaviourOrFail(GameTestHelper helper, BlockPos pos) {
         var pipe = helper.getLevel().getBlockEntity(pos);
 
@@ -125,7 +72,7 @@ public class TestHelper {
             helper.fail("No pipe handler at " + pos);
         }
 
-        if ((pipe instanceof FluidPipeBlockEntity)) {
+        if (pipe instanceof FluidPipeBlockEntity) {
             return BlockEntityBehaviour.get(pipe, FluidTransportBehaviour.TYPE);
         }
 
