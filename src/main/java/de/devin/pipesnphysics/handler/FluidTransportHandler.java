@@ -179,19 +179,25 @@ public class FluidTransportHandler {
         FluidSimulator simulator = new FluidSimulator(config);
         SimResult result = simulator.tick(network, fluids);
 
-        // Compute bottleneck: min of all edge rates, but ONLY if the entire circuit
-        // is primed (all edges FLOWING). Transfer doesn't start until the charging
-        // visual has completed across every edge in the network.
+        // Compute bottleneck: min of all non-zero edge rates across active edges.
+        // Transfer starts once every edge in the circuit has completed at least one
+        // charging cycle (i.e. has a non-zero flow rate). An active edge with rate=0
+        // means its front hasn't reached the far end yet — circuit is incomplete.
         float bottleneck = 0;
-        boolean allFlowing = !network.edges().isEmpty()
-                && network.edges().stream().allMatch(e -> e.phase() == EdgePhase.FLOWING);
-        if (allFlowing) {
+        boolean circuitComplete = !network.edges().isEmpty();
+        if (circuitComplete) {
             bottleneck = Float.MAX_VALUE;
-            for (float rate : result.flowRates()) {
-                float abs = Math.abs(rate);
+            for (int i = 0; i < network.edges().size(); i++) {
+                SimEdge edge = network.edges().get(i);
+                if (edge.phase() == EdgePhase.EMPTY || edge.phase() == EdgePhase.DRAINING) {
+                    circuitComplete = false;
+                    break;
+                }
+                float abs = Math.abs(result.flowRates()[i]);
+                if (abs == 0) { circuitComplete = false; break; }
                 if (abs < bottleneck) bottleneck = abs;
             }
-            if (bottleneck == Float.MAX_VALUE) bottleneck = 0;
+            if (!circuitComplete || bottleneck == Float.MAX_VALUE) bottleneck = 0;
         }
 
         boolean hasAnimating = network.edges().stream()
@@ -221,11 +227,11 @@ public class FluidTransportHandler {
         // Track consecutive failed transfers while circuit is complete AND flow rates
         // are valid (bottleneck > 0). A zero bottleneck means rates haven't been computed
         // yet (first tick after transition) — don't count that as a failure.
-        if (!transferred && allFlowing && bottleneck > 0) {
+        if (!transferred && circuitComplete && bottleneck > 0) {
             int fails = failedTransferCount.merge(transferKey, 1, Integer::sum);
             if (fails >= 5) {
                 for (SimEdge edge : network.edges()) {
-                    if (edge.phase() == EdgePhase.FLOWING) {
+                    if (edge.phase() == EdgePhase.FLOWING || edge.phase() == EdgePhase.CHARGING) {
                         edge.setPhase(EdgePhase.DRAINING);
                     }
                 }
@@ -247,7 +253,7 @@ public class FluidTransportHandler {
         for (float rate : result.flowRates()) {
             if (Math.abs(rate) > 0) { hasFlow = true; break; }
         }
-        if (transferred || hasFlow || hasAnimating || allFlowing) {
+        if (transferred || hasFlow || hasAnimating || circuitComplete) {
             activeNetworks.add(transferKey);
             scheduledChecks.add(new ScheduledCheck(level, startPos));
         } else {
@@ -479,32 +485,26 @@ public class FluidTransportHandler {
         }
 
         // --- Regime 2: Gravity equalization (communicating vessels) ---
-        // Target is equal surfaces. Use vEq to prevent overshoot, under-relaxed
-        // for smooth convergence. When ΔΦ drops below EPS (sim reports zero flow),
-        // bridge the deadband gap with a direct equalization step.
+        // Transfer at the sim's per-tick flow rate (Q ∝ |ΔΦ|), which naturally
+        // decays as tanks equalize. When ΔΦ drops below EPS, bridge the remaining
+        // deadband gap with a small fixed step.
         if (!hasPump) {
-            // Normal flow-driven transfer
+            // Normal flow-driven transfer — use the sim's per-tick rate directly.
+            // Active networks tick every game tick, so no elapsed multiplier needed.
+            // The rate naturally decays as tanks equalize (Q ∝ |ΔΦ|).
             if (src != null && dst != null && bottleneck > 0) {
-                int amount = Math.max(1, (int) (bottleneck * elapsedTicks));
-
-                // vEq clamp: don't overshoot equilibrium
-                float srcSens = tankSensitivity(level, src.pos, fluids);
-                float dstSens = tankSensitivity(level, dst.pos, fluids);
-                if (srcSens + dstSens > 0) {
-                    float srcPhi = result.potentials().getOrDefault(src.node, 0f);
-                    float dstPhi = result.potentials().getOrDefault(dst.node, 0f);
-                    int vEq = Math.max(1,
-                            (int) (Math.abs(srcPhi - dstPhi) / (srcSens + dstSens)));
-                    amount = Math.min(amount, Math.max(1, (int) (vEq * 0.3f)));
-                }
-
+                int amount = Math.max(1, (int) bottleneck);
                 return doTransfer(src, dst, networkFluid, amount);
             }
 
             // Deadband bridging: sim reports zero flow but same-elevation tanks
             // haven't converged (ΔΦ dropped below EPS before reaching equal fill).
-            // Only for same-elevation pairs — gravity drops are handled by the sim
-            // (elevation difference keeps ΔΦ above EPS until the source is empty).
+            // Skip while any edge is still priming — bridging would equalize the
+            // tanks before the visual front reaches the far end.
+            boolean stillCharging = network.edges().stream()
+                    .anyMatch(e -> e.phase() == EdgePhase.CHARGING);
+            if (stillCharging) return false;
+
             for (int i = 0; i < handlers.size(); i++) {
                 for (int j = i + 1; j < handlers.size(); j++) {
                     HandlerInfo h1 = handlers.get(i), h2 = handlers.get(j);
@@ -521,7 +521,7 @@ public class FluidTransportHandler {
                     if (diff <= 1) continue;
                     HandlerInfo hi = f1 > f2 ? h1 : h2;
                     HandlerInfo lo = f1 > f2 ? h2 : h1;
-                    return doTransfer(hi, lo, networkFluid, diff / 2);
+                    return doTransfer(hi, lo, networkFluid, Math.min(diff / 2, 10));
                 }
             }
         }
