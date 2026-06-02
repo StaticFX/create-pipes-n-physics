@@ -502,7 +502,8 @@ public final class NetworkSolver {
 
             PressureBreakdown bd = new PressureBreakdown(
                     gravityTotal, 0, mergeExtra, splitPenalty,
-                    frictionTotal, net, capped, bursting);
+                    frictionTotal, net, capped, bursting,
+                    EdgePhase.FLOWING, 1.0f, 0, 0, 0, 0);
 
             for (NodeId node : chain) {
                 breakdowns.put(node, bd);

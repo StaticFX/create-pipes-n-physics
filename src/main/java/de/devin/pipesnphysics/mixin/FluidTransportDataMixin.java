@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.mixin;
 
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.PipeConnection;
+import de.devin.pipesnphysics.physics.EdgePhase;
 import de.devin.pipesnphysics.physics.PipeFlowData;
 import de.devin.pipesnphysics.physics.PressureBreakdown;
 import net.minecraft.core.Direction;
@@ -69,6 +70,12 @@ public class FluidTransportDataMixin implements PipeFlowData {
             tag.putFloat("net", pipesnphysics$breakdown.net());
             tag.putBoolean("capped", pipesnphysics$breakdown.capped());
             tag.putBoolean("bursting", pipesnphysics$breakdown.bursting());
+            tag.putInt("phase", pipesnphysics$breakdown.phase().ordinal());
+            tag.putFloat("frontProgress", pipesnphysics$breakdown.frontProgress());
+            tag.putFloat("deltaPhi", pipesnphysics$breakdown.deltaPhi());
+            tag.putFloat("headRemaining", pipesnphysics$breakdown.headRemaining());
+            tag.putInt("edgeLength", pipesnphysics$breakdown.edgeLength());
+            tag.putFloat("headAtUpstream", pipesnphysics$breakdown.headAtUpstream());
         }
 
         // Sync flow progress per direction — Create doesn't restore progress from NBT
@@ -97,6 +104,12 @@ public class FluidTransportDataMixin implements PipeFlowData {
         CompoundTag tag = nbt.getCompound("PipesNPhysics");
 
         if (tag.contains("gravity")) {
+            EdgePhase phase = EdgePhase.EMPTY;
+            if (tag.contains("phase")) {
+                int ordinal = tag.getInt("phase");
+                EdgePhase[] phases = EdgePhase.values();
+                if (ordinal >= 0 && ordinal < phases.length) phase = phases[ordinal];
+            }
             pipesnphysics$breakdown = new PressureBreakdown(
                     tag.getFloat("gravity"),
                     tag.getFloat("pump"),
@@ -105,7 +118,13 @@ public class FluidTransportDataMixin implements PipeFlowData {
                     tag.getFloat("friction"),
                     tag.getFloat("net"),
                     tag.getBoolean("capped"),
-                    tag.getBoolean("bursting")
+                    tag.getBoolean("bursting"),
+                    phase,
+                    tag.getFloat("frontProgress"),
+                    tag.getFloat("deltaPhi"),
+                    tag.getFloat("headRemaining"),
+                    tag.getInt("edgeLength"),
+                    tag.getFloat("headAtUpstream")
             );
         }
 

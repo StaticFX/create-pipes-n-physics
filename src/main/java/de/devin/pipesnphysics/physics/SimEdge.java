@@ -42,8 +42,19 @@ public class SimEdge {
         this.column = new ArrayList<>();
     }
 
+    // -- Immutable accessors --
+
     public int id() { return id; }
     public NodeId a() { return a; }
+    public NodeId b() { return b; }
+    public int length() { return length; }
+    public int capacity() { return capacity; }
+    public float resistance() { return resistance; }
+    public List<PipeEntry> pipes() { return pipes; }
+    public List<BlockPos> pipePositions() { return pipes.stream().map(PipeEntry::pos).toList(); }
+    public List<FluidFront> column() { return column; }
+
+    // -- Mutable state --
 
     public EdgePhase phase() { return phase; }
     public void setPhase(EdgePhase phase) { this.phase = phase; }
@@ -61,6 +72,11 @@ public class SimEdge {
     public NodeId upstreamNode() { return upstreamNode; }
     public void setUpstreamNode(NodeId upstream) { this.upstreamNode = upstream; }
 
+    public NodeId downstreamNode() {
+        if (upstreamNode == null) return null;
+        return upstreamNode.equals(a) ? b : a;
+    }
+
     /**
      * Set the fluid type for this edge (visual/composition tracking only — pipes
      * don't hold real inventory). Used during CHARGING to track what's flowing.
@@ -71,20 +87,6 @@ public class SimEdge {
             column.add(new FluidFront(fluidId, 1));
         }
     }
-
-
-
-    public NodeId downstreamNode() {
-        if (upstreamNode == null) return null;
-        return upstreamNode.equals(a) ? b : a;
-    }
-    public NodeId b() { return b; }
-    public int length() { return length; }
-    public int capacity() { return capacity; }
-    public float resistance() { return resistance; }
-    public List<PipeEntry> pipes() { return pipes; }
-    public List<BlockPos> pipePositions() { return pipes.stream().map(PipeEntry::pos).toList(); }
-    public List<FluidFront> column() { return column; }
 
     public int totalFill() {
         int total = 0;

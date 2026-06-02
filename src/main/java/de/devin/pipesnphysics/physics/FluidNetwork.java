@@ -11,6 +11,7 @@ public class FluidNetwork {
     private final Map<NodeId, SimNode> nodes;
     private final List<SimEdge> edges;
     private final Map<NodeId, List<Integer>> incidentEdges;
+    private final Map<NodeId, Set<NodeId>> pumpPushSides;
     private boolean dirty;
 
     private float[] flowRate;
@@ -18,8 +19,14 @@ public class FluidNetwork {
     private final Map<NodeId, Float> potentialAt;
 
     public FluidNetwork(Map<NodeId, SimNode> nodes, List<SimEdge> edges) {
+        this(nodes, edges, Map.of());
+    }
+
+    public FluidNetwork(Map<NodeId, SimNode> nodes, List<SimEdge> edges,
+                         Map<NodeId, Set<NodeId>> pumpPushSides) {
         this.nodes = nodes;
         this.edges = edges;
+        this.pumpPushSides = pumpPushSides;
         this.incidentEdges = new HashMap<>();
         this.dirty = true;
 
@@ -50,6 +57,15 @@ public class FluidNetwork {
     public float headAt(NodeId node) { return headAt.getOrDefault(node, 0f); }
     public void setHeadAt(NodeId node, float value) { headAt.put(node, value); }
     public Map<NodeId, Float> allHeads() { return headAt; }
+
+    /**
+     * Returns true if otherEnd is on the push side of the given pump node.
+     * Precomputed at build time — no Minecraft types needed.
+     */
+    public boolean isPushSide(NodeId pumpNode, NodeId otherEnd) {
+        Set<NodeId> pushNeighbors = pumpPushSides.get(pumpNode);
+        return pushNeighbors != null && pushNeighbors.contains(otherEnd);
+    }
 
     public float potential(NodeId node) { return potentialAt.getOrDefault(node, 0f); }
     public void setPotential(NodeId node, float value) { potentialAt.put(node, value); }

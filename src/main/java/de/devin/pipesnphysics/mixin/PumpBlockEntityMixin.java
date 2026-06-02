@@ -42,7 +42,7 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
         }
 
         BlockPos pipePos = worldPosition.relative(side);
-        FluidTransportHandler.clearCooldown(pipePos);
+        FluidTransportHandler.scheduleRecheck(pipePos);
         FluidTransportHandler.scheduleCheck(self.getLevel(), pipePos);
     }
 }

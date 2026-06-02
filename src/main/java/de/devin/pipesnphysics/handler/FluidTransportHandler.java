@@ -68,12 +68,27 @@ public class FluidTransportHandler {
         return cachedNetworks.get(pos);
     }
 
+    /**
+     * Full network invalidation: clears the cached network so it's rebuilt from
+     * scratch on the next tick. Use for real topology changes (pipe placed/removed,
+     * sub-level rotation).
+     */
     public static void clearCooldown(BlockPos pos) {
         lastProcessedTick.remove(pos);
         FluidNetwork net = cachedNetworks.remove(pos);
         if (net != null) {
             cachedNetworks.values().removeIf(n -> n == net);
         }
+    }
+
+    /**
+     * Lightweight recheck: clears the tick cooldown so the network re-ticks
+     * immediately, but preserves the cached network and all edge state
+     * (phases, front positions, flow rates). Use for pressure/speed changes
+     * that don't alter topology (wrench, pump speed change).
+     */
+    public static void scheduleRecheck(BlockPos pos) {
+        lastProcessedTick.remove(pos);
     }
 
     public static void clearAllCooldowns() {
@@ -83,6 +98,7 @@ public class FluidTransportHandler {
         cachedNetworks.clear();
         activeNetworks.clear();
         failedTransferCount.clear();
+        OpenEndFluidHandler.accumulator.clear();
     }
 
     private static final int STALE_ENTRY_TICKS = 6000;
@@ -172,7 +188,7 @@ public class FluidTransportHandler {
 
         // Update dynamic tank pressures before simulation
         updateTankPressures(level, network, fluids, config);
-        updatePumpSpeeds(level, network);
+        boolean pumpSpeedChanged = updatePumpSpeeds(level, network);
 
         // Always run the simulator — it handles edge phase transitions even without fluid
         // (e.g. DRAINING edges need to tick even when no new fluid is available)
@@ -215,7 +231,8 @@ public class FluidTransportHandler {
         int elapsed = lastTransfer != null ? (int) (currentTick - lastTransfer) : recheckTicks;
         elapsed = Math.max(1, Math.min(elapsed, 20));
 
-        boolean transferred = transferFluid(level, network, result, networkFluid, fluids, elapsed, bottleneck);
+        int transferResult = transferFluid(level, network, result, networkFluid, fluids, elapsed, bottleneck);
+        boolean transferred = transferResult > 0;
         if (transferred) {
             LOGGER.info("Xfer n={} e={} rates={} elapsed={} active={}",
                     network.nodes().size(), network.edges().size(),
@@ -225,14 +242,23 @@ public class FluidTransportHandler {
         }
 
         // Track consecutive failed transfers while circuit is complete AND flow rates
-        // are valid (bottleneck > 0). A zero bottleneck means rates haven't been computed
-        // yet (first tick after transition) — don't count that as a failure.
+        // are valid (bottleneck > 0).
+        //
+        // Source dry (-1): force DRAINING — the circuit broke because there's no fluid.
+        // Sink full (-2): DON'T drain — the pipe is pressurized, the sink is temporarily
+        //   full (e.g. open end placed a block). De-activate the network instead.
         if (!transferred && circuitComplete && bottleneck > 0) {
             int fails = failedTransferCount.merge(transferKey, 1, Integer::sum);
             if (fails >= 5) {
-                for (SimEdge edge : network.edges()) {
-                    if (edge.phase() == EdgePhase.FLOWING || edge.phase() == EdgePhase.CHARGING) {
-                        edge.setPhase(EdgePhase.DRAINING);
+                if (transferResult == -2) {
+                    // Sink full: stay pressurized, just slow down ticking
+                    activeNetworks.remove(transferKey);
+                } else {
+                    // Source dry or other failure: drain the circuit
+                    for (SimEdge edge : network.edges()) {
+                        if (edge.phase() == EdgePhase.FLOWING || edge.phase() == EdgePhase.CHARGING) {
+                            edge.setPhase(EdgePhase.DRAINING);
+                        }
                     }
                 }
                 failedTransferCount.remove(transferKey);
@@ -248,12 +274,16 @@ public class FluidTransportHandler {
         hasAnimating = network.edges().stream()
                 .anyMatch(e -> e.phase() == EdgePhase.CHARGING || e.phase() == EdgePhase.DRAINING);
 
-        // Track active state using the canonical key (same as transfer tick).
+        // A network stays active (ticks every tick) when anything is happening:
+        // fluid moving, fronts advancing/draining, complete circuit, or pump speed changing.
         boolean hasFlow = false;
         for (float rate : result.flowRates()) {
             if (Math.abs(rate) > 0) { hasFlow = true; break; }
         }
-        if (transferred || hasFlow || hasAnimating || circuitComplete) {
+        boolean keepActive = transferred || hasFlow || hasAnimating
+                || circuitComplete || pumpSpeedChanged;
+
+        if (keepActive) {
             activeNetworks.add(transferKey);
             scheduledChecks.add(new ScheduledCheck(level, startPos));
         } else {
@@ -338,14 +368,7 @@ public class FluidTransportHandler {
             // Check if the node IS a tank (handler-position node)
             var directBE = level.getBlockEntity(nodePos);
             if (directBE instanceof FluidTankBlockEntity tankBE) {
-                FluidTankAccessor accessor = (FluidTankAccessor) tankBE;
-                int tankHeight = accessor.pipesnphysics$getHeight();
-                var inventory = accessor.pipesnphysics$getTankInventory();
-                float fillFraction = inventory.getCapacity() > 0
-                        ? (float) inventory.getFluidAmount() / inventory.getCapacity()
-                        : 0;
-                float fillHeight = fillFraction * tankHeight;
-                float pressure = density * config.G() * fillHeight;
+                float pressure = TankPressureUtil.computeFillPressure(tankBE, density, config.G());
                 entry.setValue(new SimNode(
                         node.id(), node.kind(), node.elevation(),
                         pressure, pressure));
@@ -358,15 +381,7 @@ public class FluidTransportHandler {
                 var be = level.getBlockEntity(neighbor);
                 if (!(be instanceof FluidTankBlockEntity tankBE2)) continue;
 
-                FluidTankAccessor accessor = (FluidTankAccessor) tankBE2;
-                int tankHeight = accessor.pipesnphysics$getHeight();
-                var inventory = accessor.pipesnphysics$getTankInventory();
-                float fillFraction = inventory.getCapacity() > 0
-                        ? (float) inventory.getFluidAmount() / inventory.getCapacity()
-                        : 0;
-                float fillHeight = fillFraction * tankHeight;
-                float pressure = density * config.G() * fillHeight;
-
+                float pressure = TankPressureUtil.computeFillPressure(tankBE2, density, config.G());
                 entry.setValue(new SimNode(
                         node.id(), node.kind(), node.elevation(),
                         pressure, pressure));
@@ -375,10 +390,17 @@ public class FluidTransportHandler {
         }
     }
 
-    private static boolean transferFluid(Level level, FluidNetwork network, SimResult result,
-                                          FluidStack networkFluid, Map<String, SimFluid> fluids,
-                                          int elapsedTicks, float bottleneck) {
-        if (networkFluid.isEmpty()) return false;
+    /** Why a transfer attempt failed. */
+    private enum TransferFailure { SOURCE_DRY, SINK_FULL, NO_CIRCUIT }
+
+    /**
+     * @return positive = amount transferred, 0 = no transfer, negative = failure reason
+     *         (-1 = source dry, -2 = sink full, -3 = no circuit)
+     */
+    private static int transferFluid(Level level, FluidNetwork network, SimResult result,
+                                      FluidStack networkFluid, Map<String, SimFluid> fluids,
+                                      int elapsedTicks, float bottleneck) {
+        if (networkFluid.isEmpty()) return -3;
 
         // Collect boundary handlers, use potentials for direction
         List<HandlerInfo> handlers = new ArrayList<>();
@@ -432,7 +454,7 @@ public class FluidTransportHandler {
                 }
             }
         }
-        if (handlers.size() < 2) return false;
+        if (handlers.size() < 2) return -3;
 
         // --- Determine the regime ---
         boolean hasPump = network.nodes().values().stream()
@@ -474,14 +496,16 @@ public class FluidTransportHandler {
         // Move at the sim's flow rate. No vEq, no equalization target.
         // The sim's deltaPhi already encodes pump head vs destination back-pressure;
         // when the destination out-pressures the pump, deltaPhi → 0 and flow stops.
-        if (hasPump && src != null && dst != null) {
+        if (hasPump) {
+            if (src == null) return -1;  // source dry
+            if (dst == null) return -2;  // sink full
             // Pump regime: use the true bottleneck (min of ALL edge rates).
             // A zero-rate edge means the pump can't push through that segment
             // (insufficient head for the pipe length). No transfer until all
             // edges in the circuit carry flow.
-            if (bottleneck <= 0) return false;
+            if (bottleneck <= 0) return 0;
             int amount = Math.max(1, (int) (bottleneck * elapsedTicks));
-            return doTransfer(src, dst, networkFluid, amount);
+            return doTransfer(src, dst, networkFluid, amount) ? amount : -1;
         }
 
         // --- Regime 2: Gravity equalization (communicating vessels) ---
@@ -494,7 +518,7 @@ public class FluidTransportHandler {
             // The rate naturally decays as tanks equalize (Q ∝ |ΔΦ|).
             if (src != null && dst != null && bottleneck > 0) {
                 int amount = Math.max(1, (int) bottleneck);
-                return doTransfer(src, dst, networkFluid, amount);
+                return doTransfer(src, dst, networkFluid, amount) ? amount : 0;
             }
 
             // Deadband bridging: sim reports zero flow but same-elevation tanks
@@ -503,7 +527,7 @@ public class FluidTransportHandler {
             // tanks before the visual front reaches the far end.
             boolean stillCharging = network.edges().stream()
                     .anyMatch(e -> e.phase() == EdgePhase.CHARGING);
-            if (stillCharging) return false;
+            if (stillCharging) return 0;
 
             for (int i = 0; i < handlers.size(); i++) {
                 for (int j = i + 1; j < handlers.size(); j++) {
@@ -521,12 +545,12 @@ public class FluidTransportHandler {
                     if (diff <= 1) continue;
                     HandlerInfo hi = f1 > f2 ? h1 : h2;
                     HandlerInfo lo = f1 > f2 ? h2 : h1;
-                    return doTransfer(hi, lo, networkFluid, Math.min(diff / 2, 10));
+                    return doTransfer(hi, lo, networkFluid, Math.min(diff / 2, 10)) ? 1 : 0;
                 }
             }
         }
 
-        return false;
+        return 0;
     }
 
     private static boolean doTransfer(HandlerInfo src, HandlerInfo dst,
@@ -540,46 +564,6 @@ public class FluidTransportHandler {
         if (actual.isEmpty()) return false;
         dst.handler.fill(actual, FluidAction.EXECUTE);
         return true;
-    }
-
-    private static void storeBreakdowns(Level level, FluidNetwork network, SimResult result) {
-        // Compute pump contribution from any PUMP nodes in the network
-        float totalPumpHead = 0;
-        for (SimNode n : network.nodes().values()) {
-            if (n.kind() == SimNodeKind.PUMP) totalPumpHead += n.staticPressure();
-        }
-
-        for (int i = 0; i < network.edges().size(); i++) {
-            SimEdge edge = network.edges().get(i);
-            float rate = Math.abs(result.flowRates()[i]);
-
-            // Compute gravity contribution from elevation difference
-            SimNode nodeA = network.node(edge.a());
-            SimNode nodeB = network.node(edge.b());
-            float gravityHead = 0;
-            if (nodeA != null && nodeB != null) {
-                float deltaY = (float) Math.abs(nodeA.elevation() - nodeB.elevation());
-                gravityHead = PhysicsConfigFactory.simConfig().G() * deltaY;
-            }
-
-            // Net = flow rate (mB/tick). The goggle displays this as the transfer rate.
-            PressureBreakdown breakdown = new PressureBreakdown(
-                    gravityHead,
-                    totalPumpHead,
-                    0, 0,
-                    edge.resistance(),
-                    rate,       // net = actual flow rate
-                    rate > PhysicsConfigFactory.simConfig().maxFlow() * 0.95f,
-                    false);
-
-            for (BlockPos pos : edge.pipePositions()) {
-                FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, pos);
-                if (pipe instanceof PipeFlowData data) {
-                    data.pipesnphysics$setBreakdown(breakdown);
-                    pipe.blockEntity.notifyUpdate();
-                }
-            }
-        }
     }
 
     /**
@@ -655,11 +639,11 @@ public class FluidTransportHandler {
 
     /**
      * Refresh PUMP node pressure and head from current RPM.
-     * Both staticPressure and head use the same unit (blocks of water column)
-     * via speedToHead, so pumps and tanks are directly comparable.
+     * Returns true if any pump's speed changed (caller should keep the network active).
      */
-    private static void updatePumpSpeeds(Level level, FluidNetwork network) {
+    private static boolean updatePumpSpeeds(Level level, FluidNetwork network) {
         SimConfig config = PhysicsConfigFactory.simConfig();
+        boolean changed = false;
         for (var entry : network.nodes().entrySet()) {
             SimNode node = entry.getValue();
             if (node.kind() != SimNodeKind.PUMP) continue;
@@ -669,13 +653,13 @@ public class FluidTransportHandler {
                 float head = Math.abs(kbe.getSpeed()) * config.speedToHead();
                 if (head != node.staticPressure()) {
                     entry.setValue(new SimNode(node.id(), node.kind(), node.elevation(),
-                            head, head, node.pushSidePos()));
+                            head, head));
+                    changed = true;
                 }
             }
         }
+        return changed;
     }
-
-
 
     private record HandlerInfo(NodeId node, IFluidHandler handler, BlockPos pos) {}
 
