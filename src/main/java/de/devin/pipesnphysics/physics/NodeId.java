@@ -1,8 +1,8 @@
 package de.devin.pipesnphysics.physics;
 
+import net.minecraft.core.BlockPos;
+
 /**
- * Opaque identity for a node in a pipe network graph.
- * Backed by {@code BlockPos} at the integration layer, but the physics
- * package never sees the Minecraft type.
+ * Identity for a node in a pipe network graph, backed by an immutable {@link BlockPos}.
  */
-public record NodeId(Object key) {}
+public record NodeId(BlockPos pos) {}

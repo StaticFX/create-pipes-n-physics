@@ -52,7 +52,7 @@ public class LifecycleTest {
 
                                 LifecycleAssertions.awaitAllEmpty(helper, src, 500, () -> {
                                     // All edges must be fully EMPTY with no residual fluid type
-                                    FluidNetwork net = FluidTransportHandler.getCachedNetwork(src);
+                                    FluidNetwork net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), src);
                                     if (net != null) {
                                         for (SimEdge edge : net.edges()) {
                                             if (edge.phase() != EdgePhase.EMPTY) {

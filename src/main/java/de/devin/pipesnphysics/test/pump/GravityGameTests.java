@@ -134,7 +134,7 @@ public class GravityGameTests {
                 handler.drain(inA, IFluidHandler.FluidAction.EXECUTE);
                 int bAfterDrain = TestHelper.getFillAmountOfTank(helper, tankB);
 
-                FluidTransportHandler.clearCooldown(tankA);
+                FluidTransportHandler.clearCooldown(helper.getLevel(), tankA);
 
                 LifecycleAssertions.awaitAnyPipeHasFlow(helper, tankA, 400, () -> {
                     LifecycleAssertions.assertVisualFrontAdvanced(helper, tankA, 0.1f,
@@ -170,7 +170,7 @@ public class GravityGameTests {
 
         LifecycleAssertions.awaitCharging(helper, tankA, 40, () -> {
             Assertions.pollUntil(helper, "charging-primed", 40, tankA, () -> {
-                var net = FluidTransportHandler.getCachedNetwork(tankA);
+                var net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), tankA);
                 if (net == null) return false;
                 return net.edges().stream()
                         .anyMatch(e -> e.visualFrontPos() >= e.length());
@@ -187,7 +187,7 @@ public class GravityGameTests {
 
                     LifecycleAssertions.awaitDraining(helper, tankA, 200, () -> {
                         Assertions.pollUntil(helper, "drain-complete", 40, tankA, () -> {
-                            var net = FluidTransportHandler.getCachedNetwork(tankA);
+                            var net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), tankA);
                             if (net == null) return true;
                             return net.edges().stream()
                                     .allMatch(e -> e.visualFrontPos() <= 0);

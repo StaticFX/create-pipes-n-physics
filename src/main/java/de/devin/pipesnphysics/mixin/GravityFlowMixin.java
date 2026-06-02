@@ -33,7 +33,7 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
 
         boolean managed;
         if (!level.isClientSide()) {
-            managed = FluidTransportHandler.isManaged(blockEntity.getBlockPos());
+            managed = FluidTransportHandler.isManaged(level, blockEntity.getBlockPos());
         } else {
             // Client: use the synced breakdown as a marker (set by server, synced via NBT)
             managed = this instanceof PipeFlowData data && data.pipesnphysics$getBreakdown() != null;
@@ -44,7 +44,7 @@ public abstract class GravityFlowMixin extends BlockEntityBehaviour {
                 int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
                 if (level.getGameTime() % recheckTicks == 0) {
                     if (SableCompat.hasSubLevelRotated(level, blockEntity.getBlockPos())) {
-                        FluidTransportHandler.clearCooldown(blockEntity.getBlockPos());
+                        FluidTransportHandler.clearCooldown(level, blockEntity.getBlockPos());
                     }
                     FluidTransportHandler.scheduleCheck(level, blockEntity.getBlockPos());
                 }

@@ -33,11 +33,11 @@ public class FluidTransportHandler {
 
     private static final Set<ScheduledCheck> scheduledChecks = new HashSet<>();
 
-    private static final Map<BlockPos, Long> lastProcessedTick = new HashMap<>();
-    private static final Map<BlockPos, Long> lastTransferTick = new HashMap<>();
-    private static final Map<BlockPos, FluidNetwork> cachedNetworks = new HashMap<>();
-    private static final Set<BlockPos> activeNetworks = new HashSet<>();
-    private static final Map<BlockPos, Integer> failedTransferCount = new HashMap<>();
+    private static final Map<DimPos, Long> lastProcessedTick = new HashMap<>();
+    private static final Map<DimPos, Long> lastTransferTick = new HashMap<>();
+    private static final Map<DimPos, FluidNetwork> cachedNetworks = new HashMap<>();
+    private static final Set<DimPos> activeNetworks = new HashSet<>();
+    private static final Map<DimPos, Integer> failedTransferCount = new HashMap<>();
 
     private record ScheduledCheck(Level level, BlockPos pos) {
         @Override
@@ -59,13 +59,13 @@ public class FluidTransportHandler {
     }
 
     /** Returns true if a pipe at this position is part of a cached network. */
-    public static boolean isManaged(BlockPos pos) {
-        return cachedNetworks.containsKey(pos);
+    public static boolean isManaged(Level level, BlockPos pos) {
+        return cachedNetworks.containsKey(DimPos.of(level, pos));
     }
 
     /** Get the cached network for a position (for testing/debug). */
-    public static FluidNetwork getCachedNetwork(BlockPos pos) {
-        return cachedNetworks.get(pos);
+    public static FluidNetwork getCachedNetwork(Level level, BlockPos pos) {
+        return cachedNetworks.get(DimPos.of(level, pos));
     }
 
     /**
@@ -73,9 +73,10 @@ public class FluidTransportHandler {
      * scratch on the next tick. Use for real topology changes (pipe placed/removed,
      * sub-level rotation).
      */
-    public static void clearCooldown(BlockPos pos) {
-        lastProcessedTick.remove(pos);
-        FluidNetwork net = cachedNetworks.remove(pos);
+    public static void clearCooldown(Level level, BlockPos pos) {
+        DimPos key = DimPos.of(level, pos);
+        lastProcessedTick.remove(key);
+        FluidNetwork net = cachedNetworks.remove(key);
         if (net != null) {
             cachedNetworks.values().removeIf(n -> n == net);
         }
@@ -87,8 +88,8 @@ public class FluidTransportHandler {
      * (phases, front positions, flow rates). Use for pressure/speed changes
      * that don't alter topology (wrench, pump speed change).
      */
-    public static void scheduleRecheck(BlockPos pos) {
-        lastProcessedTick.remove(pos);
+    public static void scheduleRecheck(Level level, BlockPos pos) {
+        lastProcessedTick.remove(DimPos.of(level, pos));
     }
 
     public static void clearAllCooldowns() {
@@ -121,28 +122,30 @@ public class FluidTransportHandler {
         Set<ScheduledCheck> toProcess = new HashSet<>(scheduledChecks);
         scheduledChecks.clear();
 
-        Set<BlockPos> alreadyProcessed = new HashSet<>();
+        Set<DimPos> alreadyProcessed = new HashSet<>();
         for (ScheduledCheck check : toProcess) {
-            if (alreadyProcessed.contains(check.pos)) continue;
+            DimPos dimPos = DimPos.of(check.level, check.pos);
+            if (alreadyProcessed.contains(dimPos)) continue;
             if (!check.level.isLoaded(check.pos)) continue;
             processNetwork(check.level, check.pos, alreadyProcessed);
         }
     }
 
-    private static void processNetwork(Level level, BlockPos startPos, Set<BlockPos> alreadyProcessed) {
+    private static void processNetwork(Level level, BlockPos startPos, Set<DimPos> alreadyProcessed) {
         if (!SableCompat.isSubLevelReady(level, startPos)) return;
 
+        DimPos startDimPos = DimPos.of(level, startPos);
         long currentTick = level.getGameTime();
-        Long lastTick = lastProcessedTick.get(startPos);
+        Long lastTick = lastProcessedTick.get(startDimPos);
         int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
         // Active networks (nonzero flow) process every tick for smooth transfer.
         // Idle networks keep the longer recheckTicks interval to save CPU.
         // Check active state by canonical key (first node), not startPos, so all
         // pipes in the same network share one active/idle state.
-        FluidNetwork cachedNet = cachedNetworks.get(startPos);
-        BlockPos activeKey = cachedNet != null
-                ? PipeGraphBuilder.posOf(cachedNet.nodes().keySet().iterator().next())
-                : startPos;
+        FluidNetwork cachedNet = cachedNetworks.get(startDimPos);
+        DimPos activeKey = cachedNet != null
+                ? DimPos.of(level, PipeGraphBuilder.posOf(cachedNet.nodes().keySet().iterator().next()))
+                : startDimPos;
         int interval = activeNetworks.contains(activeKey) ? 1 : recheckTicks;
         if (lastTick != null && currentTick - lastTick < interval) return;
 
@@ -150,15 +153,15 @@ public class FluidTransportHandler {
         // Pumps are proper graph nodes (always in the topology regardless of speed),
         // so no stale-cache detection needed — updatePumpSpeeds refreshes each tick.
         SimConfig config = PhysicsConfigFactory.simConfig();
-        FluidNetwork network = cachedNetworks.get(startPos);
+        FluidNetwork network = cachedNetworks.get(startDimPos);
         if (network == null) {
             network = NetworkBuilder.build(level, startPos, config);
             for (var entry : network.nodes().entrySet()) {
-                cachedNetworks.put(PipeGraphBuilder.posOf(entry.getKey()), network);
+                cachedNetworks.put(DimPos.of(level, PipeGraphBuilder.posOf(entry.getKey())), network);
             }
             for (SimEdge edge : network.edges()) {
                 for (BlockPos pos : edge.pipePositions()) {
-                    cachedNetworks.put(pos, network);
+                    cachedNetworks.put(DimPos.of(level, pos), network);
                 }
             }
         }
@@ -166,14 +169,15 @@ public class FluidTransportHandler {
         // Mark all pipes as processed
         for (SimEdge edge : network.edges()) {
             for (BlockPos pos : edge.pipePositions()) {
-                alreadyProcessed.add(pos);
-                lastProcessedTick.put(pos, currentTick);
+                DimPos dp = DimPos.of(level, pos);
+                alreadyProcessed.add(dp);
+                lastProcessedTick.put(dp, currentTick);
             }
         }
         for (var entry : network.nodes().entrySet()) {
-            BlockPos pos = PipeGraphBuilder.posOf(entry.getKey());
-            alreadyProcessed.add(pos);
-            lastProcessedTick.put(pos, currentTick);
+            DimPos dp = DimPos.of(level, PipeGraphBuilder.posOf(entry.getKey()));
+            alreadyProcessed.add(dp);
+            lastProcessedTick.put(dp, currentTick);
         }
 
         if (network.edges().isEmpty()) {
@@ -189,6 +193,13 @@ public class FluidTransportHandler {
         // Update dynamic tank pressures before simulation
         updateTankPressures(level, network, fluids, config);
         boolean pumpSpeedChanged = updatePumpSpeeds(level, network);
+
+        // Snapshot front positions before tick — used to detect effectively stalled edges
+        // (CHARGING but front didn't advance) for the keepActive decision.
+        float[] prevFront = new float[network.edges().size()];
+        for (int i = 0; i < network.edges().size(); i++) {
+            prevFront[i] = network.edges().get(i).frontPos();
+        }
 
         // Always run the simulator — it handles edge phase transitions even without fluid
         // (e.g. DRAINING edges need to tick even when no new fluid is available)
@@ -216,8 +227,17 @@ public class FluidTransportHandler {
             if (!circuitComplete || bottleneck == Float.MAX_VALUE) bottleneck = 0;
         }
 
-        boolean hasAnimating = network.edges().stream()
-                .anyMatch(e -> e.phase() == EdgePhase.CHARGING || e.phase() == EdgePhase.DRAINING);
+        // An edge is "animating" if it's DRAINING, or CHARGING and its front
+        // actually advanced this tick. CHARGING edges whose front didn't move
+        // are effectively stalled and shouldn't keep the network ticking.
+        boolean hasAnimating = false;
+        for (int i = 0; i < network.edges().size(); i++) {
+            SimEdge edge = network.edges().get(i);
+            if (edge.phase() == EdgePhase.DRAINING) { hasAnimating = true; break; }
+            if (edge.phase() == EdgePhase.CHARGING && edge.frontPos() != prevFront[i]) {
+                hasAnimating = true; break;
+            }
+        }
 
         // Apply visuals via Flow objects (never addPressure — it triggers wipe cycles).
         // Always call: Flow objects don't interfere with Create's transfer logic.
@@ -226,7 +246,7 @@ public class FluidTransportHandler {
         // Transfer fluid at boundary nodes.
         // Use a canonical key (first node) so elapsed is consistent regardless of which
         // pipe triggered processing — all pipes in the same network share one timer.
-        BlockPos transferKey = PipeGraphBuilder.posOf(network.nodes().keySet().iterator().next());
+        DimPos transferKey = DimPos.of(level, PipeGraphBuilder.posOf(network.nodes().keySet().iterator().next()));
         Long lastTransfer = lastTransferTick.get(transferKey);
         int elapsed = lastTransfer != null ? (int) (currentTick - lastTransfer) : recheckTicks;
         elapsed = Math.max(1, Math.min(elapsed, 20));
@@ -271,8 +291,15 @@ public class FluidTransportHandler {
         CreatePipeRendering.storeBreakdowns(level, network, result);
 
         // Recompute hasAnimating AFTER the drain counter may have set edges to DRAINING.
-        hasAnimating = network.edges().stream()
-                .anyMatch(e -> e.phase() == EdgePhase.CHARGING || e.phase() == EdgePhase.DRAINING);
+        // Edges forced to DRAINING by the drain counter are always animating.
+        hasAnimating = false;
+        for (int i = 0; i < network.edges().size(); i++) {
+            SimEdge edge = network.edges().get(i);
+            if (edge.phase() == EdgePhase.DRAINING) { hasAnimating = true; break; }
+            if (edge.phase() == EdgePhase.CHARGING && edge.frontPos() != prevFront[i]) {
+                hasAnimating = true; break;
+            }
+        }
 
         // A network stays active (ticks every tick) when anything is happening:
         // fluid moving, fronts advancing/draining, complete circuit, or pump speed changing.
@@ -669,7 +696,7 @@ public class FluidTransportHandler {
      * OpenEndedPipe behavior of placing fluid blocks into the world.
      */
     private static class OpenEndFluidHandler implements IFluidHandler {
-        private static final Map<BlockPos, Integer> accumulator = new HashMap<>();
+        private static final Map<DimPos, Integer> accumulator = new HashMap<>();
 
         private final Level level;
         private final BlockPos pos;
@@ -700,18 +727,19 @@ public class FluidTransportHandler {
             if (resource.isEmpty()) return 0;
             if (!level.getFluidState(pos).isEmpty()) return 0; // already has fluid
 
-            int spaceLeft = 1000 - accumulator.getOrDefault(pos, 0);
+            DimPos key = DimPos.of(level, pos);
+            int spaceLeft = 1000 - accumulator.getOrDefault(key, 0);
             int accept = Math.min(resource.getAmount(), spaceLeft);
             if (accept <= 0) return 0;
 
             if (action.execute()) {
-                int total = accumulator.getOrDefault(pos, 0) + accept;
+                int total = accumulator.getOrDefault(key, 0) + accept;
                 if (total >= 1000) {
                     var fluidBlock = resource.getFluid().defaultFluidState().createLegacyBlock();
                     level.setBlockAndUpdate(pos, fluidBlock);
-                    accumulator.remove(pos);
+                    accumulator.remove(key);
                 } else {
-                    accumulator.put(pos, total);
+                    accumulator.put(key, total);
                 }
             }
             return accept;
