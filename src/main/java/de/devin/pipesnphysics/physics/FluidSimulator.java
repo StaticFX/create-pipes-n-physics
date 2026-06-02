@@ -44,8 +44,7 @@ public final class FluidSimulator {
 
             switch (edge.phase()) {
                 case EMPTY -> tickEmpty(net, edge, i, fluids);
-                case CHARGING, DRAINING -> tickFront(net, edge, i, fluid);
-                case STALLED -> tickStalled(net, edge, i, fluid);
+                case CHARGING, STALLED, DRAINING -> tickFront(net, edge, i, fluid);
                 case FLOWING -> tickFlowing(net, edge, i, fluid);
             }
         }
@@ -146,6 +145,11 @@ public final class FluidSimulator {
     private void tickFront(FluidNetwork net, SimEdge edge, int idx, SimFluid fluid) {
         if (fluid == null) { edge.setPhase(EdgePhase.EMPTY); return; }
 
+        // Legacy STALLED edges are now handled here — convert to CHARGING
+        if (edge.phase() == EdgePhase.STALLED) {
+            edge.setPhase(EdgePhase.CHARGING);
+        }
+
         boolean draining = edge.phase() == EdgePhase.DRAINING;
 
         SimNode nodeA = net.node(edge.a());
@@ -211,7 +215,18 @@ public final class FluidSimulator {
             float headAtFront = computeHeadAtFront(net, edge, fluid);
 
             if (headAtFront <= 0) {
-                edge.setPhase(EdgePhase.STALLED);
+                // Head exhausted — don't advance. Recede if head is negative
+                // (pump slowed down, front overshot the new equilibrium).
+                if (headAtFront < -config.EPS()) {
+                    float recedeSpeed = config.frontK() * Math.abs(headAtFront) / fluid.viscosity();
+                    float newPos = edge.frontPos() - recedeSpeed;
+                    if (newPos <= 0) {
+                        edge.setPhase(EdgePhase.DRAINING);
+                    } else {
+                        edge.setFrontPos(newPos);
+                        edge.advanceVisualFront(-recedeSpeed);
+                    }
+                }
                 net.setFlowRate(idx, 0);
                 return;
             }
@@ -240,7 +255,7 @@ public final class FluidSimulator {
 
             if (downNode.kind() == SimNodeKind.DEAD_END || isClosedPump(downNode)) {
                 edge.setFrontPos(edge.length());
-                edge.setPhase(EdgePhase.STALLED);
+                net.setFlowRate(idx, 0);
                 return;
             }
 
@@ -248,13 +263,10 @@ public final class FluidSimulator {
                 net.setFlowRate(idx, Math.signum(deltaPhi) * computeQ(net, fluid, deltaPhi));
                 edge.setFrontPos(excess);
             } else {
-                // Front reached the end but no driving force — stall, don't drain.
-                // DRAINING is for when a flowing circuit breaks (handled by the
-                // primed deltaPhi check above). Here the front never established
-                // through-flow, so it just sits at the end.
+                // Front reached the end but no driving force — sit at the end.
+                // Stays CHARGING so it re-evaluates each tick (effective STALLED).
                 net.setFlowRate(idx, 0);
                 edge.setFrontPos(edge.length());
-                edge.setPhase(EdgePhase.STALLED);
             }
 
             if (downNode.kind() == SimNodeKind.PUMP || downNode.kind() == SimNodeKind.JUNCTION) {
@@ -299,46 +311,6 @@ public final class FluidSimulator {
             }
         }
         return maxPumpFlow;
-    }
-
-    private void tickStalled(FluidNetwork net, SimEdge edge, int idx, SimFluid fluid) {
-        if (fluid == null) return;
-
-        // Dead-end and closed-pump stalls are sticky (can't flow past them),
-        // but the front should still recede gradually if head decreased.
-        NodeId downstream = edge.downstreamNode();
-        SimNode downNode = downstream != null ? net.node(downstream) : null;
-        if (downNode != null && (downNode.kind() == SimNodeKind.DEAD_END || isClosedPump(downNode))) {
-            if (edgeIsPumpDriven(net, edge)) {
-                recedeIfHeadDecreased(net, edge, fluid);
-            }
-            net.setFlowRate(idx, 0);
-            return;
-        }
-
-        if (edgeIsPumpDriven(net, edge)) {
-            float headAtFront = computeHeadAtFront(net, edge, fluid);
-            if (headAtFront > config.EPS()) {
-                // Head improved (pump speed up, booster placed) — resume charging
-                edge.setPhase(EdgePhase.CHARGING);
-            } else if (headAtFront < -config.EPS()) {
-                // Head decreased (pump slowed) — recede front gradually
-                recedeIfHeadDecreased(net, edge, fluid);
-            }
-        } else {
-            // Gravity-driven: resume when ΔΦ is positive
-            SimNode nodeA = net.node(edge.a());
-            SimNode nodeB = net.node(edge.b());
-            if (nodeA != null && nodeB != null) {
-                float phiA = computePhiForEdge(net, nodeA, edge.b(), fluid);
-                float phiB = computePhiForEdge(net, nodeB, edge.a(), fluid);
-                if (Math.abs(phiA - phiB) > config.EPS()) {
-                    edge.setPhase(EdgePhase.CHARGING);
-                }
-            }
-        }
-
-        net.setFlowRate(idx, 0);
     }
 
     private void tickFlowing(FluidNetwork net, SimEdge edge, int idx, SimFluid fluid) {
@@ -440,57 +412,6 @@ public final class FluidSimulator {
         if (upNode.kind() == SimNodeKind.PUMP) return true;
         // Head at upstream exceeds node's own head → a pump propagated here
         return net.headAt(upstream) > upNode.head() + config.EPS();
-    }
-
-    /**
-     * Gradually recede the front when the head budget decreased (pump slowed down).
-     * Speed is proportional to the head overshoot — decelerates as it approaches
-     * the new equilibrium, matching the charging deceleration in reverse.
-     * Transitions to DRAINING if the front recedes past 0 (pump off).
-     */
-    private void recedeIfHeadDecreased(FluidNetwork net, SimEdge edge, SimFluid fluid) {
-        float headAtFront = computeHeadAtFront(net, edge, fluid);
-        if (headAtFront >= -config.EPS()) return;
-
-        // Speed proportional to overshoot: fast at first, slows as it settles
-        float speed = config.frontK() * Math.abs(headAtFront) / fluid.viscosity();
-        float newPos = edge.frontPos() - speed;
-
-        if (newPos <= 0) {
-            edge.setPhase(EdgePhase.DRAINING);
-        } else {
-            edge.setFrontPos(newPos);
-            edge.advanceVisualFront(-speed);
-        }
-    }
-
-    /**
-     * Compute the front position where headAtFront = 0 for the current head budget.
-     * This is the furthest the pump can push with its current head.
-     * Solves: headAtUpstream - frictionPerBlock * pos - gravityPerUnit * pos = 0
-     */
-    private float computeEquilibriumFrontPos(FluidNetwork net, SimEdge edge, SimFluid fluid) {
-        NodeId upstream = edge.upstreamNode();
-        if (upstream == null) return 0;
-
-        float headAtUpstream = net.headAt(upstream);
-        if (headAtUpstream <= 0) return 0;
-
-        SimNode upNode = net.node(upstream);
-        NodeId downId = edge.downstreamNode();
-        SimNode downNode = downId != null ? net.node(downId) : null;
-
-        float gravityPerUnit = 0;
-        if (upNode != null && downNode != null && edge.length() > 0) {
-            float deltaY = (float) (downNode.elevation() - upNode.elevation());
-            gravityPerUnit = fluid.phase().sign() * fluid.density() * config.G()
-                    * deltaY / edge.length();
-        }
-
-        float costPerUnit = config.frictionPerBlock() + gravityPerUnit;
-        if (costPerUnit <= 0) return edge.length();
-
-        return Math.clamp(headAtUpstream / costPerUnit, 0f, (float) edge.length());
     }
 
     /**

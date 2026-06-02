@@ -111,7 +111,7 @@ public final class PipeGraphBuilder {
 
     /** Unwrap a NodeId back to a BlockPos. */
     public static BlockPos posOf(NodeId node) {
-        return (BlockPos) node.key();
+        return node.pos();
     }
 
     /** Get a Direction from a face index (Direction ordinal). */

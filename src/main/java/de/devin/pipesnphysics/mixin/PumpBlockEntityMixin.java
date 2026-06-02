@@ -19,6 +19,11 @@ import org.spongepowered.asm.mixin.Overwrite;
 @Mixin(value = PumpBlockEntity.class, remap = false)
 public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
 
+    /** Tracks pump facing to detect flips (wrench). A flip changes push/pull
+     *  sides, which is a topological change requiring a full network rebuild. */
+    @org.spongepowered.asm.mixin.Unique
+    private Direction pipesnphysics$lastFacing = null;
+
     private PumpBlockEntityMixin() { super(null, null, null); }
 
     /**
@@ -35,6 +40,14 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
         BlockState pumpState = self.getBlockState();
         Direction front = pumpState.getBlock() instanceof PumpBlock
                 ? pumpState.getValue(PumpBlock.FACING) : side;
+
+        // Detect facing change (pump flipped via wrench) — push/pull sides
+        // are baked at network build time, so this is a topological change.
+        if (pipesnphysics$lastFacing != null && pipesnphysics$lastFacing != front) {
+            FluidTransportHandler.clearCooldown(self.getLevel(), worldPosition);
+        }
+        pipesnphysics$lastFacing = front;
+
         boolean pull = side != front;
 
         if (!pull) {
@@ -42,7 +55,7 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
         }
 
         BlockPos pipePos = worldPosition.relative(side);
-        FluidTransportHandler.scheduleRecheck(pipePos);
+        FluidTransportHandler.scheduleRecheck(self.getLevel(), pipePos);
         FluidTransportHandler.scheduleCheck(self.getLevel(), pipePos);
     }
 }

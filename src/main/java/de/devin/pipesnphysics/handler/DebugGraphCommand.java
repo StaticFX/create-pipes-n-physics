@@ -188,7 +188,15 @@ public class DebugGraphCommand {
             SimEdge edge = network.edges().get(i);
             float rate = simResult.flowRates()[i];
             String dir = rate > 0 ? "a→b" : rate < 0 ? "b→a" : "none";
-            String phaseColor = switch (edge.phase()) {
+            // Derive effective phase for display: CHARGING with flow = FLOWING,
+            // CHARGING with no flow but front advanced = STALLED.
+            EdgePhase displayPhase = edge.phase();
+            if (displayPhase == EdgePhase.CHARGING && rate > 0) {
+                displayPhase = EdgePhase.FLOWING;
+            } else if (displayPhase == EdgePhase.CHARGING && rate == 0 && edge.frontPos() > 0) {
+                displayPhase = EdgePhase.STALLED;
+            }
+            String phaseColor = switch (displayPhase) {
                 case EMPTY -> "§8";
                 case CHARGING -> "§e";
                 case STALLED -> "§c";
@@ -196,7 +204,7 @@ public class DebugGraphCommand {
                 case DRAINING -> "§6";
             };
             send(player, String.format("  §7Edge %d: %s%s §7front=§f%.1f§7/§f%d §7flow=§f%.1f §7dir=§f%s §7head=§f%.2f",
-                    edge.id(), phaseColor, edge.phase().name(),
+                    edge.id(), phaseColor, displayPhase.name(),
                     edge.frontPos(), edge.length(),
                     Math.abs(rate), dir,
                     network.headAt(edge.upstreamNode() != null ? edge.upstreamNode() : edge.a())));

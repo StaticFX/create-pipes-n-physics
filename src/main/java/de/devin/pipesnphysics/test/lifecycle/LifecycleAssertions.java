@@ -18,12 +18,12 @@ public final class LifecycleAssertions {
 
     public static void awaitCharging(GameTestHelper helper, BlockPos netPos, int maxTicks, Runnable next) {
         Assertions.pollUntil(helper, "CHARGING", maxTicks, netPos,
-                () -> hasPhase(netPos, EdgePhase.CHARGING), next);
+                () -> hasPhase(helper, netPos, EdgePhase.CHARGING), next);
     }
 
     public static void awaitAllFlowing(GameTestHelper helper, BlockPos netPos, int maxTicks, Runnable next) {
         Assertions.pollUntil(helper, "all-FLOWING", maxTicks, netPos,
-                () -> allPhase(netPos, EdgePhase.FLOWING), next);
+                () -> allPhase(helper, netPos, EdgePhase.FLOWING), next);
     }
 
     /**
@@ -32,7 +32,7 @@ public final class LifecycleAssertions {
      */
     public static void awaitCircuitPrimed(GameTestHelper helper, BlockPos netPos, int maxTicks, Runnable next) {
         Assertions.pollUntil(helper, "circuit-primed", maxTicks, netPos, () -> {
-            FluidNetwork net = FluidTransportHandler.getCachedNetwork(netPos);
+            FluidNetwork net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), netPos);
             if (net == null || net.edges().isEmpty()) return false;
             for (SimEdge edge : net.edges()) {
                 if (edge.phase() == EdgePhase.EMPTY || edge.phase() == EdgePhase.DRAINING) return false;
@@ -44,15 +44,15 @@ public final class LifecycleAssertions {
 
     public static void awaitDraining(GameTestHelper helper, BlockPos netPos, int maxTicks, Runnable next) {
         Assertions.pollUntil(helper, "DRAINING", maxTicks, netPos,
-                () -> hasPhase(netPos, EdgePhase.DRAINING)
-                        || allPhase(netPos, EdgePhase.EMPTY)
-                        || networkGone(netPos),
+                () -> hasPhase(helper, netPos, EdgePhase.DRAINING)
+                        || allPhase(helper, netPos, EdgePhase.EMPTY)
+                        || networkGone(helper, netPos),
                 next);
     }
 
     public static void awaitAllEmpty(GameTestHelper helper, BlockPos netPos, int maxTicks, Runnable next) {
         Assertions.pollUntil(helper, "all-EMPTY", maxTicks, netPos,
-                () -> networkGone(netPos) || allPhase(netPos, EdgePhase.EMPTY),
+                () -> networkGone(helper, netPos) || allPhase(helper, netPos, EdgePhase.EMPTY),
                 next);
     }
 
@@ -68,19 +68,19 @@ public final class LifecycleAssertions {
                 () -> TestHelper.getFillAmountOfTank(helper, sourcePos) == 0, next);
     }
 
-    public static boolean hasPhase(BlockPos netPos, EdgePhase phase) {
-        FluidNetwork net = FluidTransportHandler.getCachedNetwork(netPos);
+    public static boolean hasPhase(GameTestHelper helper, BlockPos netPos, EdgePhase phase) {
+        FluidNetwork net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), netPos);
         return net != null && net.edges().stream().anyMatch(e -> e.phase() == phase);
     }
 
-    public static boolean allPhase(BlockPos netPos, EdgePhase phase) {
-        FluidNetwork net = FluidTransportHandler.getCachedNetwork(netPos);
+    public static boolean allPhase(GameTestHelper helper, BlockPos netPos, EdgePhase phase) {
+        FluidNetwork net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), netPos);
         return net != null && !net.edges().isEmpty()
                 && net.edges().stream().allMatch(e -> e.phase() == phase);
     }
 
-    public static boolean networkGone(BlockPos netPos) {
-        return FluidTransportHandler.getCachedNetwork(netPos) == null;
+    public static boolean networkGone(GameTestHelper helper, BlockPos netPos) {
+        return FluidTransportHandler.getCachedNetwork(helper.getLevel(), netPos) == null;
     }
 
     // ---- Visual assertions ----
@@ -90,7 +90,7 @@ public final class LifecycleAssertions {
      * This verifies Create's pipe renderer would show fluid.
      */
     public static void assertAnyPipeHasFlow(GameTestHelper helper, BlockPos netPos, String msg) {
-        FluidNetwork net = FluidTransportHandler.getCachedNetwork(netPos);
+        FluidNetwork net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), netPos);
         if (net == null) { helper.fail(msg + " — no network"); return; }
 
         for (SimEdge edge : net.edges()) {
@@ -107,7 +107,7 @@ public final class LifecycleAssertions {
      * Used after draining completes to verify pipes are visually clear.
      */
     public static void assertNoPipeHasFlow(GameTestHelper helper, BlockPos netPos, String msg) {
-        FluidNetwork net = FluidTransportHandler.getCachedNetwork(netPos);
+        FluidNetwork net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), netPos);
         if (net == null) return; // no network = no flows, OK
 
         for (SimEdge edge : net.edges()) {
@@ -127,14 +127,14 @@ public final class LifecycleAssertions {
      */
     public static void assertVisualFrontAdvanced(GameTestHelper helper, BlockPos netPos,
                                                   float minPos, String msg) {
-        FluidNetwork net = FluidTransportHandler.getCachedNetwork(netPos);
+        FluidNetwork net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), netPos);
         if (net == null) { helper.fail(msg + " — no network"); return; }
 
         for (SimEdge edge : net.edges()) {
             if (edge.visualFrontPos() >= minPos) return; // found one
         }
         helper.fail(msg + " — visualFrontPos < " + minPos + " on all edges. Edges: "
-                + Assertions.describeEdges(netPos));
+                + Assertions.describeEdges(helper, netPos));
     }
 
     /**
@@ -143,7 +143,7 @@ public final class LifecycleAssertions {
      */
     public static void assertUpstreamIs(GameTestHelper helper, BlockPos netPos,
                                          BlockPos expectedSourcePos, String msg) {
-        FluidNetwork net = FluidTransportHandler.getCachedNetwork(netPos);
+        FluidNetwork net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), netPos);
         if (net == null) { helper.fail(msg + " — no network"); return; }
 
         NodeId expected = PipeGraphBuilder.nodeOf(expectedSourcePos);
@@ -170,7 +170,7 @@ public final class LifecycleAssertions {
     public static void awaitAnyPipeHasFlow(GameTestHelper helper, BlockPos netPos,
                                             int maxTicks, Runnable next) {
         Assertions.pollUntil(helper, "pipe-has-flow", maxTicks, netPos, () -> {
-            FluidNetwork net = FluidTransportHandler.getCachedNetwork(netPos);
+            FluidNetwork net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), netPos);
             if (net == null) return false;
             for (SimEdge edge : net.edges()) {
                 for (PipeEntry entry : edge.pipes()) {

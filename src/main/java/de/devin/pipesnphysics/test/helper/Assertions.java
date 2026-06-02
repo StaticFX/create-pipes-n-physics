@@ -43,7 +43,7 @@ public final class Assertions {
                                    BlockPos netPos, BooleanSupplier condition,
                                    Runnable then, int tick) {
         if (tick > maxTicks) {
-            helper.fail("[" + phase + "] timed out after " + maxTicks + "t. Edges: " + describeEdges(netPos));
+            helper.fail("[" + phase + "] timed out after " + maxTicks + "t. Edges: " + describeEdges(helper, netPos));
             return;
         }
         helper.runAfterDelay(1, () -> {
@@ -55,8 +55,8 @@ public final class Assertions {
         });
     }
 
-    public static String describeEdges(BlockPos netPos) {
-        FluidNetwork net = FluidTransportHandler.getCachedNetwork(netPos);
+    public static String describeEdges(GameTestHelper helper, BlockPos netPos) {
+        FluidNetwork net = FluidTransportHandler.getCachedNetwork(helper.getLevel(), netPos);
         if (net == null) return "no network";
         return net.edges().stream()
                 .map(e -> e.phase() + "(" + String.format("%.1f", e.frontPos()) + "/" + e.length() + ")")

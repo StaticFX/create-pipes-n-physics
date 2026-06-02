@@ -261,12 +261,14 @@ public final class CreatePipeRendering {
                     ? Math.clamp(edge.frontPos() / edge.length(), 0f, 1f)
                     : 0;
 
-            // Derive display phase: the sim keeps edges in CHARGING even after
-            // the front has traversed the full length and flow is active (primed).
-            // CHARGING + non-zero flow rate = effectively FLOWING for display.
+            // Derive display phase from stored CHARGING:
+            //   CHARGING + non-zero flow rate = effectively FLOWING
+            //   CHARGING + zero rate + front advanced = effectively STALLED
             EdgePhase displayPhase = edge.phase();
             if (displayPhase == EdgePhase.CHARGING && rate > 0) {
                 displayPhase = EdgePhase.FLOWING;
+            } else if (displayPhase == EdgePhase.CHARGING && rate == 0 && edge.frontPos() > 0) {
+                displayPhase = EdgePhase.STALLED;
             }
 
             PressureBreakdown breakdown = new PressureBreakdown(
