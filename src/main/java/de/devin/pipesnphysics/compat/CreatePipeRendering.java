@@ -81,12 +81,12 @@ public final class CreatePipeRendering {
             int pipeCount = edge.pipePositions().size();
 
             // Determine flow direction
-            boolean isCharging = edge.phase() == EdgePhase.CHARGING;
+            boolean hasFront = edge.phase().hasFront();
             boolean isDraining = edge.phase() == EdgePhase.DRAINING;
             boolean flowFromA;
 
-            if (isCharging || isDraining) {
-                flowFromA = edge.upstreamNode().equals(edge.a());
+            if (hasFront) {
+                flowFromA = edge.upstreamNode() != null && edge.upstreamNode().equals(edge.a());
             } else {
                 flowFromA = rate > 0;
             }
@@ -110,17 +110,17 @@ public final class CreatePipeRendering {
                 if (pipe == null) continue;
 
                 if (edge.isEmpty()
-                        || (rate == 0 && !isCharging && !isDraining
+                        || (rate == 0 && !hasFront
                             && edge.phase() != EdgePhase.FLOWING)) {
                     clearPipeFlows(pipe);
                     continue;
                 }
 
                 // Compute per-pipe fill progress from the front position.
-                // CHARGING/DRAINING: front tracks which pipe the fluid is in.
+                // hasFront phases: front tracks which pipe the fluid is in.
                 // FLOWING (fallback): all pipes fully filled.
                 float pipeProgress;
-                if (isCharging || isDraining) {
+                if (hasFront) {
                     pipeProgress = pipeProgressFromFront(frontPos, pi, pipeCount, frontFromA);
                 } else {
                     pipeProgress = MAX_PIPE_PROGRESS;
@@ -220,6 +220,7 @@ public final class CreatePipeRendering {
 
     /**
      * Store diagnostic pressure breakdowns on pipe block entities for goggle display.
+     * Includes phase, front progress, ΔΦ, and head remaining for phase-aware tooltips.
      */
     public static void storeBreakdowns(Level level, FluidNetwork network, SimResult result) {
         float totalPumpHead = 0;
@@ -241,6 +242,33 @@ public final class CreatePipeRendering {
                 gravityHead = config.G() * deltaY;
             }
 
+            // Compute ΔΦ from potentials (stored per node in SimResult)
+            float deltaPhi = 0;
+            if (result.potentials() != null) {
+                float phiA = result.potentials().getOrDefault(edge.a(), 0f);
+                float phiB = result.potentials().getOrDefault(edge.b(), 0f);
+                deltaPhi = phiA - phiB;
+            }
+
+            // Head at upstream (entry) and downstream (exit) nodes
+            NodeId upstream = edge.upstreamNode();
+            NodeId downstream = edge.downstreamNode();
+            float headAtUpstream = upstream != null ? network.headAt(upstream) : 0;
+            float headRemaining = downstream != null ? network.headAt(downstream) : 0;
+
+            // Front progress as fraction 0..1
+            float frontProgress = edge.length() > 0
+                    ? Math.clamp(edge.frontPos() / edge.length(), 0f, 1f)
+                    : 0;
+
+            // Derive display phase: the sim keeps edges in CHARGING even after
+            // the front has traversed the full length and flow is active (primed).
+            // CHARGING + non-zero flow rate = effectively FLOWING for display.
+            EdgePhase displayPhase = edge.phase();
+            if (displayPhase == EdgePhase.CHARGING && rate > 0) {
+                displayPhase = EdgePhase.FLOWING;
+            }
+
             PressureBreakdown breakdown = new PressureBreakdown(
                     gravityHead,
                     totalPumpHead,
@@ -248,7 +276,13 @@ public final class CreatePipeRendering {
                     edge.resistance(),
                     rate,
                     rate > config.maxFlow() * 0.95f,
-                    false);
+                    false,
+                    displayPhase,
+                    frontProgress,
+                    deltaPhi,
+                    headRemaining,
+                    edge.length(),
+                    headAtUpstream);
 
             for (BlockPos pos : edge.pipePositions()) {
                 FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, pos);
