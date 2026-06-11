@@ -3,6 +3,7 @@ package de.devin.pipesnphysics.handler;
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
+import de.devin.pipesnphysics.engine.EngineTickHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.sounds.SoundEvents;
@@ -87,6 +88,7 @@ public class PipeSwapHandler {
 
         // Trigger pipe network update
         FluidPropagator.propagateChangedPipe(level, pos, pumpState);
+        EngineTickHandler.markChanged(level, pos);
 
         event.cancelWithResult(ItemInteractionResult.SUCCESS);
     }

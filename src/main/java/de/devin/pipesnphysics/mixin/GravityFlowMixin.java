@@ -3,61 +3,34 @@ package de.devin.pipesnphysics.mixin;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
-import de.devin.pipesnphysics.compat.SableCompat;
-import de.devin.pipesnphysics.handler.FluidTransportHandler;
-import de.devin.pipesnphysics.physics.PipeFlowData;
+import de.devin.pipesnphysics.engine.EngineTickHandler;
 import net.minecraft.world.level.Level;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Cancels Create's fluid transport tick on pipes managed by our engine.
- * Must cancel on BOTH server and client — Create's client-side tickFlowProgress
- * advances flow progress independently, overriding our visual state.
+ * Cancels Create's fluid transport tick on every pipe while the engine is enabled,
+ * and marks the network as dirty so the engine picks it up on the next server tick.
+ *
+ * The cancel happens on both server and client so Create's visual flow progress
+ * doesn't fight the engine's overlay.
  */
 @Mixin(value = FluidTransportBehaviour.class, remap = false)
 public abstract class GravityFlowMixin extends BlockEntityBehaviour {
 
-    @Shadow public FluidTransportBehaviour.UpdatePhase phase;
-
     private GravityFlowMixin() { super(null); }
 
     @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
-    private void cancelCreateTransport(CallbackInfo ci) {
-        if (!PipesNPhysicsConfig.ENABLE_GRAVITY_FLOW.get()) return;
+    private void pipesnphysics$cancelCreateTransport(CallbackInfo ci) {
+        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
+        if (blockEntity.isVirtual()) return; // Ponder scenes & schematics keep Create's animation
         Level level = blockEntity.getLevel();
         if (level == null) return;
-
-        boolean managed;
         if (!level.isClientSide()) {
-            managed = FluidTransportHandler.isManaged(level, blockEntity.getBlockPos());
-        } else {
-            // Client: use the synced breakdown as a marker (set by server, synced via NBT)
-            managed = this instanceof PipeFlowData data && data.pipesnphysics$getBreakdown() != null;
+            EngineTickHandler.markDirty(level, blockEntity.getBlockPos());
         }
-
-        if (managed) {
-            if (!level.isClientSide()) {
-                int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
-                if (level.getGameTime() % recheckTicks == 0) {
-                    if (SableCompat.hasSubLevelRotated(level, blockEntity.getBlockPos())) {
-                        FluidTransportHandler.clearCooldown(level, blockEntity.getBlockPos());
-                    }
-                    FluidTransportHandler.scheduleCheck(level, blockEntity.getBlockPos());
-                }
-            }
-            ci.cancel();
-            return;
-        }
-
-        if (!level.isClientSide()) {
-            int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
-            if (level.getGameTime() % recheckTicks == 0) {
-                FluidTransportHandler.scheduleCheck(level, blockEntity.getBlockPos());
-            }
-        }
+        ci.cancel();
     }
 }
