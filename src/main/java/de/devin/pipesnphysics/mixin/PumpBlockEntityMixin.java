@@ -1,61 +1,55 @@
 package de.devin.pipesnphysics.mixin;
 
-import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.content.fluids.pump.PumpBlockEntity;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
-import net.minecraft.world.level.block.state.BlockState;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
-import de.devin.pipesnphysics.handler.FluidTransportHandler;
+import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.engine.EngineTickHandler;
+import net.minecraft.core.Direction;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Overwrite;
+import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Replaces Create's pump pressure distribution.
- * All flow logic (pressure, fluid transfer, gas support) is handled
- * by FluidTransportHandler's unified solver and transfer system.
+ * Suppresses Create's pump pressure distribution while the engine is enabled (the
+ * engine routes fluid itself) and wakes the network whenever the pump's facing
+ * changes. When the engine is disabled in config, Create's logic runs untouched.
  */
 @Mixin(value = PumpBlockEntity.class, remap = false)
 public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
 
-    /** Tracks pump facing to detect flips (wrench). A flip changes push/pull
-     *  sides, which is a topological change requiring a full network rebuild. */
-    @org.spongepowered.asm.mixin.Unique
+    @Unique
     private Direction pipesnphysics$lastFacing = null;
 
     private PumpBlockEntityMixin() { super(null, null, null); }
 
-    /**
-     * @author PipesNPhysics
-     * @reason Unified handler manages all pressure and fluid transfer
-     */
-    @Overwrite
-    protected void distributePressureTo(Direction side) {
-        PumpBlockEntity self = (PumpBlockEntity) (Object) this;
-        if (self.getSpeed() == 0) return;
-        if (self.getLevel() == null || self.getLevel().isClientSide()) return;
-
-        BlockPos worldPosition = self.getBlockPos();
-        BlockState pumpState = self.getBlockState();
-        Direction front = pumpState.getBlock() instanceof PumpBlock
-                ? pumpState.getValue(PumpBlock.FACING) : side;
-
-        // Detect facing change (pump flipped via wrench) — push/pull sides
-        // are baked at network build time, so this is a topological change.
+    @Inject(method = "tick", at = @At("HEAD"))
+    private void pipesnphysics$detectFlip(CallbackInfo ci) {
+        Level world = level;
+        if (world == null || world.isClientSide()) return;
+        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
+        BlockState state = getBlockState();
+        if (!(state.getBlock() instanceof PumpBlock)) return;
+        Direction front = state.getValue(PumpBlock.FACING);
         if (pipesnphysics$lastFacing != null && pipesnphysics$lastFacing != front) {
-            FluidTransportHandler.clearCooldown(self.getLevel(), worldPosition);
+            EngineTickHandler.markChanged(world, worldPosition);
+            EngineTickHandler.markChanged(world, worldPosition.relative(front));
+            EngineTickHandler.markChanged(world, worldPosition.relative(front.getOpposite()));
         }
         pipesnphysics$lastFacing = front;
+    }
 
-        boolean pull = side != front;
-
-        if (!pull) {
-            FluidPropagator.resetAffectedFluidNetworks(self.getLevel(), worldPosition, side.getOpposite());
+    @Inject(method = "distributePressureTo", at = @At("HEAD"), cancellable = true)
+    private void pipesnphysics$replacePressureDistribution(Direction side, CallbackInfo ci) {
+        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
+        PumpBlockEntity self = (PumpBlockEntity) (Object) this;
+        if (self.getLevel() != null && !self.getLevel().isClientSide()) {
+            EngineTickHandler.markChanged(self.getLevel(), self.getBlockPos().relative(side));
         }
-
-        BlockPos pipePos = worldPosition.relative(side);
-        FluidTransportHandler.scheduleRecheck(self.getLevel(), pipePos);
-        FluidTransportHandler.scheduleCheck(self.getLevel(), pipePos);
+        ci.cancel();
     }
 }
