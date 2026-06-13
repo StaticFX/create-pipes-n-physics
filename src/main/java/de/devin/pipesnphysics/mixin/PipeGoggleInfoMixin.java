@@ -5,8 +5,8 @@ import com.simibubi.create.content.fluids.pipes.FluidPipeBlockEntity;
 import com.simibubi.create.content.fluids.pipes.SmartFluidPipeBlockEntity;
 import com.simibubi.create.content.fluids.pipes.StraightPipeBlockEntity;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
-import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.client.GoggleText;
 import de.devin.pipesnphysics.engine.net.PipeStatusClient;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import net.createmod.catnip.lang.LangBuilder;
@@ -72,6 +72,7 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
             case PipeStatusPayload.STATUS_FLOWING -> pipesnphysics$addFlowLine(tooltip, data);
             default -> { }
         }
+        if (isPlayerSneaking) pipesnphysics$addStatusDetail(tooltip, data);
 
         if (!data.fluid().isEmpty()) {
             pipesnphysics$text(data.fluid().getHoverName().getString())
@@ -81,7 +82,52 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         }
 
         pipesnphysics$addHeadLeftLine(tooltip, data);
+        if (isPlayerSneaking) pipesnphysics$addPressureLines(tooltip, data);
         return true;
+    }
+
+    /** Names the culprit behind a blocked/stalled status when the solver knows it. */
+    @Unique
+    private void pipesnphysics$addStatusDetail(List<Component> tooltip, PipeStatusPayload data) {
+        String key = switch (data.statusDetail()) {
+            case PipeStatusPayload.DETAIL_VALVE -> "valve";
+            case PipeStatusPayload.DETAIL_PUMP_OFF -> "pump_off";
+            case PipeStatusPayload.DETAIL_CREST -> "crest";
+            case PipeStatusPayload.DETAIL_SINK_FULL -> "sink_full";
+            case PipeStatusPayload.DETAIL_SOURCE_DRY -> "source_dry";
+            default -> null;
+        };
+        if (key == null) return;
+        pipesnphysics$lang("gui.goggles.detail." + key)
+                .style(ChatFormatting.GOLD)
+                .forGoggles(tooltip, 2);
+    }
+
+    /**
+     * Gauge pressure — the fluid column actually sitting on (positive) or pulling
+     * at (negative) this cell — and, under suction, the margin left before the
+     * cavitation limit breaks the column.
+     */
+    @Unique
+    private void pipesnphysics$addPressureLines(List<Component> tooltip, PipeStatusPayload data) {
+        if (data.hasPressure()) {
+            float pressure = data.pressureBlocks();
+            pipesnphysics$lang("gui.goggles.pressure")
+                    .style(ChatFormatting.GRAY)
+                    .add(pipesnphysics$text(LangNumberFormat.format(pressure))
+                            .style(pressure < 0 ? ChatFormatting.GOLD : ChatFormatting.AQUA))
+                    .add(pipesnphysics$lang("gui.goggles.blocks").style(ChatFormatting.DARK_GRAY))
+                    .forGoggles(tooltip, 1);
+        }
+        if (data.hasSuctionMargin()) {
+            float margin = data.suctionMarginBlocks();
+            pipesnphysics$lang("gui.goggles.suction_margin")
+                    .style(ChatFormatting.GRAY)
+                    .add(pipesnphysics$text(LangNumberFormat.format(margin))
+                            .style(margin < 1 ? ChatFormatting.RED : ChatFormatting.GOLD))
+                    .add(pipesnphysics$lang("gui.goggles.blocks").style(ChatFormatting.DARK_GRAY))
+                    .forGoggles(tooltip, 1);
+        }
     }
 
     /**
@@ -94,13 +140,34 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
     private void pipesnphysics$addHeadLeftLine(List<Component> tooltip, PipeStatusPayload data) {
         if (!data.hasHeadroom()) return;
         float left = data.headroomBlocks();
+        float total = data.headTotalBlocks();
+        boolean hasBudget = total > 0.05f;
         ChatFormatting color = left < 0 ? ChatFormatting.RED
                 : left < 2 ? ChatFormatting.GOLD
                 : ChatFormatting.GREEN;
-        pipesnphysics$lang("gui.goggles.head_left")
+        LangBuilder line = pipesnphysics$lang("gui.goggles.head_left")
                 .style(ChatFormatting.GRAY)
-                .add(pipesnphysics$text(LangNumberFormat.format(left)).style(color))
-                .add(pipesnphysics$lang("gui.goggles.blocks").style(ChatFormatting.DARK_GRAY))
+                .add(pipesnphysics$text(LangNumberFormat.format(left)).style(color));
+        if (hasBudget) {
+            line.add(pipesnphysics$text(" / ").style(ChatFormatting.DARK_GRAY))
+                    .add(pipesnphysics$text(LangNumberFormat.format(total)).style(ChatFormatting.GRAY));
+        }
+        line.add(pipesnphysics$lang("gui.goggles.blocks").style(ChatFormatting.DARK_GRAY))
+                .forGoggles(tooltip, 1);
+        if (hasBudget) pipesnphysics$addBudgetBar(tooltip, left, total);
+    }
+
+    /**
+     * Boiler-style budget bar: green bars are head still available, dark red is
+     * what the climb from the supply has already consumed. One bar per block of
+     * head while the budget fits a boiler-width bar; compressed proportionally
+     * beyond that.
+     */
+    @Unique
+    private void pipesnphysics$addBudgetBar(List<Component> tooltip, float left, float total) {
+        int segments = Math.clamp(Math.round(total), 1, 18);
+        int remaining = Math.clamp(Math.round(segments * left / total), 0, segments);
+        GoggleText.barLine("gui.goggles.head_budget", remaining, segments)
                 .forGoggles(tooltip, 1);
     }
 
@@ -133,11 +200,11 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
 
     @Unique
     private static LangBuilder pipesnphysics$lang(String key) {
-        return new LangBuilder(PipesNPhysics.ID).translate(key);
+        return GoggleText.lang(key);
     }
 
     @Unique
     private static LangBuilder pipesnphysics$text(String text) {
-        return new LangBuilder(PipesNPhysics.ID).text(text);
+        return GoggleText.text(text);
     }
 }
