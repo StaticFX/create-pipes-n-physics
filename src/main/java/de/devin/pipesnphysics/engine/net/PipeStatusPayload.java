@@ -23,7 +23,14 @@ public record PipeStatusPayload(
         boolean hasPressure,
         float pressureBlocks,
         boolean hasHeadroom,
-        float headroomBlocks
+        float headroomBlocks,
+        float headTotalBlocks,
+        byte statusDetail,
+        boolean hasSuctionMargin,
+        float suctionMarginBlocks,
+        boolean hasPumpLoad,
+        float pumpHeadAgainst,
+        float pumpFrictionFactor
 ) implements CustomPacketPayload {
 
     public static final byte STATUS_NOT_CONNECTED = 0;
@@ -33,6 +40,13 @@ public record PipeStatusPayload(
     public static final byte STATUS_STALLED = 4;
     public static final byte STATUS_NO_HEAD = 5;
 
+    public static final byte DETAIL_NONE = 0;
+    public static final byte DETAIL_VALVE = 1;
+    public static final byte DETAIL_PUMP_OFF = 2;
+    public static final byte DETAIL_CREST = 3;
+    public static final byte DETAIL_SINK_FULL = 4;
+    public static final byte DETAIL_SOURCE_DRY = 5;
+
     public static final Type<PipeStatusPayload> TYPE =
             new Type<>(PipesNPhysics.asResource("pipe_status"));
 
@@ -41,7 +55,7 @@ public record PipeStatusPayload(
 
     public static PipeStatusPayload notConnected(BlockPos pos) {
         return new PipeStatusPayload(pos, STATUS_NOT_CONNECTED, 0, null, FluidStack.EMPTY,
-                false, 0, false, 0);
+                false, 0, false, 0, 0, DETAIL_NONE, false, 0, false, 0, 0);
     }
 
     private static void write(RegistryFriendlyByteBuf buf, PipeStatusPayload payload) {
@@ -54,6 +68,13 @@ public record PipeStatusPayload(
         buf.writeFloat(payload.pressureBlocks);
         buf.writeBoolean(payload.hasHeadroom);
         buf.writeFloat(payload.headroomBlocks);
+        buf.writeFloat(payload.headTotalBlocks);
+        buf.writeByte(payload.statusDetail);
+        buf.writeBoolean(payload.hasSuctionMargin);
+        buf.writeFloat(payload.suctionMarginBlocks);
+        buf.writeBoolean(payload.hasPumpLoad);
+        buf.writeFloat(payload.pumpHeadAgainst);
+        buf.writeFloat(payload.pumpFrictionFactor);
     }
 
     private static PipeStatusPayload read(RegistryFriendlyByteBuf buf) {
@@ -66,9 +87,18 @@ public record PipeStatusPayload(
         float pressure = buf.readFloat();
         boolean hasHeadroom = buf.readBoolean();
         float headroom = buf.readFloat();
+        float headTotal = buf.readFloat();
+        byte statusDetail = buf.readByte();
+        boolean hasSuctionMargin = buf.readBoolean();
+        float suctionMargin = buf.readFloat();
+        boolean hasPumpLoad = buf.readBoolean();
+        float pumpHeadAgainst = buf.readFloat();
+        float pumpFrictionFactor = buf.readFloat();
         return new PipeStatusPayload(pos, status, mbPerTick,
                 directionId < 0 ? null : Direction.from3DDataValue(directionId),
-                fluid, hasPressure, pressure, hasHeadroom, headroom);
+                fluid, hasPressure, pressure, hasHeadroom, headroom, headTotal,
+                statusDetail, hasSuctionMargin, suctionMargin,
+                hasPumpLoad, pumpHeadAgainst, pumpFrictionFactor);
     }
 
     @Override

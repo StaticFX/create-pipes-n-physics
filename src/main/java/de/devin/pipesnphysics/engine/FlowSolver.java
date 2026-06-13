@@ -79,9 +79,12 @@ public final class FlowSolver {
         stalled.removeAll(results.movingEdges);
         Set<Integer> noHead = new HashSet<>(results.noHeadEdges);
         noHead.removeAll(results.movingEdges);
+        Set<Integer> blocked = new HashSet<>(results.blockedEdges);
+        blocked.removeAll(results.movingEdges);
         return new Solution(toEdgeFlows(graph, results.edgeFlow), results.transfers,
-                results.nodeHeads, results.nodeCeilings, results.edgeFluids,
-                results.blockedEdges, stalled, noHead, active);
+                results.nodeHeads, results.nodeCeilings, results.nodeAnchors,
+                results.edgeFluids, blocked, stalled, noHead,
+                results.edgeReasons, results.pumpLoads, active);
     }
 
     /** Accumulators shared by the per-fluid passes of one solve. */
@@ -90,11 +93,14 @@ public final class FlowSolver {
         final double[] strongestEdgeFlow;
         final Map<Integer, Double> nodeHeads = new HashMap<>();
         final Map<Integer, Double> nodeCeilings = new HashMap<>();
+        final Map<Integer, Double> nodeAnchors = new HashMap<>();
         final Map<Integer, FluidStack> edgeFluids = new HashMap<>();
         final Set<Integer> blockedEdges = new HashSet<>();
         final Set<Integer> stalledEdges = new HashSet<>();
         final Set<Integer> noHeadEdges = new HashSet<>();
         final Set<Integer> movingEdges = new HashSet<>();
+        final Map<Integer, Solution.Reason> edgeReasons = new HashMap<>();
+        final Map<Integer, Solution.PumpLoad> pumpLoads = new HashMap<>();
         final List<Solution.Transfer> transfers = new ArrayList<>();
 
         GroupResults(int edgeCount) {
@@ -189,7 +195,8 @@ public final class FlowSolver {
     // ------------------------------------------------------------------ one fluid pass
 
     private record BranchMeta(int edgeIndex, BoundaryColumn columnA, BoundaryColumn columnB,
-                              double lipA, double lipB) {}
+                              double lipA, double lipB,
+                              int pumpNode, double pumpHead, double pumpInternalG) {}
 
     private static boolean solveGroup(Level level, Graph graph, Columns columns,
                                       Map<Integer, PumpState> pumps, FluidStack sample,
@@ -229,7 +236,7 @@ public final class FlowSolver {
         List<BranchMeta> meta = new ArrayList<>();
         for (Edge edge : graph.edges()) {
             assembleBranch(level, graph, columns, pumps, edge, solverIndex, sample,
-                    gas, relDensity, conductancePerTile, branches, meta, results.blockedEdges);
+                    gas, relDensity, conductancePerTile, branches, meta, results);
         }
         if (branches.isEmpty()) return false;
 
@@ -237,7 +244,7 @@ public final class FlowSolver {
                 PipesNPhysicsConfig.SUCTION_LIMIT.get());
 
         recordDisplayHeads(graph, solverIndex, nodeSpecs, canSupply, branches, result,
-                results.nodeHeads, results.nodeCeilings);
+                gas, relDensity, results.nodeHeads, results.nodeCeilings, results.nodeAnchors);
 
         boolean active = false;
         for (int b = 0; b < branches.size(); b++) {
@@ -246,7 +253,10 @@ public final class FlowSolver {
             results.edgeFlow[edgeIndex] += flow;
             active |= Math.abs(flow) > ACTIVE_FLOW_EPS;
 
-            if (result.crestBlocked()[b]) results.blockedEdges.add(edgeIndex);
+            if (result.crestBlocked()[b]) {
+                results.blockedEdges.add(edgeIndex);
+                results.edgeReasons.putIfAbsent(edgeIndex, Solution.Reason.CREST);
+            }
             if (result.backflowBlocked()[b] && branches.get(b).emf() != 0) {
                 results.noHeadEdges.add(edgeIndex);
             }
@@ -254,20 +264,29 @@ public final class FlowSolver {
                 results.strongestEdgeFlow[edgeIndex] = Math.abs(flow);
                 results.edgeFluids.put(edgeIndex, sample);
             }
+
+            recordPumpLoad(meta.get(b), branches.get(b), flow, result.active()[b], results.pumpLoads);
         }
 
-        int plannedMb = planTransfers(level, participants, columnIndex, branches, meta, result,
+        TransferPlan plan = planTransfers(level, participants, columnIndex, branches, meta, result,
                 sample, gas, relDensity, claimedEmpties, results.transfers);
 
         // Pressurized but nothing moved (sink full, source undrainable): the pass
         // is STALLED — distinguish it from genuine flow so the player isn't shown
         // movement that never happens. A later pass that really moves fluid over
         // the same edge overrides the stall for display.
+        Solution.Reason stallReason = plan.hadSource()
+                ? Solution.Reason.SINK_FULL : Solution.Reason.SOURCE_DRY;
         for (int b = 0; b < branches.size(); b++) {
             int rounded = (int) Math.round(Math.abs(result.flows()[b]));
             if (rounded < 1) continue;
-            (plannedMb > 0 ? results.movingEdges : results.stalledEdges)
-                    .add(meta.get(b).edgeIndex());
+            int edgeIndex = meta.get(b).edgeIndex();
+            if (plan.plannedMb() > 0) {
+                results.movingEdges.add(edgeIndex);
+            } else {
+                results.stalledEdges.add(edgeIndex);
+                results.edgeReasons.putIfAbsent(edgeIndex, stallReason);
+            }
         }
         return active;
     }
@@ -301,6 +320,31 @@ public final class FlowSolver {
                 : column.baseY() + fillHeight;
     }
 
+    /**
+     * Capture a running pump's operating point for the goggle load breakdown.
+     * From {@code q = G · (emf − Δh)} the head fought is {@code Δh = emf − q/G} (left
+     * UNCLAMPED: negative means gravity assists, which the goggle shows rather than
+     * blaming friction), and the friction factor is {@code G / internalG} (below 1
+     * only when the pipe run, not the pump itself, caps the flow). Emitted only for a
+     * single-pump push branch carrying real flow; idle, dead-headed, and ambiguous
+     * twin-pump branches are left out so the goggle shows just the bar. When several
+     * fluid passes could claim one pump, the busiest (highest flow) wins so the
+     * readout is deterministic.
+     */
+    private static void recordPumpLoad(BranchMeta meta, BranchSpec branch, double flow,
+                                       boolean active, Map<Integer, Solution.PumpLoad> pumpLoads) {
+        if (meta.pumpNode() < 0 || !active) return;
+        double emf = meta.pumpHead();
+        double branchG = branch.conductance();
+        double q = Math.abs(flow);
+        if (emf <= 1e-6 || branchG <= 1e-9 || q <= ACTIVE_FLOW_EPS) return;
+        double against = emf - q / branchG;
+        double friction = Math.max(0, Math.min(1, branchG / meta.pumpInternalG()));
+        Solution.PumpLoad load = new Solution.PumpLoad(emf, against, friction, q);
+        pumpLoads.merge(meta.pumpNode(), load,
+                (old, fresh) -> fresh.drivingFlow() > old.drivingFlow() ? fresh : old);
+    }
+
     // ------------------------------------------------------------------ branch assembly
 
     private static void assembleBranch(Level level, Graph graph, Columns columns,
@@ -309,18 +353,23 @@ public final class FlowSolver {
                                        boolean gas, double relDensity,
                                        double conductancePerTile,
                                        List<BranchSpec> branches, List<BranchMeta> meta,
-                                       Set<Integer> blockedEdges) {
+                                       GroupResults results) {
+        Set<Integer> blockedEdges = results.blockedEdges;
         int solverA = solverIndex[edge.a()];
         int solverB = solverIndex[edge.b()];
         if (solverA < 0 || solverB < 0 || solverA == solverB) return;
         if (!runAcceptsFluid(level, graph, edge, sample)) {
             blockedEdges.add(edge.index());
+            results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.VALVE);
             return;
         }
 
         double conductance = conductancePerTile / (edge.length() + 1);
         double emf = 0;
         int allowedSign = 0;
+        int driveNode = -1;
+        double driveHead = 0;
+        double driveInternalG = 0;
 
         for (int side = 0; side < 2; side++) {
             int nodeIndex = side == 0 ? edge.a() : edge.b();
@@ -328,6 +377,7 @@ public final class FlowSolver {
             if (pump == null) continue;
             if (!pump.open()) {
                 blockedEdges.add(edge.index());
+                results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.PUMP_OFF);
                 return;
             }
 
@@ -339,6 +389,11 @@ public final class FlowSolver {
                 emf += outSign * pump.head();
                 allowedSign = combineSign(allowedSign, outSign);
                 conductance = Math.min(conductance, pump.internalConductance());
+                // The pump driving this run; a second pump pushing into the same
+                // edge makes the load attribution ambiguous, so flag it off.
+                driveNode = driveNode < 0 ? nodeIndex : -2;
+                driveHead = pump.head();
+                driveInternalG = pump.internalConductance();
             } else if (toward.equals(pumpNode.pos().relative(pump.pushSide().getOpposite()))) {
                 allowedSign = combineSign(allowedSign, -outSign);
             } else {
@@ -398,7 +453,8 @@ public final class FlowSolver {
         branches.add(new BranchSpec(solverA, solverB, conductance, emf, allowedSign,
                 crestHeight, crestPos));
         meta.add(new BranchMeta(edge.index(),
-                columns.byNode.get(edge.a()), columns.byNode.get(edge.b()), lipA, lipB));
+                columns.byNode.get(edge.a()), columns.byNode.get(edge.b()), lipA, lipB,
+                driveNode, driveHead, driveInternalG));
     }
 
     /**
@@ -462,14 +518,16 @@ public final class FlowSolver {
 
     // ------------------------------------------------------------------ transfer planning
 
-    /** Plans this pass's transfers; returns the total mB actually scheduled. */
-    private static int planTransfers(Level level, List<BoundaryColumn> participants,
-                                     Map<BoundaryColumn, Integer> columnIndex,
-                                     List<BranchSpec> branches, List<BranchMeta> meta,
-                                     NetworkSolver.Result result, FluidStack sample,
-                                     boolean gas, double relDensity,
-                                     Set<BlockPos> claimedEmpties,
-                                     List<Solution.Transfer> transfers) {
+    /** What a pass actually scheduled, and whether either side had anything to offer. */
+    private record TransferPlan(int plannedMb, boolean hadSource, boolean hadSink) {}
+
+    private static TransferPlan planTransfers(Level level, List<BoundaryColumn> participants,
+                                              Map<BoundaryColumn, Integer> columnIndex,
+                                              List<BranchSpec> branches, List<BranchMeta> meta,
+                                              NetworkSolver.Result result, FluidStack sample,
+                                              boolean gas, double relDensity,
+                                              Set<BlockPos> claimedEmpties,
+                                              List<Solution.Transfer> transfers) {
         int maxFlow = PipesNPhysicsConfig.MAX_FLOW_PER_ENDPOINT.get();
 
         List<BoundaryColumn> sources = new ArrayList<>();
@@ -517,7 +575,7 @@ public final class FlowSolver {
                 planned += amount;
             }
         }
-        return planned;
+        return new TransferPlan(planned, !sources.isEmpty(), !sinks.isEmpty());
     }
 
     /** What the handler will really give up this tick, probed without mutating it. */
@@ -591,8 +649,10 @@ public final class FlowSolver {
                                            List<NodeSpec> nodeSpecs, List<Boolean> canSupply,
                                            List<BranchSpec> branches,
                                            NetworkSolver.Result result,
+                                           boolean gas, double relDensity,
                                            Map<Integer, Double> nodeHeads,
-                                           Map<Integer, Double> nodeCeilings) {
+                                           Map<Integer, Double> nodeCeilings,
+                                           Map<Integer, Double> nodeAnchors) {
         int n = nodeSpecs.size();
         List<List<Integer>> incident = new ArrayList<>(n);
         for (int i = 0; i < n; i++) incident.add(new ArrayList<>());
@@ -643,11 +703,16 @@ public final class FlowSolver {
             planningIncident.get(branches.get(b).b()).add(b);
         }
 
+        // The anchor rides along with the ceiling: the supply surface a node's
+        // budget is measured from. Ceiling − anchor is the total head budget;
+        // elevation climbed above the anchor is the part already spent.
         double[] ceiling = new double[n];
+        double[] anchor = new double[n];
         boolean[] ceilingKnown = new boolean[n];
         for (int i = 0; i < n; i++) {
             if (nodeSpecs.get(i).capacitance() > 0 && canSupply.get(i)) {
                 ceiling[i] = result.heads()[i];
+                anchor[i] = result.heads()[i];
                 ceilingKnown[i] = true;
                 frontier.add(i);
             }
@@ -662,6 +727,7 @@ public final class FlowSolver {
                 if (ceilingKnown[other]) continue;
                 double boost = fromA ? Math.max(0, branch.emf()) : Math.max(0, -branch.emf());
                 ceiling[other] = ceiling[current] + boost;
+                anchor[other] = anchor[current];
                 ceilingKnown[other] = true;
                 frontier.add(other);
             }
@@ -699,12 +765,36 @@ public final class FlowSolver {
             if (ceilingKnown[i]) ceiling[i] += boostAhead[i];
         }
 
+        // A suction run no reservoir can feed — empty source tank, draw gated at
+        // the lip — must still answer "what could the pumps ahead do from here".
+        // Anchor each such node at the head a supply arriving right there would
+        // have, plus the boosts waiting downstream; without this the pulling
+        // side of an idle pump shows nothing while the pushing side reads fine.
+        for (Node node : graph.nodes()) {
+            int index = solverIndex[node.index()];
+            if (index < 0 || ceilingKnown[index] || boostAhead[index] <= 0) continue;
+            anchor[index] = anchorHead(nodeSpecs.get(index), node, gas, relDensity);
+            ceiling[index] = anchor[index] + boostAhead[index];
+            ceilingKnown[index] = true;
+        }
+
         for (Node node : graph.nodes()) {
             int index = solverIndex[node.index()];
             if (index < 0) continue;
             if (known[index]) nodeHeads.put(node.index(), display[index]);
-            if (ceilingKnown[index]) nodeCeilings.merge(node.index(), ceiling[index], Math::max);
+            if (!ceilingKnown[index]) continue;
+            Double previous = nodeCeilings.get(node.index());
+            if (previous == null || ceiling[index] > previous) {
+                nodeCeilings.put(node.index(), ceiling[index]);
+                nodeAnchors.put(node.index(), anchor[index]);
+            }
         }
+    }
+
+    /** The head a fresh supply would have if its surface sat exactly at this node. */
+    private static double anchorHead(NodeSpec spec, Node node, boolean gas, double relDensity) {
+        if (spec.capacitance() > 0) return spec.head();
+        return gas ? -relDensity * node.worldY() : node.worldY();
     }
 
     private static List<EdgeFlow> toEdgeFlows(Graph graph, double[] edgeFlow) {
