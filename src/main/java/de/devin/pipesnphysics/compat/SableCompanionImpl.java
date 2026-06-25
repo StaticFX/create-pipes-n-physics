@@ -18,7 +18,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 class SableCompanionImpl implements SableCompatProvider {
-
     private static final double NORMALIZE_EPSILON = 0.001;
     private final Map<UUID, float[]> lastOrientations = new ConcurrentHashMap<>();
 
@@ -106,7 +105,7 @@ class SableCompanionImpl implements SableCompatProvider {
         }
 
         float dot = last[0] * current[0] + last[1] * current[1] + last[2] * current[2] + last[3] * current[3];
-        float threshold = PipesNPhysicsConfig.GRAVITY_ROTATION_THRESHOLD.get().floatValue();
+        float threshold = 0.999f;
         if (Math.abs(dot) < threshold) {
             lastOrientations.put(id, current);
             return true;

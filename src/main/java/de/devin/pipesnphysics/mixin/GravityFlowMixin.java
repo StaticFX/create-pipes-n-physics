@@ -1,71 +1,48 @@
 package de.devin.pipesnphysics.mixin;
 
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
+import com.simibubi.create.content.fluids.PipeConnection;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
-import de.devin.pipesnphysics.compat.SableCompat;
-import de.devin.pipesnphysics.handler.GravityFlowHandler;
+import de.devin.pipesnphysics.engine.EngineTickHandler;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
-import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Hooks into FluidTransportBehaviour to trigger gravity flow checks:
- * 1. When wipePressure() is called (network rebuild)
- * 2. Periodically during tick() if the pipe is idle with no pressure
- * 3. When a Sable sub-level rotates (detects orientation change, wipes stale pressure)
+ * Cancels Create's fluid transport tick on every pipe while the engine is enabled,
+ * and marks the network as dirty so the engine picks it up on the next server tick.
+ *
+ * The cancel happens on both server and client so Create's pressure propagation and
+ * flow creation don't fight the engine. The one piece we KEEP is
+ * {@link PipeConnection#tickFlowProgress} — pure cosmetics that advances the fill
+ * animation Create draws — so engine-seeded fluid fronts visibly travel down a pipe
+ * instead of popping full. It moves no fluid and starts no flows on its own.
  */
 @Mixin(value = FluidTransportBehaviour.class, remap = false)
 public abstract class GravityFlowMixin extends BlockEntityBehaviour {
-
-    @Shadow public FluidTransportBehaviour.UpdatePhase phase;
-    @Shadow public abstract boolean hasAnyPressure();
-
-    /** Guard to prevent recursive wipePressure → scheduleCheck → wipePressure loops. */
-    @Unique
-    private boolean pipesnphysics$wiping = false;
-
     private GravityFlowMixin() { super(null); }
 
-    @Inject(method = "wipePressure", at = @At("TAIL"))
-    private void onWipePressure(CallbackInfo ci) {
-        if (pipesnphysics$wiping) return; // prevent recursion
-        if (GravityFlowHandler.suppressWipeReschedule) return; // suppress during reapplication
+    @Inject(method = "tick", at = @At("HEAD"), cancellable = true)
+    private void pipesnphysics$cancelCreateTransport(CallbackInfo ci) {
+        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
+        if (blockEntity.isVirtual()) return; // Ponder scenes & schematics keep Create's animation
         Level level = blockEntity.getLevel();
-        if (level != null && !level.isClientSide()) {
-            GravityFlowHandler.clearCooldown(blockEntity.getBlockPos());
-            GravityFlowHandler.scheduleCheck(level, blockEntity.getBlockPos());
-        }
-    }
-
-    @Inject(method = "tick", at = @At("TAIL"))
-    private void periodicGravityCheck(CallbackInfo ci) {
-        if (!PipesNPhysicsConfig.ENABLE_GRAVITY_FLOW.get()) return;
-        if (phase != FluidTransportBehaviour.UpdatePhase.IDLE) return;
-
-        Level level = blockEntity.getLevel();
-        if (level == null || level.isClientSide()) return;
-
-        int recheckTicks = PipesNPhysicsConfig.GRAVITY_RECHECK_TICKS.get();
-        if (level.getGameTime() % recheckTicks != 0) return;
-
-        // For pipes on sub-levels: check if rotation changed (stale gravity data).
-        // Must run even with 0 pressure — rotation can CREATE a height difference that enables flow.
-        if (SableCompat.hasSubLevelRotated(level, blockEntity.getBlockPos())) {
-            GravityFlowHandler.clearCooldown(blockEntity.getBlockPos());
-            if (hasAnyPressure()) {
-                pipesnphysics$wiping = true;
-                ((FluidTransportBehaviour) (Object) this).wipePressure();
-                pipesnphysics$wiping = false;
-            }
+        if (level == null) return;
+        if (!level.isClientSide()) {
+            EngineTickHandler.markDirty(level, blockEntity.getBlockPos());
         }
 
-        // Always schedule — the cooldown in GravityFlowHandler throttles redundant processing.
-        // This ensures networks re-evaluate when sinks fill/empty or pipes are added/removed.
-        GravityFlowHandler.scheduleCheck(level, blockEntity.getBlockPos());
+        FluidTransportBehaviour self = (FluidTransportBehaviour) (Object) this;
+        BlockPos pos = blockEntity.getBlockPos();
+        for (Direction dir : Direction.values()) {
+            PipeConnection conn = self.getConnection(dir);
+            if (conn != null) conn.tickFlowProgress(level, pos);
+        }
+        ci.cancel();
     }
 }

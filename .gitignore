@@ -40,3 +40,7 @@ Thumbs.db
 /assets/
 /data/
 /META-INF/
+
+# Claude Code
+.claude/
+CLAUDE.md

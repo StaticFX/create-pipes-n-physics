@@ -12,12 +12,13 @@ import java.util.Set;
  * <ul>
  *   <li>{@code FluidTankRendererMixin} — needs Sable Companion (tilted fluid rendering)</li>
  *   <li>{@code FluidTankMassMixin} — needs Sable Full (dynamic tank mass via physics API)</li>
+ *   <li>{@code FluidTankWeightGoggleMixin} — goggle weight readout for the mass feature,
+ *       so it follows Sable Full as well</li>
  * </ul>
  * Without this, loading the mixin classes would crash with NoClassDefFoundError
  * because they reference Sable interfaces that don't exist without the mod.
  */
 public class SableMixinPlugin implements IMixinConfigPlugin {
-
     private static final boolean SABLE_COMPANION_PRESENT;
     private static final boolean SABLE_FULL_PRESENT;
 
@@ -46,8 +47,9 @@ public class SableMixinPlugin implements IMixinConfigPlugin {
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
-        // FluidTankMassMixin needs full Sable (BlockEntitySubLevelActor, ServerSubLevel, etc.)
-        if (mixinClassName.endsWith("FluidTankMassMixin")) {
+        // The mass feature and its goggle readout need full Sable (physics API).
+        if (mixinClassName.endsWith("FluidTankMassMixin")
+                || mixinClassName.endsWith("FluidTankWeightGoggleMixin")) {
             return SABLE_FULL_PRESENT;
         }
         // All other mixins in this config (FluidTankRendererMixin) need Sable Companion

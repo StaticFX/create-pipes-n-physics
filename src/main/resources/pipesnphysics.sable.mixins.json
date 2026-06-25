@@ -6,7 +6,8 @@
   "refmap": "pipesnphysics.refmap.json",
   "plugin": "de.devin.pipesnphysics.mixin.SableMixinPlugin",
   "mixins": [
-    "FluidTankMassMixin"
+    "FluidTankMassMixin",
+    "FluidTankWeightGoggleMixin"
   ],
   "client": [
     "FluidTankRendererMixin"
