@@ -3,6 +3,7 @@ package de.devin.pipesnphysics.client;
 import com.mojang.blaze3d.vertex.ByteBufferBuilder;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.mojang.math.Axis;
 import com.simibubi.create.content.equipment.goggles.GogglesItem;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import de.devin.pipesnphysics.PipesNPhysics;
@@ -36,7 +37,6 @@ import java.util.List;
  */
 @EventBusSubscriber(modid = PipesNPhysics.ID, value = Dist.CLIENT)
 public final class PumpRangeRenderer {
-
     private static final float PER_SEGMENT_SPEED = 1.5f;
     private static final float FADE_FRACTION = 0.2f;
     private static final int FULL_BRIGHTNESS = 0xF000F0;
@@ -144,11 +144,11 @@ public final class PumpRangeRenderer {
 
     private static void applyDirectionRotation(PoseStack poseStack, Direction dir) {
         switch (dir) {
-            case NORTH -> poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(180));
-            case WEST -> poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(-90));
-            case EAST -> poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(90));
-            case UP -> poseStack.mulPose(com.mojang.math.Axis.XP.rotationDegrees(-90));
-            case DOWN -> poseStack.mulPose(com.mojang.math.Axis.XP.rotationDegrees(90));
+            case NORTH -> poseStack.mulPose(Axis.YP.rotationDegrees(180));
+            case WEST -> poseStack.mulPose(Axis.YP.rotationDegrees(-90));
+            case EAST -> poseStack.mulPose(Axis.YP.rotationDegrees(90));
+            case UP -> poseStack.mulPose(Axis.XP.rotationDegrees(-90));
+            case DOWN -> poseStack.mulPose(Axis.XP.rotationDegrees(90));
             default -> {}
         }
     }

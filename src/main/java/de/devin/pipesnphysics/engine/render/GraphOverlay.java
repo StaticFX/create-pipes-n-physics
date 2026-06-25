@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.engine.render;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
@@ -33,9 +34,8 @@ import java.util.List;
  * Edges are drawn as a rectangular tube wrapping the pipe run (not a center line),
  * so the outline sits on the outside of the pipe geometry and stays visible.
  */
-@EventBusSubscriber(modid = de.devin.pipesnphysics.PipesNPhysics.ID, value = Dist.CLIENT)
+@EventBusSubscriber(modid = PipesNPhysics.ID, value = Dist.CLIENT)
 public final class GraphOverlay {
-
     private static final int LIFETIME_TICKS = 600; // 30 seconds at 20 TPS
 
     /** Half-width of the edge tube; sits just outside the pipe core so the outline is visible. */

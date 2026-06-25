@@ -8,7 +8,6 @@ import java.util.Optional;
 
 @Mixin(value = PipeConnection.class, remap = false)
 public interface PipeConnectionAccessor {
-
     @Accessor("flow")
     Optional<PipeConnection.Flow> pipesnphysics$getFlow();
 

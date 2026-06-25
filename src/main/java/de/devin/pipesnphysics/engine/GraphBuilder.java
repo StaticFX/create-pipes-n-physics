@@ -41,7 +41,6 @@ import java.util.Set;
  * for its BlockPos references and the world-Y coordinates baked in at construction.
  */
 public final class GraphBuilder {
-
     private GraphBuilder() {}
 
     /**

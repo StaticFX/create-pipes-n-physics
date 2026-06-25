@@ -8,7 +8,6 @@ import net.neoforged.neoforge.common.ModConfigSpec;
  * tilted/wave fluid rendering) and the master enable flag remain.
  */
 public class PipesNPhysicsConfig {
-
     public static final ModConfigSpec SERVER_SPEC;
     public static final ModConfigSpec CLIENT_SPEC;
 

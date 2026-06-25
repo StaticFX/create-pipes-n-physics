@@ -1,6 +1,7 @@
 package de.devin.pipesnphysics.engine;
 
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.compat.CreatePipeRendering;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
@@ -8,8 +9,10 @@ import net.minecraft.world.level.Level;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -32,7 +35,6 @@ import java.util.Set;
  *      wakes them immediately.
  */
 public final class EngineTickHandler {
-
     private static final int IDLE_RECHECK_TICKS = 20;
 
     private static final Map<ResourceKey<Level>, Set<BlockPos>> DIRTY = new HashMap<>();
@@ -103,9 +105,23 @@ public final class EngineTickHandler {
         covered.addAll(graph.coverage());
 
         Solution solution = FlowSolver.solve(level, graph);
-        FluidEngine.apply(level, solution);
 
-        if (solution.active() || solution.hasTransfer()) {
+        // Advance the visual fronts FIRST, then deliver only the transfers whose fluid
+        // has actually reached its sink: a freshly started flow fills the source-side
+        // pipe before the sink begins to fill (travel time). A receding equalization
+        // hump has no flow yet still needs per-tick updates, so keep the network awake
+        // until its drain animation finishes.
+        boolean draining = CreatePipeRendering.apply(level, graph, solution);
+
+        List<Solution.Transfer> ready = new ArrayList<>();
+        for (Solution.Transfer transfer : solution.transfers()) {
+            if (CreatePipeRendering.deliveryReady(level, graph, solution, transfer)) {
+                ready.add(transfer);
+            }
+        }
+        FluidEngine.apply(level, ready);
+
+        if (solution.active() || solution.hasTransfer() || draining) {
             graph.coverage().forEach(quiet::remove);
         } else {
             long until = now + IDLE_RECHECK_TICKS;

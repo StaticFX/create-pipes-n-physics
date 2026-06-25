@@ -9,7 +9,6 @@ import net.minecraft.world.level.Level;
  * caches keyed by position do not collide across dimensions.
  */
 public record DimPos(ResourceKey<Level> dimension, BlockPos pos) {
-
     public static DimPos of(Level level, BlockPos pos) {
         return new DimPos(level.dimension(), pos.immutable());
     }

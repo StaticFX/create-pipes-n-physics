@@ -13,7 +13,6 @@ import net.neoforged.neoforge.client.event.ModelEvent;
  */
 @EventBusSubscriber(modid = PipesNPhysics.ID, value = Dist.CLIENT)
 public final class ClientEvents {
-
     public static final ModelResourceLocation ARROW_MODEL =
             new ModelResourceLocation(ResourceLocation.fromNamespaceAndPath(PipesNPhysics.ID, "pipe_arrow"), "standalone");
 

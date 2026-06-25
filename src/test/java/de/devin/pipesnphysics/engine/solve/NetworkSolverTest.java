@@ -14,7 +14,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NetworkSolverTest {
-
     private static final double SUCTION_LIMIT = 8;
     private static final double TANK_CAPACITANCE = 8000;
 
@@ -199,11 +198,69 @@ class NetworkSolverTest {
                 new NodeSpec(TANK_CAPACITANCE, 50));
 
         double fullFlow = step(tanks, List.of(BranchSpec.passive(0, 1, 40))).flows()[0];
-        BranchSpec marginal = new BranchSpec(0, 1, 40, 0, 0, 62, 0.5);
+        // Crest 7 blocks above the 60 supply: inside the 8-block suction limit but
+        // within the taper band, so a reduced trickle siphons over. Measured against
+        // the friction-free supply elevation (not the flow-dragged solved head), which
+        // is why a genuine 7-block rise is needed to taper rather than a low crest the
+        // friction gradient used to drag below the limit.
+        BranchSpec marginal = new BranchSpec(0, 1, 40, 0, 0, 67, 0.5);
         double taperedFlow = step(tanks, List.of(marginal)).flows()[0];
 
         assertTrue(taperedFlow > 0, "inside the taper band a trickle still flows");
         assertTrue(taperedFlow < fullFlow * 0.9, "near the limit, flow is visibly reduced");
+    }
+
+    /**
+     * Regression for "spin the pump up and the siphon dies": a strong pump pulling
+     * over a modest crest must not gate itself off. At high RPM the suction-side
+     * friction drawdown drags the SOLVED junction head far below the supply, but the
+     * liquid column's existence depends on the supply ELEVATION and pump lift, not on
+     * that flow-rate artifact — so more RPM may never turn a working line off.
+     */
+    @Test
+    void strongPumpDoesNotCavitationGateItsOwnSuctionSide() {
+        double suctionConductance = 120.0 / 11;   // a ~10-cell suction run
+        double pumpInternalConductance = 4;        // flowPerRpm / headPerRpm
+        for (double rpm : new double[]{8, 32, 96, 128, 256}) {
+            double pumpHead = rpm * 0.25;          // |RPM| * headPerRpm
+            List<NodeSpec> nodes = List.of(
+                    new NodeSpec(TANK_CAPACITANCE, 64),  // source tank
+                    new NodeSpec(0, 0),                  // pump
+                    new NodeSpec(TANK_CAPACITANCE, 50)); // destination tank
+            List<BranchSpec> branches = List.of(
+                    new BranchSpec(0, 1, suctionConductance, 0, +1, 68, 0.5),  // crest only 4 blocks up
+                    new BranchSpec(1, 2, pumpInternalConductance, pumpHead, +1, Double.NaN, 0));
+
+            Result result = step(nodes, branches);
+            assertTrue(result.flows()[0] > 0,
+                    "suction line must keep flowing at rpm " + rpm
+                            + " (crest only 4 blocks above a 64 supply, well inside the suction limit) "
+                            + "but flow was " + result.flows()[0]);
+        }
+    }
+
+    /**
+     * The friction-free crest gate must not LEAK a reservoir's head across a crest it
+     * cannot itself clear. node0 (60) is walled off by a crest at 75 (> 60 + suction);
+     * node1 (30) and node2 (10) sit either side of a crest at 40 that neither can
+     * clear. Nothing may flow — in particular node0's head must not propagate past the
+     * broken 75 crest to falsely prime the 40 crest and drain node1 into node2.
+     */
+    @Test
+    void brokenCrestDoesNotLeakHeadToPrimeADownstreamCrest() {
+        List<NodeSpec> nodes = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 60),
+                new NodeSpec(TANK_CAPACITANCE, 30),
+                new NodeSpec(TANK_CAPACITANCE, 10));
+        List<BranchSpec> branches = List.of(
+                new BranchSpec(0, 1, 40, 0, 0, 75, 0.5),   // breaks: 75 > 60 + suctionLimit
+                new BranchSpec(1, 2, 40, 0, 0, 40, 0.5));  // 40 is > suctionLimit above both 30 and 10
+
+        Result result = step(nodes, branches);
+        assertEquals(0, result.flows()[0], 1e-9, "the 75-block crest walls off node0");
+        assertEquals(0, result.flows()[1], 1e-9,
+                "node0's head must not leak across the broken crest to prime the 40-block crest");
+        assertTrue(result.crestBlocked()[1], "the downstream crest must report as broken");
     }
 
     @Test

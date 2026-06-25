@@ -1,5 +1,6 @@
 package de.devin.pipesnphysics.engine;
 
+import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
@@ -47,7 +48,6 @@ import java.util.Set;
  * {@link FluidEngine#apply} executes the returned transfers.
  */
 public final class FlowSolver {
-
     private static final double MIN_PUMP_SPEED = 0.01;
     private static final double LIP_DRAIN_RATE = 0.5;
     private static final double LIP_DREGS_MB = 4;
@@ -83,7 +83,7 @@ public final class FlowSolver {
         blocked.removeAll(results.movingEdges);
         return new Solution(toEdgeFlows(graph, results.edgeFlow), results.transfers,
                 results.nodeHeads, results.nodeCeilings, results.nodeAnchors,
-                results.edgeFluids, blocked, stalled, noHead,
+                results.edgeFluids, results.restFluids, blocked, stalled, noHead,
                 results.edgeReasons, results.pumpLoads, active);
     }
 
@@ -95,6 +95,7 @@ public final class FlowSolver {
         final Map<Integer, Double> nodeCeilings = new HashMap<>();
         final Map<Integer, Double> nodeAnchors = new HashMap<>();
         final Map<Integer, FluidStack> edgeFluids = new HashMap<>();
+        final Map<Integer, FluidStack> restFluids = new HashMap<>();
         final Set<Integer> blockedEdges = new HashSet<>();
         final Set<Integer> stalledEdges = new HashSet<>();
         final Set<Integer> noHeadEdges = new HashSet<>();
@@ -253,6 +254,10 @@ public final class FlowSolver {
             results.edgeFlow[edgeIndex] += flow;
             active |= Math.abs(flow) > ACTIVE_FLOW_EPS;
 
+            // The fluid that fills this run even at rest: passes run largest-volume
+            // first, so the dominant fluid claims the edge for static rendering.
+            results.restFluids.putIfAbsent(edgeIndex, sample);
+
             if (result.crestBlocked()[b]) {
                 results.blockedEdges.add(edgeIndex);
                 results.edgeReasons.putIfAbsent(edgeIndex, Solution.Reason.CREST);
@@ -313,8 +318,16 @@ public final class FlowSolver {
      * A liquid column's head is its surface elevation. A gas column's head rises with
      * fill (compression) and falls with elevation (buoyancy) — an approximation that
      * makes gases seek upward and denser fill push outward.
+     *
+     * A liquid open end is a fixed boundary at its MOUTH, not a column that rises with
+     * whatever block sits in front of it. Modelling a spilled source block as a
+     * brimming reservoir (surface at the block top) makes the engine reclaim its own
+     * spill — place a block, read it as full, drain it back, place it again, forever.
+     * Pinning the head at the mouth gives spill and reclaim a single threshold, so a
+     * broken pipe drains to the mouth level and settles instead of flickering.
      */
     private static double columnHead(BoundaryColumn column, boolean gas, double relDensity) {
+        if (!gas && column.isOpenEnd()) return column.baseY() + 0.5;
         double fillHeight = column.fillFraction() * column.heightBlocks();
         return gas ? fillHeight - relDensity * column.baseY()
                 : column.baseY() + fillHeight;
@@ -420,6 +433,13 @@ public final class FlowSolver {
         // ordinary "nothing to move", not a fault worth flagging to the player.
         if (columnA != null && columnA.isEmpty()) allowedSign = combineSign(allowedSign, -1);
         if (columnB != null && columnB.isEmpty()) allowedSign = combineSign(allowedSign, +1);
+
+        // A hose pulley only ever supplies (it draws from a fluid body, it does not
+        // accept fluid back through the same connection). Pin the branch to flow OUT
+        // of it; this also stops the engine from pushing fluid into the pulley and
+        // having it deposit blocks it would then drain straight back.
+        if (columnA != null && columnA.isInfiniteSource()) allowedSign = combineSign(allowedSign, +1);
+        if (columnB != null && columnB.isInfiniteSource()) allowedSign = combineSign(allowedSign, -1);
         if (allowedSign == Integer.MIN_VALUE) return;
 
         if (!gas) {
@@ -472,7 +492,7 @@ public final class FlowSolver {
                     ? edge.pipes().get(i + 1)
                     : graph.node(edge.b()).pos();
 
-            var behaviour = com.simibubi.create.content.fluids.FluidPropagator.getPipe(level, cell);
+            var behaviour = FluidPropagator.getPipe(level, cell);
             if (behaviour != null) {
                 var state = level.getBlockState(cell);
                 Direction fromPrevious = directionBetween(cell, previous);
@@ -497,7 +517,7 @@ public final class FlowSolver {
      */
     private static boolean canDrawFrom(Level level, Node handlerNode, BoundaryColumn column,
                                        BlockPos opening, double lip, double relDensity) {
-        if (column.isOpenEnd()) return true;
+        if (column.isOpenEnd() || column.isInfiniteSource()) return true;
         double surface = columnHead(column, false, relDensity);
         if (surface <= lip) return false;
         return SableCompat.canFluidReachPipe(level, handlerNode.pos(), opening, column.fillFraction());
@@ -530,16 +550,27 @@ public final class FlowSolver {
                                               List<Solution.Transfer> transfers) {
         int maxFlow = PipesNPhysicsConfig.MAX_FLOW_PER_ENDPOINT.get();
 
+        // Pair sources to sinks only within a hydraulic island: the set of columns
+        // reachable from one another through conducting (active) branches this tick.
+        // A closed valve, an off pump, or a broken crest splits the network into
+        // halves the solver leaves internally balanced; without this grouping the
+        // greedy pairing below would spill one half's clamped-sink surplus into a sink
+        // on the OTHER side of the barrier, teleporting fluid across it.
+        int[] island = islands(branches, result);
+
         List<BoundaryColumn> sources = new ArrayList<>();
         List<Integer> giving = new ArrayList<>();
+        List<Integer> sourceIsland = new ArrayList<>();
         List<BoundaryColumn> sinks = new ArrayList<>();
         List<Integer> taking = new ArrayList<>();
+        List<Integer> sinkIsland = new ArrayList<>();
 
         for (BoundaryColumn column : participants) {
-            double delta = result.netInflow()[columnIndex.get(column)];
+            int node = columnIndex.get(column);
+            double delta = result.netInflow()[node];
             if (delta < 0) {
                 double outflow = Math.min(-delta, maxFlow);
-                outflow = Math.min(outflow, lipDrainCap(column, columnIndex.get(column),
+                outflow = Math.min(outflow, lipDrainCap(column, node,
                         branches, meta, result, gas, relDensity));
                 int amount = (int) Math.round(outflow);
                 if (amount < 1) continue;
@@ -547,6 +578,7 @@ public final class FlowSolver {
                 if (amount >= 1) {
                     sources.add(column);
                     giving.add(amount);
+                    sourceIsland.add(island[node]);
                 }
             } else if (delta > 0) {
                 int amount = (int) Math.round(Math.min(delta, maxFlow));
@@ -555,6 +587,7 @@ public final class FlowSolver {
                 if (amount >= 1) {
                     sinks.add(column);
                     taking.add(amount);
+                    sinkIsland.add(island[node]);
                 }
             }
         }
@@ -563,6 +596,7 @@ public final class FlowSolver {
         for (int s = 0; s < sources.size(); s++) {
             int give = giving.get(s);
             for (int t = 0; t < sinks.size() && give > 0; t++) {
+                if (!sourceIsland.get(s).equals(sinkIsland.get(t))) continue;
                 int take = taking.get(t);
                 if (take <= 0) continue;
                 int amount = Math.min(give, take);
@@ -576,6 +610,35 @@ public final class FlowSolver {
             }
         }
         return new TransferPlan(planned, !sources.isEmpty(), !sinks.isEmpty());
+    }
+
+    /**
+     * Connected-component id per solver node over the conducting (active) branches,
+     * so transfer planning can tell which columns are actually plumbed together this
+     * tick. Branches the solver dropped (closed valve / off pump / broken crest) are
+     * absent, so the halves they used to join fall into separate components.
+     */
+    private static int[] islands(List<BranchSpec> branches, NetworkSolver.Result result) {
+        int n = result.heads().length;
+        int[] parent = new int[n];
+        for (int i = 0; i < n; i++) parent[i] = i;
+        for (int b = 0; b < branches.size(); b++) {
+            if (result.active()[b]) union(parent, branches.get(b).a(), branches.get(b).b());
+        }
+        for (int i = 0; i < n; i++) parent[i] = find(parent, i);
+        return parent;
+    }
+
+    private static int find(int[] parent, int i) {
+        while (parent[i] != i) {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        return i;
+    }
+
+    private static void union(int[] parent, int a, int b) {
+        parent[find(parent, a)] = find(parent, b);
     }
 
     /** What the handler will really give up this tick, probed without mutating it. */
@@ -604,7 +667,7 @@ public final class FlowSolver {
     private static double lipDrainCap(BoundaryColumn column, int solverIdx,
                                       List<BranchSpec> branches, List<BranchMeta> meta,
                                       NetworkSolver.Result result, boolean gas, double relDensity) {
-        if (gas || column.isOpenEnd()) return Double.MAX_VALUE;
+        if (gas || column.isOpenEnd() || column.isInfiniteSource()) return Double.MAX_VALUE;
 
         double minLip = Double.NaN;
         for (int b = 0; b < branches.size(); b++) {

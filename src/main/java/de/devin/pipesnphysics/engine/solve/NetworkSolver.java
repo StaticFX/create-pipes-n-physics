@@ -35,7 +35,6 @@ import java.util.List;
  * only removes branches, so the loop terminates in at most |branches| rounds.
  */
 public final class NetworkSolver {
-
     /** Flows smaller than this (mB/tick) are treated as zero for constraint checks. */
     private static final double FLOW_TOLERANCE = 1.0e-7;
 
@@ -44,6 +43,9 @@ public final class NetworkSolver {
 
     /** Fraction of the suction limit over which crest flow tapers to zero (no cliff). */
     private static final double CREST_TAPER_FRACTION = 0.25;
+
+    /** Friction-free potential of a node no supply can reach: far below any real head. */
+    private static final double NO_SUPPLY = -1.0e9;
 
     private NetworkSolver() {}
 
@@ -68,7 +70,6 @@ public final class NetworkSolver {
      */
     public record BranchSpec(int a, int b, double conductance, double emf, int allowedSign,
                              double crestHeight, double crestPos) {
-
         public static BranchSpec passive(int a, int b, double conductance) {
             return new BranchSpec(a, b, conductance, 0, 0, Double.NaN, 0);
         }
@@ -119,9 +120,21 @@ public final class NetworkSolver {
         // lower head at the crest → more gating) that spirals working lines to dead.
         boolean[] crestBlocked = new boolean[m];
         boolean gated = false;
+        boolean hasCrest = false;
+        for (int e = 0; e < m && !hasCrest; e++) {
+            hasCrest = active[e] && !Double.isNaN(branches.get(e).crestHeight());
+        }
+        // The crest gate measures whether a liquid column can EXIST over the run's
+        // high point, which depends on the supply elevation and pump lift — NOT on
+        // how far a fast flow's friction transiently drags the solved heads down.
+        // Evaluating it against the friction-free reachable potential is what stops a
+        // strong pump's own suction drawdown (which scales with RPM) from talking a
+        // working line into a false cavitation cutoff.
+        double[] potentials = hasCrest
+                ? frictionFreePotentials(nodes, branches, active, suctionLimit) : heads;
         for (int e = 0; e < m; e++) {
             if (!active[e]) continue;
-            double factor = crestFactor(branches.get(e), flows[e], heads, suctionLimit);
+            double factor = crestFactor(branches.get(e), flows[e], potentials, suctionLimit);
             if (factor <= 0) {
                 active[e] = false;
                 crestBlocked[e] = true;
@@ -191,16 +204,20 @@ public final class NetworkSolver {
 
     /**
      * How much of this branch's conductance the crest gate permits: 1 with the crest
-     * comfortably below the local head, tapering linearly to 0 as the suction deficit
-     * approaches the limit. A pump's EMF raises the head profile from the end it
-     * drives, so a powered line can cross a rise an unpowered siphon cannot.
+     * comfortably below the local potential, tapering linearly to 0 as the suction
+     * deficit approaches the limit. A pump's EMF raises the potential profile from the
+     * end it drives, so a powered line can cross a rise an unpowered siphon cannot.
+     *
+     * {@code potentials} are the FRICTION-FREE reachable heads (see
+     * {@link #frictionFreePotentials}), not the solved heads: the column's existence
+     * is set by elevation and lift, so flow-rate drawdown must not enter here.
      */
-    private static double crestFactor(BranchSpec br, double flow, double[] heads,
+    private static double crestFactor(BranchSpec br, double flow, double[] potentials,
                                       double suctionLimit) {
         if (Double.isNaN(br.crestHeight()) || Math.abs(flow) <= FLOW_TOLERANCE) return 1;
 
-        double headA = heads[br.a()];
-        double headB = heads[br.b()];
+        double headA = potentials[br.a()];
+        double headB = potentials[br.b()];
         double headAtCrest = br.emf() >= 0
                 ? (headA + br.emf()) + (headB - headA - br.emf()) * br.crestPos()
                 : headA + (headB - br.emf() - headA) * br.crestPos();
@@ -209,6 +226,63 @@ public final class NetworkSolver {
         if (deficit <= 0) return 1;
         double taperBand = Math.max(0.5, suctionLimit * CREST_TAPER_FRACTION);
         return Math.clamp((suctionLimit - deficit) / taperBand, 0, 1);
+    }
+
+    /**
+     * Friction-free reachable head at every node: each reservoir surface propagated
+     * outward along active branches, gaining each pump's boost, taking the maximum —
+     * but ONLY across crests the propagated head can itself clear. Conductance, and so
+     * flow-rate drawdown, is omitted: the crest gate reflects the static pressure
+     * profile a primed line holds, not this tick's transient drawdown. And because a
+     * supply that cannot surmount a crest must not leak its head past it, a broken
+     * crest stops the friction-free reach exactly as it stops real flow — without
+     * this, an isolated reservoir behind an unprimable crest would falsely prime a
+     * SECOND crest downstream and drain over a rise nothing can clear.
+     *
+     * Reservoirs seed from their own surface; every other node starts with NO supply
+     * (a low sentinel) and earns a potential only through reachable, primable paths.
+     * Solved heads are deliberately NOT used as a floor — they already carry the
+     * pre-gate flow across crests that are about to break, which is the very leak.
+     */
+    private static double[] frictionFreePotentials(List<NodeSpec> nodes, List<BranchSpec> branches,
+                                                   boolean[] active, double suctionLimit) {
+        int n = nodes.size();
+        double[] pot = new double[n];
+        for (int i = 0; i < n; i++) {
+            pot[i] = nodes.get(i).capacitance() > 0 ? nodes.get(i).head() : NO_SUPPLY;
+        }
+        for (int round = 0; round < n; round++) {
+            boolean changed = false;
+            for (int e = 0; e < branches.size(); e++) {
+                if (!active[e]) continue;
+                BranchSpec br = branches.get(e);
+                if (br.allowedSign() >= 0) {
+                    double via = pot[br.a()] + Math.max(0, br.emf());
+                    if (clearsCrest(br, via, suctionLimit) && via > pot[br.b()] + 1e-9) {
+                        pot[br.b()] = via;
+                        changed = true;
+                    }
+                }
+                if (br.allowedSign() <= 0) {
+                    double via = pot[br.b()] + Math.max(0, -br.emf());
+                    if (clearsCrest(br, via, suctionLimit) && via > pot[br.a()] + 1e-9) {
+                        pot[br.a()] = via;
+                        changed = true;
+                    }
+                }
+            }
+            if (!changed) break;
+        }
+        return pot;
+    }
+
+    /**
+     * Whether a supply at {@code head} can prime a liquid column over this branch's
+     * crest — the crest may sit at most the suction limit above it. A branch with no
+     * crest is always clear.
+     */
+    private static boolean clearsCrest(BranchSpec br, double head, double suctionLimit) {
+        return Double.isNaN(br.crestHeight()) || head >= br.crestHeight() - suctionLimit;
     }
 
     /**
