@@ -41,10 +41,29 @@ from heads being *surface elevations*.
   0.5), `heightBlocks`, `capacityMb`, `fillFraction`; capacitance =
   capacity/height; surface = `baseY + fillFraction·height`. Multiblock tanks
   resolve through their controller, so many connections = one column (one
-  identity). Open ends get 4,000,000 mB capacity (effectively atmospheric):
-  a fluid-source space is a brimming column, air is a bottomless drain. Their
-  Create `OpenEndedPipe` instances are cached (`OpenEndPipes`) so spill
-  buffers survive ticks.
+  identity). Open ends are a ONE-WAY outlet (4,000,000 mB, atmospheric): always
+  receive-only, with head pinned at the mouth (`baseY + 0.5`). They spill fluid
+  out when the network head exceeds the mouth but NEVER reclaim it — modelling a
+  source block in front as a supply made the engine drain its own spill back,
+  oscillating forever (block place→read full→drain→place...). Once a block sits
+  in front, Create's `provideFluidToSpace` refuses to spill more, so the open end
+  drops out of the solve and settles. Trade-off: lake intake through an *open pipe*
+  is NOT supported — use a hose pulley instead (below). Create `OpenEndedPipe`
+  instances are cached (`OpenEndPipes`) so spill buffers survive ticks.
+- **Hose pulley intake** (`BoundaryColumn.resolve`, `isInfiniteSource`) — a Create
+  hose pulley over a fluid body IS supported as lake intake. Its handler advertises
+  the drainable world fluid (`getFluidInTank` → `drainer.getDrainableFluid`, 1000 mB
+  or infinite) and drains on demand (`drainer.pullNext`). When that fluid is present
+  the engine models the pulley as a brimming, ONE-WAY, lip-exempt source at the
+  pulley's own elevation (`PULLEY_SOURCE_CAPACITY 4,000,000 mB`) rather than its tiny
+  1,500 mB buffer — the buffer would equalize/stall and its opening lip would gate
+  the draw by where the pipe meets the pulley. The per-tick volume is still clamped
+  by Create's drainer (SIMULATE-probed) and by `MAX_FLOW_PER_ENDPOINT`. One-way (it
+  only supplies, never receives) is what stops the spill-reclaim oscillation that
+  killed open-end intake; Create's `counterpartActed` bookkeeping also stops it from
+  reclaiming fluid it just deposited. No drainable fluid (pulley over air, or filling)
+  falls through to the generic handler path, where the 1,500 mB buffer behaves as an
+  ordinary fill sink.
 - **Solution** — one tick's decision: `edgeFlows`, `transfers`, the display
   fields (`nodeHeads`, `nodeCeilings`, `nodeAnchors`), `edgeFluids`, the status
   sets (`blockedEdges`, `stalledEdges`, `noHeadEdges`) with per-edge
@@ -66,7 +85,14 @@ circulation).
 pre-gate solution, then frozen — iterating it feeds back and kills working
 lines. A branch's highest cell (`crestHeight`, `crestPos`) tapers flow from 1
 to 0 as the head interpolated at the crest falls below it by up to
-`SUCTION_LIMIT` (taper band `max(0.5, 0.25·limit)` — taper, never cliff).
+`SUCTION_LIMIT` (taper band `max(0.5, 0.25·limit)` — taper, never cliff). The
+crest is evaluated against the **friction-free reachable potential**
+(`frictionFreePotentials`: reservoir surfaces + pump boosts relaxed along active
+branches), NOT the solved friction-dragged heads — a column's existence is set
+by elevation and lift, so flow-rate drawdown must not enter. Without this a
+strong pump's own suction drawdown scales with RPM and talks a working line into
+a false cutoff (the internal-conductance cap bounds the pump branch's
+conductance but not its EMF-driven demand).
 
 ## 4. Heads, fluids, and reach
 
@@ -90,10 +116,17 @@ to 0 as the head interpolated at the crest falls below it by up to
 ## 5. Per-tick pipeline
 
 1. **`EngineTickHandler`** — pipes mark themselves dirty every tick via the
-   transport-cancel mixin; `markChanged` (pump flip/speed, topology, valve)
-   also wakes sleeping networks. Seeds dedupe through `Graph.coverage` so each
-   network solves exactly once per tick; networks with no active flow and no
-   transfers sleep 20 ticks (`IDLE_RECHECK_TICKS`).
+   transport-cancel mixin; `markChanged` (pump flip/speed) also wakes sleeping
+   networks (URGENT bypasses the QUIET sleep gate that suppresses routine
+   `markDirty`). Block edits to a *sleeping* network — breaking a pipe/pump/tank,
+   placing a tank — route through `handler/NetworkEditHandler` (a
+   `BlockEvent.BreakEvent`/`EntityPlaceEvent` subscriber) which `markChanged`s the
+   edited pos + neighbors so both halves of a split wake the next tick instead of
+   waiting out the heartbeat. (Placing a new pipe/pump already wakes: its fresh
+   position is not in QUIET. Gap: a valve toggled by REDSTONE — no break/place —
+   is still only re-checked on the heartbeat.) Seeds dedupe through
+   `Graph.coverage` so each network solves exactly once per tick; networks with no
+   active flow and no transfers sleep 20 ticks (`IDLE_RECHECK_TICKS`).
 2. **`FlowSolver.solve`** — collect columns, group present fluids by total
    volume (largest first), and run **one pass per fluid** on the shared
    topology. Endpoints holding a different fluid are walls for that pass;
@@ -106,10 +139,14 @@ to 0 as the head interpolated at the crest falls below it by up to
    by closed valves / smart-pipe filters blocks the run (reason VALVE).
 4. **Transfer planning** — per column, net inflow from the solve, clamped by
    `MAX_FLOW_PER_ENDPOINT`, the **lip drain cap**, and SIMULATE-probed
-   drain/fill amounts; sources pair to sinks greedily. A pass that solved
-   pressurized flow but planned nothing is **stalled** (reason SINK_FULL or
-   SOURCE_DRY); a later pass that moves fluid over the same edge overrides the
-   stall for display.
+   drain/fill amounts; sources pair to sinks greedily but **only within the same
+   hydraulic island** (`islands`: a union-find over the solve's *active* branches).
+   A closed valve / off pump / broken crest splits the network into balanced
+   halves; without the island check a source whose own island sink is clamped
+   (full) would spill its surplus across the barrier into the other half's open
+   sink. A pass that solved pressurized flow but planned nothing is **stalled**
+   (reason SINK_FULL or SOURCE_DRY); a later pass that moves fluid over the same
+   edge overrides the stall for display.
 5. **`FluidEngine.apply`** — re-resolve handlers (world may have changed),
    simulate drain+fill, execute both or neither. The engine is read-only until
    this step.
@@ -145,25 +182,40 @@ once), which settles tanks exactly at the opening instead of flapping.
 
 ## 7. Player-facing UX (legibility is required, not polish)
 
+  Player-facing wording deliberately avoids hydraulic jargon ("head", "budget",
+  "back-pressure", "suction margin") and the unit "blocks" for elevation — that
+  word reads as horizontal pipe distance to a Minecraft player and the engine's
+  whole puzzle is *reach is bounded by height*. Climb keeps the unit "blocks" but
+  appends a `↑` ("blocks ↑") so the arrow disambiguates it from horizontal pipe
+  distance; gauge pressure (a downward column, not climb) keeps a separate
+  "blocks of fluid" unit. The three head fields stay distinct quantities in the
+  payload (§6) — the rewrite only relabels/sign-flips them, it never merges two.
 - **Pipe goggle tooltip** (`PipeGoggleInfoMixin`, request/answer packets
   `PipeStatusRequest`/`PipeStatusPayload`, server-throttled 4 ticks, 64-block
-  range): status (flowing/no-flow/blocked/stalled/no-head), fluid, flow rate +
-  direction, "Head left: X / Y blocks", and a Create-boiler-style budget bar
-  (`|` chars, green = head remaining with bright tip, dark red = consumed,
-  dark gray padding to multiple of 5, cap 18; 1 bar per block when it fits).
-  **Sneak adds**: gauge pressure, suction margin (= `SUCTION_LIMIT` + run-WORST
-  pressure — the crest is the binding point, not the probed cell), the
-  blocked/stalled culprit line (from `edgeReasons`, category-matched to the
-  shown status), and fluid density/viscosity. Bar helpers live in
-  `client/GoggleText`.
+  range): header is just "Pipe"; status (flowing/no-flow/blocked/stalled/no-head);
+  when flowing the fluid name rides on the flow line ("Flow: N mB/t → Dir (Fluid)"),
+  otherwise on its own. The headroom line is "Lift left: X ↑" with a Create-boiler
+  bar (`|` chars, green = lift remaining with bright tip, dark red = consumed; 1 bar
+  per block, cap 18) folded onto the SAME line — number and bar are one encoding,
+  not two. Over-reach (X<0) replaces it with "Reach limit — raise the supply or add
+  a pump". **Sneak adds**: the exact "Lift left: X / Y ↑" total, the blocked/stalled
+  culprit line (from `edgeReasons`, category-matched to the shown status), gauge
+  pressure as "Pressure: N blocks of fluid" / "Suction: N blocks of fluid"
+  (sign-flipped, no minus), suction margin as "Air-break in: N ↑" (= `SUCTION_LIMIT`
+  + run-WORST pressure — the crest is the binding point, not the probed cell), and
+  fluid density/viscosity (viscosity tagged thin/syrupy/thick). Bar helper
+  (`appendBars`) lives in `client/GoggleText`.
 - **Pump goggle tooltip** (`PumpBlockEntityMixin` override + super for stress):
-  status callout, "Pumping: rate / cap mB/t" (cap = |RPM|·flowPerRpm,
-  client-side from synced server config), a 10-segment load bar (throughput
-  utilization — NOT effort: a dead-headed pump reads empty with a status line
-  explaining why), and "Head supplied" (|RPM|·headPerRpm). **Sneak** adds the
-  load breakdown — the two factors that multiply to the bar: "Back-pressure
-  passes: NN% (Δh / supplied blk)" (or "Gravity assist: +NN%" when Δh<0) and
-  "Pipe friction passes: NN%". Derived from `Solution.PumpLoad` (headAgainst =
+  header "Pump"; status callout; "Output: rate / cap mB/t" (cap = |RPM|·flowPerRpm,
+  client-side from synced server config); when running below ~95% of cap a default
+  one-liner names the binding limiter — "capped by lift" or "capped by pipe run"
+  (whichever of headFactor/frictionFactor is smaller); and "Can lift: N ↑"
+  (|RPM|·headPerRpm). The Load bar is NOT on the default view (it duplicated the
+  Output ratio and "Load" collides with Create's stress meaning; a dead-headed pump
+  read empty/broken). **Sneak** shows the one honest summary — "Throughput: NN%"
+  with the 10-segment bar (utilization = rate/cap) — then the two factors that
+  multiply to it: "Lift: NN%  Δh / supplied ↑" (or "Gravity assist: +NN%" when
+  Δh<0) and "Pipe run: NN%". Derived from `Solution.PumpLoad` (headAgainst =
   emf − |q|/G, *unclamped* so assist shows; frictionFactor = G/internalG). The
   factors are presented multiplicatively, never as a summing waterfall, so they
   reconstruct the bar exactly even under gravity assist.
@@ -182,12 +234,44 @@ Replace the *engine*, not the blocks (`pipesnphysics.mixins.json`):
 
 - `GravityFlowMixin` — cancels `FluidTransportBehaviour.tick()` on all pipes
   when `ENABLE_ENGINE` (skips virtual/ponder blocks) and marks the network
-  dirty. This is the master suppression of Create's transport.
+  dirty. This is the master suppression of Create's transport — EXCEPT it keeps
+  calling `PipeConnection.tickFlowProgress` (pure cosmetics, both sides) so
+  engine-seeded fronts animate. Create no longer fills the `Flow` objects itself
+  (pressure/transport cancelled), so `compat/CreatePipeRendering` drives them.
+- `compat/CreatePipeRendering` (called from `EngineTickHandler` after each solve)
+  — sets Create `Flow` objects so its renderer draws the fluid. A FLOWING edge
+  fills as a TRAVELLING FRONT: cells are seeded along the flow direction only up
+  to the front; within each cell the inbound half (upstream rim → centre) fills
+  first, then the outbound half — `tickFlowProgress` animates each, and the next
+  half/cell is seeded once the current completes. The front is STATELESS (read
+  back each tick from the cells' own `complete` flags), so it survives reloads
+  and edits; fill speed scales with viscosity via a per-connection `pressure`
+  knob (reset on every (re)seed so a direction flip / fluid swap never animates
+  stale). A RESTING edge (zero flow, from `restFluids`) is shown full at once on
+  each cell whose BOTTOM is under the connected surface (interpolated head ≥
+  `worldY − 0.5`, not the cell centre — two level tanks settle with the waterline
+  INSIDE the connecting cell and it is still full; gas skips the elevation gate).
+  Fluid stranded ABOVE the waterline between two TANKS recedes GRADUALLY — held
+  full, highest cell released
+  on a per-edge-staggered heartbeat — instead of vanishing; this covers both an
+  equalized hump (edge still solved → `restEdge`) AND a tank-to-tank run whose
+  supply dropped below it so it is no longer solved at all (no `restFluids`/heads
+  → `drainDeadEdge`, e.g. an upper tank that finished draining). `apply` returns
+  whether a drain is still in progress and `EngineTickHandler` keeps the network
+  awake until it finishes — otherwise the network sleeps the instant flow stops
+  and the drain freezes. Other no-flow cases clear at once; every other cell is
+  swept clear each tick, which also wipes flows orphaned by an edit.
+  Known gap: junction NODE cells (3–4 connections) aren't filled. Uses
+  `PipeConnectionAccessor` to reach the private `flow` field.
 - `PumpBlockEntityMixin` — cancels `distributePressureTo`, watches FACING
   flips (`markChanged`), adds the pump goggle section.
 - `PipeGoggleInfoMixin` — goggle info on Create's three pipe BE classes.
 - `OpenEndedPipeMixin` — projects open-end output to world coordinates on
-  Sable sub-levels.
+  Sable sub-levels (gated by `enableOpenEndWorldPlacement`). It CANCELS Create's
+  `provideFluidToSpace`/`removeFluidFromSpace` and does the `setBlock` itself at the
+  projected position — it must NOT delegate back into Create's method, because Sable's
+  own `OpenEndedPipe` mixin `@Redirect`s the in-world `setBlock` (`sable$preventInWorldPlace`)
+  and would eat the spill on a sub-level.
 - Accessors: `FluidTankAccessor` (window/width/height/inventory),
   `PipeConnectionAccessor` (flow field).
 - **Kept intact**: Create's blocks, connection logic, kinetics/stress, and all
@@ -224,8 +308,16 @@ wave simulation, viscosity-damped.
   open-end spill, pump-moves-all-fluid (lip regression), head-left on both
   pump sides (wet + idle/dry suction), boost stacking across pumps in series,
   stall/blocked reason reporting, pump-load breakdown (friction-limited via
-  lava down a long run; verifies headFactor·friction == rate/cap). Note: some
-  templates ship pre-filled tanks — drain before filling a different fluid.
+  lava down a long run; verifies headFactor·friction == rate/cap), pipe fluid
+  rendering (flowing + resting-full both leave a Create `Flow` on the pipe),
+  no fluid teleport across a closed barrier (`fluidDoesNotTeleportAcrossClosedBarrier`:
+  two unpowered pumps split one graph into two islands; a clamped near-sink's
+  surplus must not cross to the far island's open sink). The strong-pump crest
+  regression lives in JUnit (`strongPumpDoesNotCavitationGateItsOwnSuctionSide`):
+  raising RPM must not gate a working suction line off.
+  Note: some templates ship pre-filled tanks — drain before filling a different
+  fluid. GameTests verify the server-side `Flow` state, not the actual pixels —
+  confirm pipe rendering visually in-game after engine/render changes.
 - **Reproduce bugs as GameTests first** — `PipeProbe`/`FlowSolver` are
   directly probeable in them.
 - GOTCHAS: Gradle incremental compilation goes stale constantly — run
@@ -251,9 +343,11 @@ wave simulation, viscosity-damped.
 
 ## 12. Deferred / roadmap
 
-- **Phase-1 charging fronts / travel time** (v1 §5): fluid currently arrives
-  instantly at the solved rate. Re-adding visible front advance is the largest
-  deferred feature; viscosity already differentiates steady rates.
+- **Phase-1 travel-time PHYSICS** (v1 §5): fluid still arrives instantly at the
+  solved rate — sinks fill the moment a circuit completes. The visible travelling
+  front (§8 `CreatePipeRendering`) is COSMETIC only; making transport actually
+  take time (front gating delivery) remains deferred and would re-touch the
+  stable solver. Viscosity already differentiates steady rates and front speed.
 - **Per-tile static friction head**: conflicts with full equalization while
   pipes are stateless; revisit only with a flow-dependent model.
 - **Overpressure / burst** (next release): per-tier `pressureRating`;
@@ -267,4 +361,9 @@ wave simulation, viscosity-damped.
   mechanics and need suppressing (ponder-index filter or small mixin).
 - **Collisions / BreakEvent** (v1 §6): no incompatible-fluid rupture yet;
   per-tick passes simply treat other fluids' endpoints as walls.
-- Traveling-arrows render mode; lake-intake GameTest.
+- Traveling-arrows render mode.
+- **Lake intake through an OPEN PIPE**: still removed — open ends are one-way
+  outlets (§2) to stop the spill-reclaim oscillation. Re-adding needs
+  source-vs-own-spill tracking (e.g. `OpenEndedPipe.wasPulling`) or hysteresis
+  sized above the 1000 mB block granularity. Lake intake via a **hose pulley** IS
+  supported (§2, `isInfiniteSource`) — that is the intended draining tool.

@@ -17,7 +17,6 @@ import java.util.List;
  */
 public record PumpRangePayload(BlockPos pumpPos, List<RangePath> paths)
         implements CustomPacketPayload {
-
     public static final Type<PumpRangePayload> TYPE =
             new Type<>(PipesNPhysics.asResource("pump_range"));
 

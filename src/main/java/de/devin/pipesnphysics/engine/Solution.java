@@ -25,6 +25,9 @@ import java.util.Set;
  *                  seeded from (before any pump boosts); ceiling − anchor is the
  *                  total head budget, elevation above the anchor is budget spent,
  *   edgeFluids   — per graph edge, a sample of the fluid carrying the dominant flow,
+ *   restFluids   — per graph edge, the fluid that fills it even when NOT flowing
+ *                  (dominant participating fluid); lets the renderer keep a static
+ *                  full pipe visible where it sits below the fluid surface,
  *   blockedEdges — edges that cannot carry their fluid this tick (closed valve or
  *                  pump, filter mismatch, or a broken column at a crest) as opposed
  *                  to edges that are merely balanced,
@@ -50,6 +53,7 @@ public record Solution(
         Map<Integer, Double> nodeCeilings,
         Map<Integer, Double> nodeAnchors,
         Map<Integer, FluidStack> edgeFluids,
+        Map<Integer, FluidStack> restFluids,
         Set<Integer> blockedEdges,
         Set<Integer> stalledEdges,
         Set<Integer> noHeadEdges,
@@ -57,7 +61,6 @@ public record Solution(
         Map<Integer, PumpLoad> pumpLoads,
         boolean active
 ) {
-
     /** Why a blocked/stalled edge cannot move its fluid, when the solver knows. */
     public enum Reason { VALVE, PUMP_OFF, CREST, SINK_FULL, SOURCE_DRY }
 
@@ -85,7 +88,7 @@ public record Solution(
     public static Solution idle(Graph graph) {
         List<EdgeFlow> flows = new ArrayList<>(graph.edges().size());
         for (Edge e : graph.edges()) flows.add(EdgeFlow.none(e.index()));
-        return new Solution(flows, List.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+        return new Solution(flows, List.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
                 Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), false);
     }
 

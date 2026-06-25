@@ -32,7 +32,6 @@ public record PipeStatusPayload(
         float pumpHeadAgainst,
         float pumpFrictionFactor
 ) implements CustomPacketPayload {
-
     public static final byte STATUS_NOT_CONNECTED = 0;
     public static final byte STATUS_NO_FLOW = 1;
     public static final byte STATUS_FLOWING = 2;

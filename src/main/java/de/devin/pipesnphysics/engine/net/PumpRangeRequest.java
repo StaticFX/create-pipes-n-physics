@@ -11,7 +11,6 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
  * while a goggle-wearing player looks at a pump; answered with a {@link PumpRangePayload}.
  */
 public record PumpRangeRequest(BlockPos pos) implements CustomPacketPayload {
-
     public static final Type<PumpRangeRequest> TYPE =
             new Type<>(PipesNPhysics.asResource("pump_range_request"));
 

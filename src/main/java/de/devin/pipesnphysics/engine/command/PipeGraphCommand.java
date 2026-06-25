@@ -30,7 +30,6 @@ import java.util.List;
  * Intended for inspecting topology and verifying flow direction during development.
  */
 public final class PipeGraphCommand {
-
     private PipeGraphCommand() {}
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {

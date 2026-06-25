@@ -9,7 +9,6 @@ import net.neoforged.neoforge.network.PacketDistributor;
  * and re-requests on a small interval while the crosshair stays on a pipe.
  */
 public final class PipeStatusClient {
-
     private static final int REQUEST_INTERVAL_TICKS = 5;
     private static final int STALE_AGE_TICKS = 40;
 

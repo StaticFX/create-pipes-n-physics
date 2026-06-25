@@ -6,6 +6,8 @@ import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
 
+import java.util.List;
+
 /**
  * Top-level entry point for the fluid engine.
  *
@@ -30,7 +32,6 @@ import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
  * resume consistently.
  */
 public final class FluidEngine {
-
     private FluidEngine() {}
 
     /** Run one full tick (build, solve, apply) on the network containing seedPos. */
@@ -59,7 +60,15 @@ public final class FluidEngine {
      * degrades to a smaller (or zero) transfer instead of an error.
      */
     public static void apply(ServerLevel level, Solution solution) {
-        for (Solution.Transfer transfer : solution.transfers()) {
+        apply(level, solution.transfers());
+    }
+
+    /**
+     * Execute a specific set of transfers — used when the caller has held some back
+     * (e.g. until the visual fluid front reaches the sink, see {@code EngineTickHandler}).
+     */
+    public static void apply(ServerLevel level, List<Solution.Transfer> transfers) {
+        for (Solution.Transfer transfer : transfers) {
             IFluidHandler source = handlerAt(level, transfer.from());
             IFluidHandler sink = handlerAt(level, transfer.to());
             if (source == null || sink == null) continue;

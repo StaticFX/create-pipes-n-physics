@@ -18,7 +18,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 class SableCompanionImpl implements SableCompatProvider {
-
     private static final double NORMALIZE_EPSILON = 0.001;
     private final Map<UUID, float[]> lastOrientations = new ConcurrentHashMap<>();
 

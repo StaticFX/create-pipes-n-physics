@@ -27,7 +27,6 @@ import java.util.Set;
  * even the suction allowance (no liquid column can exist beyond it).
  */
 public final class PumpRangeProbe {
-
     private static final double REACH_TOLERANCE = 0.25;
     private static final int MAX_CELLS = 512;
 

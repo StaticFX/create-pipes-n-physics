@@ -11,7 +11,6 @@ package de.devin.pipesnphysics.engine;
  * Rate is the absolute flow in millibuckets per tick. NONE flows report rate 0.
  */
 public record EdgeFlow(int edgeIndex, Direction direction, int mbPerTick) {
-
     public enum Direction { A_TO_B, B_TO_A, NONE }
 
     public static EdgeFlow none(int edgeIndex) {

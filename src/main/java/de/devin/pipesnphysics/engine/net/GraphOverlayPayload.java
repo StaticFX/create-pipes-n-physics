@@ -15,7 +15,6 @@ import java.util.List;
  * an in-world overlay for a fixed time.
  */
 public record GraphOverlayPayload(List<NodeEntry> nodes, List<EdgeEntry> edges) implements CustomPacketPayload {
-
     public static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(PipesNPhysics.ID, "graph_overlay");
     public static final Type<GraphOverlayPayload> TYPE = new Type<>(ID);
 

@@ -16,7 +16,6 @@ import java.util.List;
  * (e.g. a tank touching a pump with no pipe between them).
  */
 public record Edge(int index, int a, int b, List<BlockPos> pipes) {
-
     /** Number of pipe cells in this edge. */
     public int length() { return pipes.size(); }
 

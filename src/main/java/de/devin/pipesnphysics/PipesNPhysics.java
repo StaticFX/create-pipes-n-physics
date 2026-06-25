@@ -9,6 +9,7 @@ import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.OpenEndPipes;
 import de.devin.pipesnphysics.engine.command.PipeGraphCommand;
 import de.devin.pipesnphysics.engine.net.EnginePackets;
+import de.devin.pipesnphysics.handler.NetworkEditHandler;
 import de.devin.pipesnphysics.handler.PipeSwapHandler;
 import net.createmod.catnip.lang.FontHelper;
 import net.minecraft.resources.ResourceLocation;
@@ -45,6 +46,7 @@ public class PipesNPhysics {
 
         NeoForge.EVENT_BUS.register(EngineTickHandler.class);
         NeoForge.EVENT_BUS.register(PipeSwapHandler.class);
+        NeoForge.EVENT_BUS.register(NetworkEditHandler.class);
         NeoForge.EVENT_BUS.addListener((RegisterCommandsEvent event) ->
                 PipeGraphCommand.register(event.getDispatcher()));
         NeoForge.EVENT_BUS.addListener((ServerStoppedEvent event) -> {

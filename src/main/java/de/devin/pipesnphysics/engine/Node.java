@@ -18,7 +18,6 @@ import net.minecraft.core.Direction;
  */
 public record Node(int index, BlockPos pos, Kind kind, double worldY,
                    Direction pumpFacing, Direction openFace) {
-
     public enum Kind { HANDLER, PUMP, JUNCTION, OPEN_END }
 
     public boolean isHandler() { return kind == Kind.HANDLER; }

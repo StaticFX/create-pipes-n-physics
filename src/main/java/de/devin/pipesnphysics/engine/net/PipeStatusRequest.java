@@ -12,7 +12,6 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
  * {@link PipeStatusPayload}.
  */
 public record PipeStatusRequest(BlockPos pos) implements CustomPacketPayload {
-
     public static final Type<PipeStatusRequest> TYPE =
             new Type<>(PipesNPhysics.asResource("pipe_status_request"));
 

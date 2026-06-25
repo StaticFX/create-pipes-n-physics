@@ -20,7 +20,6 @@ import java.util.Map;
  * toward placing a source block.
  */
 public final class OpenEndPipes {
-
     private static final Map<ResourceKey<Level>, Map<BlockPos, OpenEndedPipe>> CACHE = new HashMap<>();
 
     private OpenEndPipes() {}

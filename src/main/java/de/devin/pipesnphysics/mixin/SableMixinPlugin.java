@@ -19,7 +19,6 @@ import java.util.Set;
  * because they reference Sable interfaces that don't exist without the mod.
  */
 public class SableMixinPlugin implements IMixinConfigPlugin {
-
     private static final boolean SABLE_COMPANION_PRESENT;
     private static final boolean SABLE_FULL_PRESENT;
 

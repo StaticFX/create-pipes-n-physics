@@ -19,7 +19,6 @@ import net.neoforged.neoforge.fluids.FluidStack;
  * this pipe. It is the number that makes towers, pumps, and suction readable.
  */
 public final class PipeProbe {
-
     private PipeProbe() {}
 
     public static PipeStatusPayload probe(ServerLevel level, BlockPos pos) {

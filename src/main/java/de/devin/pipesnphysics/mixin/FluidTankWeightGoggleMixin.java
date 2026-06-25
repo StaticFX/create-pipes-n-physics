@@ -26,7 +26,6 @@ import java.util.List;
  */
 @Mixin(value = FluidTankBlockEntity.class, remap = false)
 public abstract class FluidTankWeightGoggleMixin {
-
     @Inject(method = "addToGoggleTooltip", at = @At("RETURN"), cancellable = true)
     private void pipesnphysics$showFluidWeight(List<Component> tooltip, boolean isPlayerSneaking,
                                                CallbackInfoReturnable<Boolean> cir) {

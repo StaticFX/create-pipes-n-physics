@@ -11,7 +11,6 @@ import net.neoforged.neoforge.network.PacketDistributor;
  * configurable window after the player looks away.
  */
 public final class PumpRangeClient {
-
     private static final int REQUEST_INTERVAL_TICKS = 10;
 
     private static PumpRangePayload latest;

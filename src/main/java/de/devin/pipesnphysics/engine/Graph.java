@@ -24,7 +24,6 @@ import java.util.Set;
  * A graph is immutable. To reflect topology changes, build a new graph.
  */
 public record Graph(List<Node> nodes, List<Edge> edges, Set<BlockPos> coverage) {
-
     public Node node(int index) { return nodes.get(index); }
 
     public Edge edge(int index) { return edges.get(index); }

@@ -1,6 +1,7 @@
 package de.devin.pipesnphysics.engine.net;
 
 import de.devin.pipesnphysics.PipesNPhysics;
+import de.devin.pipesnphysics.client.PumpRangeClient;
 import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.PumpRangeProbe;
 import de.devin.pipesnphysics.engine.render.GraphOverlay;
@@ -14,7 +15,6 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
  * One-stop registration for all engine packets.
  */
 public final class EnginePackets {
-
     /** Goggle probes run a full network solve; cap how often one player may ask. */
     private static final int PROBE_THROTTLE_TICKS = 4;
     private static final double MAX_PROBE_DISTANCE_SQ = 64 * 64;
@@ -46,7 +46,7 @@ public final class EnginePackets {
     }
 
     private static void onPumpRange(PumpRangePayload payload, IPayloadContext ctx) {
-        ctx.enqueueWork(() -> de.devin.pipesnphysics.client.PumpRangeClient.receive(
+        ctx.enqueueWork(() -> PumpRangeClient.receive(
                 payload, ctx.player().level().getGameTime()));
     }
 
