@@ -3,6 +3,7 @@ package de.devin.pipesnphysics.handler;
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
+import de.devin.pipesnphysics.engine.EngineTickHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.sounds.SoundEvents;
@@ -24,7 +25,6 @@ import java.util.List;
  * Allows shift+right-clicking a pump on a pipe to replace the pipe with the pump.
  */
 public class PipeSwapHandler {
-
     @SubscribeEvent
     public static void onUseItemOnBlock(UseItemOnBlockEvent event) {
         if (event.getUsePhase() != UseItemOnBlockEvent.UsePhase.ITEM_AFTER_BLOCK) return;
@@ -44,7 +44,6 @@ public class PipeSwapHandler {
         // Don't replace pumps with pumps
         if (pipeState.getBlock() instanceof PumpBlock) return;
 
-        // Check if target is a pipe
         FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, pos);
         if (pipe == null) return;
 
@@ -63,20 +62,16 @@ public class PipeSwapHandler {
             pumpFacing = player.getDirection();
         }
 
-        // Get the pipe item to give back
         ItemStack pipeItem = new ItemStack(pipeState.getBlock().asItem());
 
-        // Replace pipe with pump
         BlockState pumpState = pumpBlock.defaultBlockState().setValue(PumpBlock.FACING, pumpFacing);
         level.removeBlockEntity(pos);
         level.setBlock(pos, pumpState, Block.UPDATE_ALL);
 
-        // Consume pump from hand (unless creative)
         if (!player.isCreative()) {
             held.shrink(1);
         }
 
-        // Give pipe item to player
         if (!pipeItem.isEmpty() && !player.isCreative()) {
             if (!player.getInventory().add(pipeItem)) {
                 player.drop(pipeItem, false);
@@ -85,8 +80,8 @@ public class PipeSwapHandler {
 
         level.playSound(null, pos, SoundEvents.METAL_PLACE, SoundSource.BLOCKS, 1.0f, 1.0f);
 
-        // Trigger pipe network update
         FluidPropagator.propagateChangedPipe(level, pos, pumpState);
+        EngineTickHandler.markChanged(level, pos);
 
         event.cancelWithResult(ItemInteractionResult.SUCCESS);
     }
