@@ -3,10 +3,15 @@ package de.devin.pipesnphysics.engine;
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
+import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.compat.SableCompat;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.TagKey;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.neoforge.capabilities.Capabilities;
 
@@ -41,7 +46,21 @@ import java.util.Set;
  * for its BlockPos references and the world-Y coordinates baked in at construction.
  */
 public final class GraphBuilder {
+    /**
+     * Blocks that hold fluid AND chain it to their neighbours (e.g. createpropulsion's
+     * liquid burner, whose own {@code PassthroughFluidHandler} relied on Create's now-
+     * cancelled push transport to spread fuel across a row). The engine threads tagged
+     * blocks into the network as connected tank-nodes and equalizes them itself, so a row
+     * shares fluid again. Packs/addons extend the tag; a missing block id is ignored.
+     */
+    private static final TagKey<Block> FLUID_CONDUITS = TagKey.create(Registries.BLOCK,
+            ResourceLocation.fromNamespaceAndPath(PipesNPhysics.ID, "fluid_conduits"));
+
     private GraphBuilder() {}
+
+    private static boolean isConduit(Level level, BlockPos pos) {
+        return level.getBlockState(pos).is(FLUID_CONDUITS);
+    }
 
     /**
      * Build a graph containing the network reachable from startPos.
@@ -151,7 +170,7 @@ public final class GraphBuilder {
 
     private static boolean isPipeLike(Level level, BlockPos pos) {
         if (!level.isLoaded(pos)) return false;
-        return FluidPropagator.getPipe(level, pos) != null;
+        return FluidPropagator.getPipe(level, pos) != null || isConduit(level, pos);
     }
 
     /** BFS state. */
@@ -175,7 +194,10 @@ public final class GraphBuilder {
             if (!level.isLoaded(cur)) continue;
 
             FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cur);
-            if (pipe == null) continue;
+            if (pipe == null) {
+                if (isConduit(level, cur)) discoverConduit(level, cur, d, frontier);
+                continue;
+            }
 
             BlockState curState = level.getBlockState(cur);
             boolean isPump = curState.getBlock() instanceof PumpBlock;
@@ -200,6 +222,8 @@ public final class GraphBuilder {
                 if (handler != null) {
                     d.handlers.add(neighbor.immutable());
                     conns.add(neighbor.immutable());
+                    // A conduit handler is traversed THROUGH so its own chain is discovered.
+                    if (isConduit(level, neighbor)) frontier.add(neighbor.immutable());
                     continue;
                 }
 
@@ -220,19 +244,56 @@ public final class GraphBuilder {
         }
 
         // Ensure each boundary block is recorded with its connection back to the
-        // pipes that found it. (Reverse links so the contraction walk can traverse
-        // both directions.)
+        // pipes (or conduits) that found it. Conduits already recorded their own forward
+        // links, so MERGE rather than overwrite: a conduit keeps the neighbours it found
+        // and also gains back-links from whoever pointed at it, so the contraction walk
+        // traverses the chain in both directions.
         Set<BlockPos> boundaries = new LinkedHashSet<>(d.handlers);
         boundaries.addAll(d.openEnds.keySet());
         for (BlockPos boundary : boundaries) {
-            List<BlockPos> back = new ArrayList<>();
+            List<BlockPos> conns = new ArrayList<>(d.connections.getOrDefault(boundary, List.of()));
             for (var entry : d.connections.entrySet()) {
-                if (entry.getValue().contains(boundary)) back.add(entry.getKey());
+                if (entry.getValue().contains(boundary) && !conns.contains(entry.getKey())) {
+                    conns.add(entry.getKey());
+                }
             }
-            d.connections.put(boundary, back);
+            d.connections.put(boundary, conns);
         }
 
         return d;
+    }
+
+    /**
+     * Explore a fluid-conduit block: a fluid-holding node the BFS traverses THROUGH,
+     * linking it to adjacent pumps, pipes, other conduits, and plain handlers on every
+     * face — so a row of conduits (e.g. chained liquid burners) becomes one connected
+     * network the solver equalizes, the way Create's transport used to feed them.
+     */
+    private static void discoverConduit(Level level, BlockPos cur, Discovery d, Queue<BlockPos> frontier) {
+        d.handlers.add(cur);
+        List<BlockPos> conns = new ArrayList<>();
+        for (Direction face : Direction.values()) {
+            BlockPos neighbor = cur.relative(face);
+            if (!level.isLoaded(neighbor)) continue;
+
+            if (level.getBlockState(neighbor).getBlock() instanceof PumpBlock) {
+                d.pumps.add(neighbor.immutable());
+                conns.add(neighbor.immutable());
+                frontier.add(neighbor.immutable());
+                continue;
+            }
+            if (level.getCapability(Capabilities.FluidHandler.BLOCK, neighbor, face.getOpposite()) != null) {
+                d.handlers.add(neighbor.immutable());
+                conns.add(neighbor.immutable());
+                if (isConduit(level, neighbor)) frontier.add(neighbor.immutable());
+                continue;
+            }
+            if (FluidPropagator.getPipe(level, neighbor) != null) {
+                conns.add(neighbor.immutable());
+                frontier.add(neighbor.immutable());
+            }
+        }
+        d.connections.put(cur, conns);
     }
 
     /**
