@@ -9,6 +9,7 @@
     "GravityFlowMixin",
     "FluidTankAccessor",
     "OpenEndedPipeMixin",
+    "OpenEndedPipeAccessor",
     "PipeConnectionAccessor",
     "PipeGoggleInfoMixin"
   ],

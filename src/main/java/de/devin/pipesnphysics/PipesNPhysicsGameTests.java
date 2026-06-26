@@ -12,6 +12,7 @@ import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.FlowSolver;
 import de.devin.pipesnphysics.engine.Graph;
 import de.devin.pipesnphysics.engine.GraphBuilder;
+import de.devin.pipesnphysics.engine.OpenEndPipes;
 import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
@@ -22,6 +23,7 @@ import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.LayeredCauldronBlock;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.PipeBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -130,6 +132,119 @@ public class PipesNPhysicsGameTests {
             if (amount(helper, tank) >= 8000) helper.fail("tank has not started draining");
             if (!helper.getLevel().getFluidState(helper.absolutePos(space)).isSource()) {
                 helper.fail("no fluid placed at the open end");
+            }
+        });
+    }
+
+    /**
+     * Re-enabled open-pipe INTAKE: a full water cauldron sits at an open pipe mouth that
+     * drops to a tank below it, pulling the network head under the mouth (a "vacuum"). The
+     * mouth must draw the cauldron's water IN — proving an open pipe sucks fluid from the
+     * world again — and the cauldron drains to empty. Draining a cauldron leaves a clean
+     * empty cauldron (nothing to re-spill), so nothing flickers. (A self-regenerating
+     * lake is the other intake-eligible body; it drains the same way but is left intact.)
+     */
+    @GameTest(template = "suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void openEndSucksFromCauldronUnderVacuum(GameTestHelper helper) {
+        BlockPos cauldron = new BlockPos(0, 3, 0); // the open mouth slot: a riser pipe opens up into it
+        helper.runAfterDelay(3, () -> helper.setBlock(cauldron,
+                Blocks.WATER_CAULDRON.defaultBlockState().setValue(LayeredCauldronBlock.LEVEL, 3)));
+
+        helper.succeedWhen(() -> {
+            if (helper.getBlockState(cauldron).is(Blocks.WATER_CAULDRON)) {
+                helper.fail("cauldron not drained — open end did not suck the water in");
+            }
+        });
+    }
+
+    /**
+     * Intake of a body whose per-tick yield is BELOW the transfer cap (a full beehive
+     * gives 250 mB &lt; MAX_FLOW 256): the mouth must draw it in (honey_level falls to 0)
+     * and the engine must never request more than the world holds — Create's drain
+     * over-reports a partial body, which would mint a few mB of honey from nothing. The
+     * intake column's contentMb carries the real 250 mB yield and caps the request.
+     */
+    @GameTest(template = "suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void openEndIntakeRespectsSubCapYield(GameTestHelper helper) {
+        BlockPos hive = new BlockPos(0, 3, 0);
+        BlockPos seed = new BlockPos(1, 1, 0);
+        helper.runAfterDelay(3, () -> helper.setBlock(hive, Blocks.BEEHIVE.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.LEVEL_HONEY, 5)));
+
+        // Solve while the hive is still full (before any natural intake drains it): the
+        // mouth must plan to draw honey IN, and never request more than the body's 250 mB.
+        helper.runAfterDelay(5, () -> {
+            Graph graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(seed));
+            Solution sol = FlowSolver.solve(helper.getLevel(), graph);
+            Solution.Transfer fromHive = sol.transfers().stream()
+                    .filter(t -> t.from().equals(helper.absolutePos(hive))).findFirst().orElse(null);
+            if (fromHive == null) {
+                helper.fail("open end did not draw honey from the beehive under vacuum");
+                return;
+            }
+            if (fromHive.fluid().getAmount() > 250) {
+                helper.fail("intake requested " + fromHive.fluid().getAmount()
+                        + " mB from a 250 mB body — would duplicate fluid");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * The headline request: a hand-placed water block in front of an open mouth, with a
+     * tank below pulling a vacuum, must be sucked IN. The network never spilled, so the
+     * finite-source gate is open and the engine plans to draw from the mouth.
+     */
+    @GameTest(template = "suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void openEndDrinksHandPlacedSource(GameTestHelper helper) {
+        BlockPos source = new BlockPos(0, 3, 0); // the open mouth slot
+        BlockPos seed = new BlockPos(1, 1, 0);
+        helper.runAfterDelay(8, () -> {
+            helper.setBlock(source, Blocks.WATER.defaultBlockState()); // a lone, hand-placed source
+            Graph graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(seed));
+            Solution sol = FlowSolver.solve(helper.getLevel(), graph);
+            boolean intake = sol.transfers().stream()
+                    .anyMatch(t -> t.from().equals(helper.absolutePos(source)));
+            if (!intake) helper.fail("open end did not draw in a hand-placed water source");
+            else helper.succeed();
+        });
+    }
+
+    /**
+     * The anti-oscillation guard for finite sources: once a network has spilled, it must
+     * NOT suck a finite source back in (its own spit, or a sibling mouth's), until a
+     * cooldown lapses. Stamp a spill at the mouth, then confirm a source there is refused
+     * within the cooldown and accepted again after it — the gate is temporary, not a ban.
+     */
+    @GameTest(template = "suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void openEndDoesNotReclaimAfterSpill(GameTestHelper helper) {
+        BlockPos source = new BlockPos(0, 3, 0);
+        BlockPos seed = new BlockPos(1, 1, 0);
+        int cooldown = PipesNPhysicsConfig.OPEN_END_INTAKE_COOLDOWN_TICKS.get();
+
+        helper.runAfterDelay(3, () ->
+                OpenEndPipes.markSpilled(helper.getLevel(), helper.absolutePos(source)));
+
+        // Within the cooldown: a source at the just-spilled mouth must NOT be drawn in.
+        helper.runAfterDelay(6, () -> {
+            helper.setBlock(source, Blocks.WATER.defaultBlockState());
+            Solution sol = FlowSolver.solve(helper.getLevel(),
+                    GraphBuilder.build(helper.getLevel(), helper.absolutePos(seed)));
+            if (sol.transfers().stream().anyMatch(t -> t.from().equals(helper.absolutePos(source)))) {
+                helper.fail("open end reclaimed a source within the spill cooldown");
+            }
+        });
+
+        // After the cooldown lapses: the same source is drinkable again.
+        helper.runAfterDelay(cooldown + 12, () -> {
+            helper.setBlock(source, Blocks.WATER.defaultBlockState());
+            Solution sol = FlowSolver.solve(helper.getLevel(),
+                    GraphBuilder.build(helper.getLevel(), helper.absolutePos(seed)));
+            if (sol.transfers().stream().noneMatch(t -> t.from().equals(helper.absolutePos(source)))) {
+                helper.fail("intake never resumed after the spill cooldown elapsed");
+            } else {
+                helper.succeed();
             }
         });
     }
