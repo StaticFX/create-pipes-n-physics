@@ -19,6 +19,8 @@ import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.world.level.block.Block;
@@ -39,6 +41,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -185,6 +188,48 @@ public class PipesNPhysicsGameTests {
             if (fromHive.fluid().getAmount() > 250) {
                 helper.fail("intake requested " + fromHive.fluid().getAmount()
                         + " mB from a 250 mB body — would duplicate fluid");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * Cross-mod compat: a block tagged {@code pipesnphysics:fluid_conduits} (createpropulsion's
+     * chainable liquid burner) is threaded into the network so a row of them shares fluid.
+     * The engine cancels Create's transport that used to drive the burner's neighbour-
+     * passthrough, so without this the directly-fed burner would fill alone. We build the
+     * graph from a pipe feeding a row of three burners and assert all three are linked nodes.
+     * Skips when createpropulsion is not loaded.
+     */
+    @GameTest(template = "gravity/long_equalization", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void fluidConduitChainsIntoOneNetwork(GameTestHelper helper) {
+        Block burner = BuiltInRegistries.BLOCK
+                .getOptional(ResourceLocation.parse("createpropulsion:liquid_burner")).orElse(null);
+        if (burner == null) {
+            helper.succeed(); // mod not present in this runtime — nothing to verify
+            return;
+        }
+
+        BlockPos pipe = new BlockPos(0, 3, 0); // in the air above the 1-tall run
+        BlockPos b0 = new BlockPos(0, 3, 1), b1 = new BlockPos(0, 3, 2), b2 = new BlockPos(0, 3, 3);
+        helper.runAfterDelay(2, () -> {
+            for (BlockPos p : new BlockPos[]{pipe, b0, b1, b2}) helper.setBlock(p, Blocks.AIR);
+            helper.setBlock(b0, burner.defaultBlockState());
+            helper.setBlock(b1, burner.defaultBlockState());
+            helper.setBlock(b2, burner.defaultBlockState());
+            helper.setBlock(pipe, pipeState(AllBlocks.FLUID_PIPE.get(), Direction.SOUTH)); // toward b0 (+z)
+        });
+
+        helper.runAfterDelay(6, () -> {
+            Graph graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(pipe));
+            long burnerNodes = graph.nodes().stream()
+                    .filter(n -> helper.getLevel().getBlockState(n.pos()).is(burner))
+                    .count();
+            if (burnerNodes < 3) {
+                helper.fail("conduit burners not all linked into the network: "
+                        + burnerNodes + "/3 (nodes=" + graph.nodes().size()
+                        + ", edges=" + graph.edges().size() + ")");
                 return;
             }
             helper.succeed();
@@ -991,6 +1036,67 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
+     * A pump pushing into a full basin backs the pipe up with NO flow this tick (it rounds
+     * to zero / the pump is dead-headed). The pump-to-sink run is not tank-to-tank, so it
+     * misses the gradual-drain path and used to get swept blank — meaning when the basin
+     * makes room the front had to re-travel the whole pipe (the flow "delayed all over
+     * again"). It must instead stay charged. Charges a pump-to-handler run, then drives it
+     * with a flowless SINK_FULL and a flowless NO_HEAD solution and asserts the fluid stays.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void backedUpStallKeepsChargedPipe(GameTestHelper helper) {
+        helper.runAfterDelay(2, () -> {
+            var level = helper.getLevel();
+            BlockPos seed = null;
+            for (int x = 0; x < 6 && seed == null; x++)
+                for (int y = 0; y < 4 && seed == null; y++)
+                    for (int z = 0; z < 4 && seed == null; z++) {
+                        BlockPos rel = new BlockPos(x, y, z);
+                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_PIPE.get())) seed = rel;
+                    }
+            if (seed == null) { helper.fail("no pipe in template"); return; }
+
+            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
+            Edge edge = null;
+            for (Edge e : graph.edges()) {
+                var a = graph.node(e.a());
+                var b = graph.node(e.b());
+                if (((a.isPump() && b.isHandler()) || (a.isHandler() && b.isPump())) && !e.pipes().isEmpty()) {
+                    edge = e;
+                    break;
+                }
+            }
+            if (edge == null) { helper.fail("no pump-to-handler pipe edge in graph"); return; }
+
+            double baseY = edge.pipes().get(0).getY();
+            for (BlockPos cell : edge.pipes()) baseY = Math.max(baseY, cell.getY());
+            Solution charging = pipesnphysics$renderSolution(
+                    graph, edge.index(), EdgeFlow.Direction.A_TO_B, baseY + 2.0, baseY + 1.0, true);
+            int cells = edge.pipes().size();
+            for (int i = 0; i < 40 * cells + 80
+                    && pipesnphysics$countChargedEdgeCells(level, edge) < cells; i++) {
+                CreatePipeRendering.apply(level, graph, charging);
+                pipesnphysics$tickEdgePipes(level, edge);
+            }
+            if (pipesnphysics$countChargedEdgeCells(level, edge) < cells) {
+                helper.fail("could not charge the pump-to-handler run to test the backed-up case");
+                return;
+            }
+
+            for (boolean noHead : new boolean[]{false, true}) {
+                CreatePipeRendering.apply(level, graph,
+                        pipesnphysics$backedUpSolution(graph, edge.index(), noHead));
+                if (!pipesnphysics$edgeHasAnyFlow(level, edge)) {
+                    helper.fail("backed-up " + (noHead ? "NO_HEAD" : "SINK_FULL")
+                            + " stall blanked the charged pipe — front would re-travel");
+                    return;
+                }
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * Travel time: a freshly started flow must fill the pipe before the sink receives
      * anything. The endpoint transfer is held until the visual fluid front reaches the
      * sink, so on a long flat run the sink stays empty for the first ticks (front still
@@ -1074,6 +1180,23 @@ public class PipesNPhysicsGameTests {
         heads.put(target.b(), headB);
         return new Solution(flows, List.of(), heads, Map.of(), Map.of(), edgeFluids, restFluids,
                 Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), flowing);
+    }
+
+    /** A flowless solution where the edge is backed up against a blockage (no fluid carried). */
+    private static Solution pipesnphysics$backedUpSolution(Graph graph, int edgeIndex, boolean noHead) {
+        List<EdgeFlow> flows = new ArrayList<>();
+        for (Edge e : graph.edges()) flows.add(EdgeFlow.none(e.index()));
+        Set<Integer> stalled = new HashSet<>();
+        Set<Integer> noHeadEdges = new HashSet<>();
+        Map<Integer, Solution.Reason> reasons = new HashMap<>();
+        if (noHead) {
+            noHeadEdges.add(edgeIndex);
+        } else {
+            stalled.add(edgeIndex);
+            reasons.put(edgeIndex, Solution.Reason.SINK_FULL);
+        }
+        return new Solution(flows, List.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                Set.of(), stalled, noHeadEdges, reasons, Map.of(), true);
     }
 
     /** Advance the kept fill animation on every connection of an edge's pipe cells. */

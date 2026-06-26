@@ -86,6 +86,17 @@ public final class CreatePipeRendering {
                 continue;
             }
 
+            // A run backed up against a full sink (SINK_FULL stall) or one a pump cannot
+            // out-lift (a dead-headed NO_HEAD edge) carries no flow THIS tick — it rounds
+            // to zero, so there is no direction to chargeEdge — yet it is genuinely full of
+            // fluid pressed against the blockage. Preserve its already-charged cells: without
+            // this the sweep blanks them, and when the sink makes room the front has to
+            // re-travel the whole pipe, which reads as the flow being delayed all over again.
+            if (isBackedUp(solution, edge)) {
+                filled.addAll(edge.pipes());
+                continue;
+            }
+
             FluidStack resting = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
             Double headA = solution.nodeHeads().get(edge.a());
             Double headB = solution.nodeHeads().get(edge.b());
@@ -104,6 +115,18 @@ public final class CreatePipeRendering {
             if (!filled.contains(cell)) clearCell(level, cell);
         }
         return draining;
+    }
+
+    /**
+     * Whether this edge is full of fluid pressed against a blockage rather than empty: a
+     * sink-full stall, or a pump dead-headed by a sink it cannot out-lift. Such a run
+     * carries no flow this tick but must keep its charged cells (vs a dry-source stall,
+     * already handled above, which renders empty).
+     */
+    private static boolean isBackedUp(Solution solution, Edge edge) {
+        if (solution.noHeadEdges().contains(edge.index())) return true;
+        return solution.stalledEdges().contains(edge.index())
+                && solution.edgeReasons().get(edge.index()) == Solution.Reason.SINK_FULL;
     }
 
     /**

@@ -1,0 +1,6 @@
+{
+  "replace": false,
+  "values": [
+    { "id": "createpropulsion:liquid_burner", "required": false }
+  ]
+}
