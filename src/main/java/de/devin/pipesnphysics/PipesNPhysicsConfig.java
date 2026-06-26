@@ -18,6 +18,8 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.DoubleValue PUMP_FLOW_PER_RPM;
     public static final ModConfigSpec.IntValue MAX_FLOW_PER_ENDPOINT;
     public static final ModConfigSpec.DoubleValue SUCTION_LIMIT;
+    public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_INTAKE;
+    public static final ModConfigSpec.IntValue OPEN_END_INTAKE_COOLDOWN_TICKS;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
@@ -61,6 +63,18 @@ public class PipesNPhysicsConfig {
                 .comment("How many blocks the head at a pipe's highest point may sit below that point",
                         "before the liquid column breaks (the siphon / cavitation limit).")
                 .defineInRange("suctionLimitBlocks", 8.0, 0.0, 256.0);
+        ENABLE_OPEN_END_INTAKE = server
+                .comment("Let an open pipe end draw fluid IN from the world when the network is under",
+                        "suction (its head sits below the pipe mouth): a self-regenerating source (a",
+                        "lake), a cauldron, or a finite/hand-placed source block. To keep it from",
+                        "sucking back what it just spilled, a network that spilled from ANY open end",
+                        "recently will not pull a finite source (lakes/cauldrons are unaffected).")
+                .define("enableOpenEndIntake", true);
+        OPEN_END_INTAKE_COOLDOWN_TICKS = server
+                .comment("After an open end on a network spills, how many ticks before that network",
+                        "may pull a finite source again (the anti-reclaim window). Lakes and cauldrons",
+                        "ignore this. Larger = safer against flicker on networks that both push and pull.")
+                .defineInRange("openEndIntakeCooldownTicks", 20, 0, 200);
         server.pop();
 
         server.push("sableCompat");

@@ -118,13 +118,24 @@ public final class FlowSolver {
 
         static Columns collect(Level level, Graph graph) {
             Columns columns = new Columns();
+            // If ANY open end on this network spilled recently, hold off finite-source
+            // intake everywhere on it — the network must not suck back a block it (or a
+            // sibling mouth, after the spill flows over) just spat out.
+            int cooldown = PipesNPhysicsConfig.OPEN_END_INTAKE_COOLDOWN_TICKS.get();
+            boolean networkSpilled = false;
+            for (Node node : graph.nodes()) {
+                if (node.isOpenEnd() && OpenEndPipes.recentlySpilled(level, node.pos(), cooldown)) {
+                    networkSpilled = true;
+                    break;
+                }
+            }
             Map<BlockPos, BoundaryColumn> byIdentity = new LinkedHashMap<>();
             for (Node node : graph.nodes()) {
                 BoundaryColumn resolved;
                 if (node.isHandler()) {
                     resolved = BoundaryColumn.resolve(level, node);
                 } else if (node.isOpenEnd()) {
-                    resolved = BoundaryColumn.forOpenEnd(level, node);
+                    resolved = BoundaryColumn.forOpenEnd(level, node, networkSpilled);
                 } else {
                     continue;
                 }
@@ -145,12 +156,17 @@ public final class FlowSolver {
         List<Double> volumes = new ArrayList<>();
         for (BoundaryColumn column : columns) {
             if (column.isEmpty()) continue;
+            // An infinite source (pulley / open-end intake) reports a brimming stand-in
+            // capacity, not real inventory; counting it would let a single atmospheric
+            // mouth outrank every real tank and seize the largest-volume-first pass.
+            // Register its fluid so a pass still runs, but contribute zero to the tally.
+            double volume = column.isInfiniteSource() ? 0 : column.contentMb();
             int index = indexOfSameFluid(samples, column.contents());
             if (index < 0) {
                 samples.add(column.contents().copyWithAmount(1));
-                volumes.add((double) column.contentMb());
+                volumes.add(volume);
             } else {
-                volumes.set(index, volumes.get(index) + column.contentMb());
+                volumes.set(index, volumes.get(index) + volume);
             }
         }
         List<FluidStack> ordered = new ArrayList<>(samples);
@@ -323,8 +339,10 @@ public final class FlowSolver {
      * whatever block sits in front of it. Modelling a spilled source block as a
      * brimming reservoir (surface at the block top) makes the engine reclaim its own
      * spill — place a block, read it as full, drain it back, place it again, forever.
-     * Pinning the head at the mouth gives spill and reclaim a single threshold, so a
-     * broken pipe drains to the mouth level and settles instead of flickering.
+     * Pinning the head at the mouth gives spill and intake a single threshold, so a
+     * broken pipe drains to the mouth level and settles instead of flickering, and an
+     * intake mouth (see {@link BoundaryColumn#forOpenEnd}) draws in only while the
+     * network sits below the mouth ("vacuum"), never while it would spill.
      */
     private static double columnHead(BoundaryColumn column, boolean gas, double relDensity) {
         if (!gas && column.isOpenEnd()) return column.baseY() + 0.5;
@@ -572,6 +590,13 @@ public final class FlowSolver {
                 double outflow = Math.min(-delta, maxFlow);
                 outflow = Math.min(outflow, lipDrainCap(column, node,
                         branches, meta, result, gas, relDensity));
+                // An open-end intake mouth's contentMb is the real per-tick world yield;
+                // never request past it. Create's drain returns the requested amount even
+                // when the body holds less (a 250 mB honey block under the 256 cap), which
+                // would deposit more into the sink than left the world — fluid from nothing.
+                if (column.isOpenEnd() && column.isInfiniteSource()) {
+                    outflow = Math.min(outflow, column.contentMb());
+                }
                 int amount = (int) Math.round(outflow);
                 if (amount < 1) continue;
                 amount = Math.min(amount, probeDrainable(level, column, sample, amount));

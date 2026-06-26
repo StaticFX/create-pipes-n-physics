@@ -81,7 +81,15 @@ public final class FluidEngine {
             FluidStack moved = source.drain(
                     transfer.fluid().copyWithAmount(Math.min(accepted, drained.getAmount())),
                     FluidAction.EXECUTE);
-            if (!moved.isEmpty()) sink.fill(moved, FluidAction.EXECUTE);
+            if (moved.isEmpty()) continue;
+            sink.fill(moved, FluidAction.EXECUTE);
+
+            // A transfer INTO an open end is a spill (intake has the open end as the
+            // SOURCE). Stamp it so the network won't suck a finite source back in for a
+            // cooldown — the no-reclaim guard for hand-placed-source intake.
+            if (BoundaryColumn.findHandler(level, transfer.to()) == null) {
+                OpenEndPipes.markSpilled(level, transfer.to());
+            }
         }
     }
 
