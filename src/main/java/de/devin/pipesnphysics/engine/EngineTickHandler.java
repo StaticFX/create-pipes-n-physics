@@ -37,6 +37,16 @@ import java.util.Set;
 public final class EngineTickHandler {
     private static final int IDLE_RECHECK_TICKS = 20;
 
+    /**
+     * A network whose only "stillness" is a running pump dead-headed against a full or
+     * too-high sink (a NO_HEAD edge) is NOT idle — it must top the sink off the instant it
+     * drains. It re-checks this much sooner than a truly idle network, so a basin consumed
+     * by a recipe (whose drain fires no block event to wake us) stays topped up rather than
+     * refilling once per {@link #IDLE_RECHECK_TICKS} heartbeat — which reads as the basin
+     * only refilling after it has emptied.
+     */
+    private static final int BACKED_UP_RECHECK_TICKS = 4;
+
     private static final Map<ResourceKey<Level>, Set<BlockPos>> DIRTY = new HashMap<>();
     private static final Map<ResourceKey<Level>, Set<BlockPos>> URGENT = new HashMap<>();
     private static final Map<ResourceKey<Level>, Map<BlockPos, Long>> QUIET = new HashMap<>();
@@ -124,7 +134,8 @@ public final class EngineTickHandler {
         if (solution.active() || solution.hasTransfer() || draining) {
             graph.coverage().forEach(quiet::remove);
         } else {
-            long until = now + IDLE_RECHECK_TICKS;
+            long until = now + (solution.noHeadEdges().isEmpty()
+                    ? IDLE_RECHECK_TICKS : BACKED_UP_RECHECK_TICKS);
             for (BlockPos cell : graph.coverage()) quiet.put(cell, until);
         }
     }
