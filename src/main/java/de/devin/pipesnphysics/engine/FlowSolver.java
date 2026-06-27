@@ -40,9 +40,10 @@ import java.util.Set;
  *     cannot hold a liquid column and carries nothing (the siphon rule).
  *
  * Networks holding several different fluids are solved one fluid at a time on the
- * shared topology; endpoints holding a different fluid are walls for that pass, and
- * empty endpoints are claimed by the most plentiful fluid first. Fluids never mix
- * inside a tick.
+ * shared topology; an endpoint that can neither give nor take the pass fluid is a wall
+ * for it (a single-fluid tank of the wrong fluid), while a MULTI-FLUID sink — a basin
+ * keeps each ingredient in its own segment — still joins as a sink. Empty endpoints are
+ * claimed by the most plentiful fluid first. Fluids never mix inside a tick.
  *
  * The solver is read-only: it SIMULATE-probes capabilities but never moves fluid.
  * {@link FluidEngine#apply} executes the returned transfers.
@@ -313,16 +314,23 @@ public final class FlowSolver {
     }
 
     /**
-     * A column joins a fluid's pass when it holds that fluid (and its handler can
-     * actually give or take some of it — a sealed handler is a wall) or when it is
-     * an unclaimed empty that accepts it.
+     * A column joins a fluid's pass when its handler can actually give or take that fluid,
+     * or when it is an unclaimed empty that accepts it.
+     *
+     * The give/take test is what matters, NOT whether the column's single representative
+     * {@code contents()} fluid matches the sample. A MULTI-FLUID sink — a basin keeps each
+     * ingredient (e.g. water + milk for builder's tea) in its own 1000 mB segment — can take
+     * the pass fluid into a free segment even while {@code contents()} reads the other fluid;
+     * a single-fluid tank (drain and fill both zero for a foreign fluid) still walls it, and
+     * fluids never mix because we only fill where {@code fill() > 0}. Without this a basin
+     * mid-recipe never refills a drained ingredient until BOTH run dry, since each fluid walls
+     * the other's pass — the "basin only refills once empty" bug.
      */
     private static boolean participates(Level level, BoundaryColumn column, FluidStack sample,
                                         Set<BlockPos> claimedEmpties) {
         IFluidHandler cap = column.handler(level);
         if (cap == null) return false;
         if (!column.isEmpty()) {
-            if (!FluidStack.isSameFluidSameComponents(column.contents(), sample)) return false;
             return !cap.drain(sample.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()
                     || cap.fill(sample.copyWithAmount(1), FluidAction.SIMULATE) > 0;
         }

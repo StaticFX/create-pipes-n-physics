@@ -6,6 +6,8 @@ import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.PipeConnection;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+import com.simibubi.create.content.processing.basin.BasinBlockEntity;
+import com.simibubi.create.foundation.blockEntity.behaviour.fluid.SmartFluidTankBehaviour;
 import de.devin.pipesnphysics.compat.CreatePipeRendering;
 import de.devin.pipesnphysics.engine.Edge;
 import de.devin.pipesnphysics.engine.EdgeFlow;
@@ -89,6 +91,91 @@ public class PipesNPhysicsGameTests {
             if (left + moved != 8000) helper.fail("fluid not conserved: " + left + " + " + moved);
             if (left != 0) helper.fail("source still holds " + left + " mB");
         });
+    }
+
+    /**
+     * A pump holding a sink full must top it back up after a PARTIAL consume, not wait for it to
+     * empty. Both tanks start full (pump pressurizes the full sink = SINK_FULL), then a chunk is
+     * drained straight from the sink handler (no block event, like a recipe consuming) and the
+     * pump must refill it within a few ticks. NOTE: this is the general SINK case and it works —
+     * a Create BASIN is different: it gates fill() on recipe state (an empty bare basin returns
+     * accepts=0), so a basin only takes fluid when its recipe wants it. That "waits until drained"
+     * behavior is Create's, not ours (it persists with the engine off), and we fill via the same
+     * fill() the basin gates — so we can't force fluid in, only refill promptly once it accepts.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void fullSinkRefillsAfterPartialDrain(GameTestHelper helper) {
+        BlockPos source = new BlockPos(0, 1, 1);
+        BlockPos sink = new BlockPos(4, 1, 1);
+        fill(helper, source, 8000);
+        fill(helper, sink, 8000);
+
+        helper.runAfterDelay(10, () -> {
+            handler(helper, sink).drain(2000, IFluidHandler.FluidAction.EXECUTE);
+            int afterDrain = amount(helper, sink);
+            helper.runAfterDelay(40, () -> {
+                int refilled = amount(helper, sink);
+                if (refilled <= afterDrain + 200) {
+                    helper.fail("sink NOT refilled after partial drain: drained to " + afterDrain
+                            + ", 40 ticks later still " + refilled + " (source " + amount(helper, source) + ")");
+                    return;
+                }
+                helper.succeed();
+            });
+        });
+    }
+
+    /**
+     * A basin holding TWO fluids (like water + milk for builder's tea) must get a partially
+     * drained ingredient topped back up, not wait for it to hit zero. The basin keeps each
+     * fluid in its own segment but reports a single representative {@code contents()} — the
+     * engine used to treat the basin as a WALL for the OTHER fluid's pass, so a half-full water
+     * segment never refilled while milk sat beside it (the "basin only refills once empty" bug).
+     * Force a basin to hold lava + a half-full water segment, then a pump pushing water must
+     * top the water back to full while the lava is untouched.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void basinRefillsDrainedFluidBesideAnother(GameTestHelper helper) {
+        BlockPos source = new BlockPos(0, 1, 1);
+        BlockPos endPipe = new BlockPos(4, 1, 1);
+        BlockPos basinPos = new BlockPos(4, 0, 1);
+        helper.setBlock(endPipe, AllBlocks.FLUID_PIPE.get());
+        helper.setBlock(basinPos, AllBlocks.BASIN.get());
+        fill(helper, source, 8000);
+        helper.runAfterDelay(5, () -> {
+            BasinBlockEntity be = (BasinBlockEntity) helper.getBlockEntity(basinPos);
+            var internal = (SmartFluidTankBehaviour.InternalFluidHandler) be.inputTank.getCapability();
+            internal.forceFill(new FluidStack(Fluids.LAVA, 500), IFluidHandler.FluidAction.EXECUTE);
+            internal.forceFill(new FluidStack(Fluids.WATER, 500), IFluidHandler.FluidAction.EXECUTE);
+            if (basinFluid(helper, basinPos, Fluids.WATER) != 500) {
+                helper.fail("setup: basin should hold 500 mB water beside the lava");
+                return;
+            }
+            helper.runAfterDelay(60, () -> {
+                int waterNow = basinFluid(helper, basinPos, Fluids.WATER);
+                if (waterNow <= 500) {
+                    helper.fail("basin's half-full water segment NOT refilled (still " + waterNow
+                            + ") — the lava walls the water pass");
+                    return;
+                }
+                if (basinFluid(helper, basinPos, Fluids.LAVA) != 500) {
+                    helper.fail("the other fluid (lava) was disturbed: "
+                            + basinFluid(helper, basinPos, Fluids.LAVA));
+                    return;
+                }
+                helper.succeed();
+            });
+        });
+    }
+
+    private static int basinFluid(GameTestHelper helper, BlockPos relativePos, Fluid fluid) {
+        IFluidHandler h = handler(helper, relativePos);
+        int sum = 0;
+        for (int i = 0; i < h.getTanks(); i++) {
+            FluidStack f = h.getFluidInTank(i);
+            if (f.getFluid() == fluid) sum += f.getAmount();
+        }
+        return sum;
     }
 
     /** A raised tank must drain completely into the tank below it, no pump needed. */
