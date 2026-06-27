@@ -53,26 +53,15 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                 .forGoggles(tooltip);
 
         boolean flowing = data.status() == PipeStatusPayload.STATUS_FLOWING;
-        switch (data.status()) {
-            case PipeStatusPayload.STATUS_NOT_CONNECTED -> pipesnphysics$lang("gui.goggles.not_connected")
-                    .style(ChatFormatting.DARK_GRAY)
+        if (flowing) {
+            pipesnphysics$addFlowLine(tooltip, data);
+        } else {
+            // Every non-flowing state reads as one consistent, always-visible line —
+            // "No Flow: <reason>" — with the specific culprit folded straight in.
+            pipesnphysics$lang(pipesnphysics$statusReasonKey(data))
+                    .style(pipesnphysics$statusColor(data.status()))
                     .forGoggles(tooltip, 1);
-            case PipeStatusPayload.STATUS_BLOCKED -> pipesnphysics$lang("gui.goggles.blocked")
-                    .style(ChatFormatting.GOLD)
-                    .forGoggles(tooltip, 1);
-            case PipeStatusPayload.STATUS_NO_FLOW -> pipesnphysics$lang("gui.goggles.no_flow")
-                    .style(ChatFormatting.GRAY)
-                    .forGoggles(tooltip, 1);
-            case PipeStatusPayload.STATUS_STALLED -> pipesnphysics$lang("gui.goggles.stalled")
-                    .style(ChatFormatting.GOLD)
-                    .forGoggles(tooltip, 1);
-            case PipeStatusPayload.STATUS_NO_HEAD -> pipesnphysics$lang("gui.goggles.no_head")
-                    .style(ChatFormatting.RED)
-                    .forGoggles(tooltip, 1);
-            case PipeStatusPayload.STATUS_FLOWING -> pipesnphysics$addFlowLine(tooltip, data);
-            default -> { }
         }
-        if (isPlayerSneaking) pipesnphysics$addStatusDetail(tooltip, data);
 
         if (!data.fluid().isEmpty()) {
             // When flowing, the fluid name rides on the flow line; otherwise it gets its own.
@@ -84,26 +73,62 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
             if (isPlayerSneaking) pipesnphysics$addFluidProperties(tooltip, data);
         }
 
-        pipesnphysics$addHeadLeftLine(tooltip, data, isPlayerSneaking);
+        // A dry pipe has no fluid to lift, so its "Lift left" bar (the pump's spare reach)
+        // is noise that reads as "all good" next to a stalled run — suppress it. The reason
+        // line above already explains the stop.
+        boolean dry = data.status() == PipeStatusPayload.STATUS_NO_FLOW && data.fluid().isEmpty();
+        if (!dry) pipesnphysics$addHeadLeftLine(tooltip, data, isPlayerSneaking);
         if (isPlayerSneaking) pipesnphysics$addPressureLines(tooltip, data);
         return true;
     }
 
-    /** Names the culprit behind a blocked/stalled status when the solver knows it. */
+    /** Which "No flow" wording to show: settled (full, balanced), starved (a running pump
+     *  can't pull a supply), or plain dry (empty, nothing reaching it). */
     @Unique
-    private void pipesnphysics$addStatusDetail(List<Component> tooltip, PipeStatusPayload data) {
-        String key = switch (data.statusDetail()) {
-            case PipeStatusPayload.DETAIL_VALVE -> "valve";
-            case PipeStatusPayload.DETAIL_PUMP_OFF -> "pump_off";
-            case PipeStatusPayload.DETAIL_CREST -> "crest";
-            case PipeStatusPayload.DETAIL_SINK_FULL -> "sink_full";
-            case PipeStatusPayload.DETAIL_SOURCE_DRY -> "source_dry";
-            default -> null;
+    private String pipesnphysics$noFlowKey(PipeStatusPayload data) {
+        if (!data.fluid().isEmpty()) return "gui.goggles.no_flow_settled";
+        if (data.statusDetail() == PipeStatusPayload.DETAIL_PUMP_STARVED) {
+            return "gui.goggles.no_flow_starved";
+        }
+        return "gui.goggles.no_flow_dry";
+    }
+
+    /** The "No Flow: &lt;reason&gt;" line for a non-flowing status — the most specific cause known. */
+    @Unique
+    private String pipesnphysics$statusReasonKey(PipeStatusPayload data) {
+        return switch (data.status()) {
+            case PipeStatusPayload.STATUS_NOT_CONNECTED -> "gui.goggles.not_connected";
+            case PipeStatusPayload.STATUS_NO_HEAD -> "gui.goggles.no_head";
+            case PipeStatusPayload.STATUS_NO_FLOW -> pipesnphysics$noFlowKey(data);
+            case PipeStatusPayload.STATUS_BLOCKED, PipeStatusPayload.STATUS_STALLED ->
+                    pipesnphysics$detailReasonKey(data);
+            default -> "gui.goggles.no_flow_dry";
         };
-        if (key == null) return;
-        pipesnphysics$lang("gui.goggles.detail." + key)
-                .style(ChatFormatting.GOLD)
-                .forGoggles(tooltip, 2);
+    }
+
+    /** The folded-in culprit for a blocked/stalled run, or the generic line when unknown. */
+    @Unique
+    private String pipesnphysics$detailReasonKey(PipeStatusPayload data) {
+        return switch (data.statusDetail()) {
+            case PipeStatusPayload.DETAIL_VALVE -> "gui.goggles.detail.valve";
+            case PipeStatusPayload.DETAIL_PUMP_OFF -> "gui.goggles.detail.pump_off";
+            case PipeStatusPayload.DETAIL_CREST -> "gui.goggles.detail.crest";
+            case PipeStatusPayload.DETAIL_SINK_FULL -> "gui.goggles.detail.sink_full";
+            case PipeStatusPayload.DETAIL_SOURCE_DRY -> "gui.goggles.detail.source_dry";
+            default -> data.status() == PipeStatusPayload.STATUS_STALLED
+                    ? "gui.goggles.stalled" : "gui.goggles.blocked";
+        };
+    }
+
+    /** Severity colour, kept per status so the uniform "No Flow:" prefix still reads at a glance. */
+    @Unique
+    private ChatFormatting pipesnphysics$statusColor(byte status) {
+        return switch (status) {
+            case PipeStatusPayload.STATUS_NO_HEAD -> ChatFormatting.RED;
+            case PipeStatusPayload.STATUS_BLOCKED, PipeStatusPayload.STATUS_STALLED -> ChatFormatting.GOLD;
+            case PipeStatusPayload.STATUS_NOT_CONNECTED -> ChatFormatting.DARK_GRAY;
+            default -> ChatFormatting.GRAY;
+        };
     }
 
     /**

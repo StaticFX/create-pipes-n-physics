@@ -471,6 +471,35 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
+     * A dry pipe whose (running) pump has nothing to pull must name the real culprit, not
+     * leave a bare "No flow" beside a healthy-looking lift bar. With the source emptied the
+     * powered pump just spins at zero flow — every branch idle and unflagged — so the probe
+     * reports the pump as starved. (A pump pressing a full sink stalls; one that can't lift
+     * is NO_HEAD; a valved one is blocked — only starvation reads as plain idle + dry.)
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void dryPipeReportsStarvedPump(GameTestHelper helper) {
+        BlockPos pushPipe = new BlockPos(3, 1, 1);
+        drain(helper, new BlockPos(0, 1, 1));
+        drain(helper, new BlockPos(4, 1, 1));
+
+        helper.runAfterDelay(5, () -> {
+            var push = PipeProbe.probe(helper.getLevel(), helper.absolutePos(pushPipe));
+            if (push.status() != PipeStatusPayload.STATUS_NO_FLOW) {
+                helper.fail("expected NO_FLOW on the dry push pipe, got status "
+                        + push.status() + dump(helper));
+                return;
+            }
+            if (push.statusDetail() != PipeStatusPayload.DETAIL_PUMP_STARVED) {
+                helper.fail("expected PUMP_STARVED detail (running pump, empty source), got "
+                        + push.statusDetail() + dump(helper));
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * An unpowered pump acts as a closed valve; pipes feeding it must report
      * BLOCKED with the pump named as the culprit. The pump is unpowered by
      * removing the template's creative motor once kinetics have settled.
@@ -726,6 +755,43 @@ public class PipesNPhysicsGameTests {
             // Settled (near-zero flow) but the U-pipe under the tanks is still full.
             if (pipesnphysics$findPipeFlow(helper) == null) {
                 helper.fail("equalized pipe lost its fluid render" + dump(helper, left));
+            }
+        });
+    }
+
+    /**
+     * Goggle legibility: an idle pipe that is FULL of resting fluid must report that fluid
+     * (so the goggle can say "settled, levels balanced"), not read empty like a starved/dry
+     * run. The probe used to send only the flowing fluid (empty when idle), so a healthy
+     * balanced pipe and a dry one were indistinguishable — both bare "No flow". Equalizes two
+     * tanks and asserts the settled pipe between them probes NO_FLOW with a non-empty fluid.
+     */
+    @GameTest(template = "gravity/simple_fluid_leveling", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void settledPipeReportsRestingFluidForGoggle(GameTestHelper helper) {
+        BlockPos left = new BlockPos(0, 3, 0);
+        BlockPos right = new BlockPos(2, 3, 0);
+        // Equal fills on both ends → no head difference → settled at rest (no asymptotic
+        // trickle), and the U-pipe between them sits submerged and full.
+        fill(helper, left, 8000);
+        fill(helper, right, 8000);
+        helper.succeedWhen(() -> {
+            Graph graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(left));
+            BlockPos pipeCell = null;
+            for (Edge e : graph.edges()) {
+                if (graph.node(e.a()).isHandler() && graph.node(e.b()).isHandler() && !e.pipes().isEmpty()) {
+                    pipeCell = e.pipes().get(e.pipes().size() / 2);
+                    break;
+                }
+            }
+            if (pipeCell == null) { helper.fail("no tank-to-tank pipe edge in graph"); return; }
+
+            PipeStatusPayload payload = PipeProbe.probe(helper.getLevel(), pipeCell);
+            if (payload.status() != PipeStatusPayload.STATUS_NO_FLOW) {
+                helper.fail("pipe not settled yet (status " + payload.status() + ")");
+                return;
+            }
+            if (payload.fluid().isEmpty()) {
+                helper.fail("settled full pipe probed EMPTY — goggle would call a balanced pipe 'dry'");
             }
         });
     }

@@ -1,5 +1,6 @@
 package de.devin.pipesnphysics.engine;
 
+import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
@@ -7,6 +8,11 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.neoforge.fluids.FluidStack;
+
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Answers "what is this pipe doing right now" for the goggle overlay: builds the
@@ -44,6 +50,13 @@ public final class PipeProbe {
                                                    BlockPos pos) {
         EdgeFlow flow = solution.edgeFlows().get(edge.index());
         FluidStack fluid = solution.edgeFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+        if (fluid.isEmpty()) {
+            // An idle run can still be full of RESTING fluid (equalized/settled). Surfacing
+            // it lets the goggle distinguish "settled, levels balanced" from "dry, nothing
+            // reaching this pipe" — otherwise both read as a bare "No flow" and the player
+            // can't tell a healthy balance from a starved run.
+            fluid = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+        }
 
         Direction direction = null;
         if (flow.direction() != EdgeFlow.Direction.NONE) {
@@ -82,6 +95,10 @@ public final class PipeProbe {
 
         byte status = status(solution, edge.index(), flow.mbPerTick());
         byte detail = detail(solution, edge.index(), status);
+        if (status == PipeStatusPayload.STATUS_NO_FLOW && fluid.isEmpty()
+                && starvedDryEdges(level, graph, solution).contains(edge.index())) {
+            detail = PipeStatusPayload.DETAIL_PUMP_STARVED;
+        }
         boolean hasSuction = hasPressure && runWorstPressure < -0.05f && !isGas(fluid);
         float suctionMargin = hasSuction
                 ? (float) (PipesNPhysicsConfig.SUCTION_LIMIT.get() + runWorstPressure) : 0;
@@ -152,6 +169,61 @@ public final class PipeProbe {
         };
     }
 
+    /**
+     * The edges left dry because a powered pump can't pull a supply — used to attach the
+     * "pump can't pull its supply" message to ONLY the pipes a starved pump is actually
+     * starving, not every dry pipe sharing the graph. A pump is starved when it is running
+     * (past the speed deadband with a real facing — mirrors {@code FlowSolver}'s open-pump
+     * test) yet moves nothing on all its branches: a pump pressing a FULL sink stalls, one
+     * that can't lift is NO_HEAD, a valved one is blocked — so all-idle-and-unflagged is the
+     * starvation signature. From each starved pump we flood the contiguous DRY region (edges
+     * with no fluid and no flow): those are the pipes its failure to pull leaves empty. A pipe
+     * dry for an UNRELATED reason — a lip-gated connector boxed in by full runs, or a branch
+     * behind a closed valve that holds resting fluid — is never reached, so it keeps the
+     * neutral "dry" message instead of being blamed on a source it has nothing to do with.
+     */
+    private static Set<Integer> starvedDryEdges(ServerLevel level, Graph graph, Solution solution) {
+        Set<Integer> dry = new HashSet<>();
+        for (Node pump : graph.pumps()) {
+            float speed = level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
+                    ? kinetic.getSpeed() : 0;
+            if (Math.abs(speed) <= 0.01f || pump.pumpFacing() == null) continue;
+            boolean movesNothing = true;
+            for (Edge edge : graph.edgesOf(pump.index())) {
+                int idx = edge.index();
+                if (solution.edgeFlows().get(idx).mbPerTick() > 0
+                        || solution.stalledEdges().contains(idx)
+                        || solution.noHeadEdges().contains(idx)
+                        || solution.blockedEdges().contains(idx)) {
+                    movesNothing = false;
+                    break;
+                }
+            }
+            if (movesNothing) floodDryRegion(graph, solution, pump.index(), dry);
+        }
+        return dry;
+    }
+
+    /** Flood the dry (no fluid, no flow) edges reachable from a starved pump's node. */
+    private static void floodDryRegion(Graph graph, Solution solution, int startNode,
+                                       Set<Integer> dryEdges) {
+        Deque<Integer> queue = new ArrayDeque<>();
+        Set<Integer> seen = new HashSet<>();
+        queue.add(startNode);
+        seen.add(startNode);
+        while (!queue.isEmpty()) {
+            int node = queue.poll();
+            for (Edge edge : graph.edgesOf(node)) {
+                boolean wet = !solution.restFluids()
+                        .getOrDefault(edge.index(), FluidStack.EMPTY).isEmpty();
+                if (wet || solution.edgeFlows().get(edge.index()).mbPerTick() != 0) continue;
+                dryEdges.add(edge.index());
+                int other = edge.a() == node ? edge.b() : edge.a();
+                if (seen.add(other)) queue.add(other);
+            }
+        }
+    }
+
     private static PipeStatusPayload probeNode(ServerLevel level, Graph graph,
                                                Solution solution, Node node, BlockPos pos) {
         int strongestEdge = -1;
@@ -173,6 +245,12 @@ public final class PipeProbe {
         FluidStack fluid = strongestEdge >= 0
                 ? solution.edgeFluids().getOrDefault(strongestEdge, FluidStack.EMPTY)
                 : FluidStack.EMPTY;
+        if (fluid.isEmpty()) {
+            for (Edge edge : graph.edgesOf(node.index())) {
+                FluidStack rest = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+                if (!rest.isEmpty()) { fluid = rest; break; }
+            }
+        }
 
         Double head = solution.nodeHeads().get(node.index());
         boolean hasPressure = head != null;
@@ -198,6 +276,15 @@ public final class PipeProbe {
         for (Edge edge : graph.edgesOf(node.index())) {
             detail = detail(solution, edge.index(), status);
             if (detail != PipeStatusPayload.DETAIL_NONE) break;
+        }
+        if (status == PipeStatusPayload.STATUS_NO_FLOW && fluid.isEmpty()) {
+            Set<Integer> starved = starvedDryEdges(level, graph, solution);
+            for (Edge edge : graph.edgesOf(node.index())) {
+                if (starved.contains(edge.index())) {
+                    detail = PipeStatusPayload.DETAIL_PUMP_STARVED;
+                    break;
+                }
+            }
         }
         boolean hasSuction = hasPressure && pressure < -0.05f && !isGas(fluid);
         float suctionMargin = hasSuction
