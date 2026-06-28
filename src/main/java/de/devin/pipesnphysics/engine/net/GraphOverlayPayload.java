@@ -44,8 +44,12 @@ public record GraphOverlayPayload(List<NodeEntry> nodes, List<EdgeEntry> edges) 
         return name.toString();
     }
 
-    /** One node, by world position with its kind. */
-    public record NodeEntry(int x, int y, int z, byte kind) {
+    /**
+     * One node, by world position with its kind and a short multi-line label (the
+     * block it is plus a fluid summary for sources/sinks). {@code label} is empty for
+     * nodes the overlay should not annotate (junctions). Lines are separated by {@code \n}.
+     */
+    public record NodeEntry(int x, int y, int z, byte kind, String label) {
         public static final byte KIND_HANDLER = 0;
         public static final byte KIND_PUMP = 1;
         public static final byte KIND_JUNCTION = 2;
@@ -57,6 +61,7 @@ public record GraphOverlayPayload(List<NodeEntry> nodes, List<EdgeEntry> edges) 
                         ByteBufCodecs.VAR_INT, NodeEntry::y,
                         ByteBufCodecs.VAR_INT, NodeEntry::z,
                         ByteBufCodecs.BYTE, NodeEntry::kind,
+                        ByteBufCodecs.STRING_UTF8, NodeEntry::label,
                         NodeEntry::new
                 );
     }

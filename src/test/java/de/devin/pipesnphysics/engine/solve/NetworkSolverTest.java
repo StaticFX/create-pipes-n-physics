@@ -93,6 +93,43 @@ class NetworkSolverTest {
         assertTrue(reversedResult.flows()[0] < 0, "direction follows the head, not the node order");
     }
 
+    /**
+     * Lighter-than-air fluids invert gravity at FULL strength: {@link NetworkSolver#surfaceHead}
+     * mirrors the liquid model exactly (elevation coefficient −1 instead of +1), independent of
+     * how light the fluid is. The buoyant lift across an elevation gap equals the gap itself, so
+     * gas climbs as hard as a liquid sinks. (Regression: a relative-density scale once floored
+     * buoyancy near 1% of gravity, so ordinary gases equalized by volume like a liquid.)
+     */
+    @Test
+    void surfaceHeadInvertsGravityForGasAtFullStrength() {
+        double low = NetworkSolver.surfaceHead(64, 2, true);
+        double high = NetworkSolver.surfaceHead(84, 2, true);
+        assertTrue(low > high, "a lower gas column outranks a higher one, so gas flows upward");
+        assertEquals(20, low - high, 1e-9, "buoyant lift equals the full 20-block elevation gap");
+        assertEquals(66, NetworkSolver.surfaceHead(64, 2, false), 1e-9, "liquids stack downward unchanged");
+    }
+
+    /**
+     * The buoyancy mirror end to end: for identical tanks at identical fills but different
+     * elevations, a liquid sinks toward the LOWER tank while a gas rises toward the HIGHER one —
+     * the same network solved in opposite directions purely from the fluid's density sign.
+     */
+    @Test
+    void buoyancyTowerFlowsUphillMirroringGravity() {
+        double lowBaseY = 64, highBaseY = 84, fill = 2;
+        List<BranchSpec> branches = List.of(BranchSpec.passive(0, 1, 40));
+
+        List<NodeSpec> liquid = List.of(
+                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(lowBaseY, fill, false)),
+                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(highBaseY, fill, false)));
+        assertTrue(step(liquid, branches).flows()[0] < 0, "liquid sinks toward the lower tank");
+
+        List<NodeSpec> gas = List.of(
+                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(lowBaseY, fill, true)),
+                new NodeSpec(TANK_CAPACITANCE, NetworkSolver.surfaceHead(highBaseY, fill, true)));
+        assertTrue(step(gas, branches).flows()[0] > 0, "gas rises toward the higher tank");
+    }
+
     @Test
     void pumpPushesUntilHeadDifferenceMatchesPumpHead() {
         double pumpHead = 16;

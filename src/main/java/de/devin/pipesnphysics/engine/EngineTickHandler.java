@@ -29,21 +29,29 @@ import java.util.Set;
  *      covered ({@link Graph#coverage}); later seeds inside the coverage are skipped.
  *      Without this an N-pipe network would be solved and transferred N times per
  *      tick — one of the root causes of the old engine's oscillations.
- *   3. Networks that solved to "no flow" are put to sleep for a few ticks and only
- *      re-checked on a slow heartbeat, unless something meaningful changed
- *      ({@link #markChanged}: pump flips, speed changes, topology edits), which
- *      wakes them immediately.
+ *   3. Networks that solved to "no flow" are put to sleep and only re-checked on a
+ *      heartbeat, unless something meaningful changed ({@link #markChanged}: pump
+ *      flips, speed changes, topology edits), which wakes them immediately. The
+ *      heartbeat is SLOW for a settled, pumpless network but FAST for one holding a
+ *      running pump (it is armed — see {@link #recheckTicks}), so a pump-fed sink
+ *      drained by a recipe, or fed from a source that just rose past its draw lip,
+ *      catches up promptly instead of waiting out the full idle interval.
  */
 public final class EngineTickHandler {
     private static final int IDLE_RECHECK_TICKS = 20;
 
     /**
-     * A network whose only "stillness" is a running pump dead-headed against a full or
-     * too-high sink (a NO_HEAD edge) is NOT idle — it must top the sink off the instant it
-     * drains. It re-checks this much sooner than a truly idle network, so a basin consumed
-     * by a recipe (whose drain fires no block event to wake us) stays topped up rather than
-     * refilling once per {@link #IDLE_RECHECK_TICKS} heartbeat — which reads as the basin
-     * only refilling after it has emptied.
+     * The fast re-check for an ARMED-but-idle network: one holding a RUNNING PUMP that moved
+     * nothing this tick. Such a pump is burning stress to deliver and is idle only because its
+     * sink is momentarily full (or too high to lift) or its source momentarily below the draw
+     * lip / empty — level changes inside a tank or basin that fire NO block event to wake us.
+     * It must top its sink off (or resume from its refilling source) the instant conditions
+     * allow, so it re-checks this much sooner than a truly idle (pumpless, settled) network —
+     * otherwise a basin consumed by a recipe, or a sink one block above a draining source,
+     * only catches up once per {@link #IDLE_RECHECK_TICKS} heartbeat, reading as "only refills
+     * after it empties". A dead-headed pump (a NO_HEAD edge) is the original case; a strong
+     * pump pinned to zero flow by an unsuppliable source — which carries no NO_HEAD flag — is
+     * the one {@link #recheckTicks} also catches.
      */
     private static final int BACKED_UP_RECHECK_TICKS = 4;
 
@@ -134,9 +142,30 @@ public final class EngineTickHandler {
         if (solution.active() || solution.hasTransfer() || draining) {
             graph.coverage().forEach(quiet::remove);
         } else {
-            long until = now + (solution.noHeadEdges().isEmpty()
-                    ? IDLE_RECHECK_TICKS : BACKED_UP_RECHECK_TICKS);
+            long until = now + recheckTicks(solution, hasRunningPump(level, graph));
             for (BlockPos cell : graph.coverage()) quiet.put(cell, until);
         }
+    }
+
+    /**
+     * How long an idle network may sleep before its next re-check. A network that is merely
+     * settled (gravity equalized, pump off, no pump) only changes on a block edit and can sleep
+     * the full {@link #IDLE_RECHECK_TICKS} heartbeat. A network holding a RUNNING PUMP — or one
+     * showing a dead-headed NO_HEAD edge — is ARMED: it is actively trying to move fluid and is
+     * idle only because of a transient (full sink, source below its draw lip) that fires no
+     * block event, so it re-checks on the fast {@link #BACKED_UP_RECHECK_TICKS} heartbeat and
+     * resumes promptly. (A running pump subsumes the NO_HEAD case, but both are kept explicit.)
+     */
+    public static int recheckTicks(Solution solution, boolean armedByPump) {
+        return armedByPump || !solution.noHeadEdges().isEmpty()
+                ? BACKED_UP_RECHECK_TICKS : IDLE_RECHECK_TICKS;
+    }
+
+    /** Whether any pump on this network is spun up — i.e. the network is armed (see {@link #recheckTicks}). */
+    public static boolean hasRunningPump(ServerLevel level, Graph graph) {
+        for (Node pump : graph.pumps()) {
+            if (FlowSolver.isPumpRunning(level, pump)) return true;
+        }
+        return false;
     }
 }
