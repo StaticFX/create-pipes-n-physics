@@ -50,6 +50,22 @@ public final class NetworkSolver {
     private NetworkSolver() {}
 
     /**
+     * Surface "head" of a reservoir column. Liquids stack DOWNWARD — head rises with
+     * elevation, so a liquid pools in the lowest connected vessel and communicating
+     * vessels settle at equal surface lines. Lighter-than-air fluids stack UPWARD — head
+     * FALLS with elevation, so a gas pools in the HIGHEST vessel, the exact mirror image.
+     *
+     * The buoyant mirror is deliberately density-INDEPENDENT: any lighter-than-air fluid
+     * inverts as hard as gravity pulls a liquid down, rather than scaling with how light
+     * it is. (Scaling the lift by relative density floored buoyancy at ~1% of gravity for
+     * ordinary gases, so they equalized by volume like a liquid instead of rising — the
+     * regression this restores.)
+     */
+    public static double surfaceHead(double baseY, double fillHeight, boolean lighterThanAir) {
+        return lighterThanAir ? fillHeight - baseY : baseY + fillHeight;
+    }
+
+    /**
      * One node of the solver network.
      *
      * @param capacitance mB of volume per block of head; 0 for junctions and pumps

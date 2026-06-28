@@ -49,6 +49,11 @@ public final class PipeProbe {
                                                    Solution solution, Edge edge, int cell,
                                                    BlockPos pos) {
         EdgeFlow flow = solution.edgeFlows().get(edge.index());
+        // The honest "mB/t through this pipe" — the fluid actually moved by the executed
+        // transfers, NOT the solver's hydraulic flow, which the lip cap / max-flow cap can
+        // throttle well below. They diverge on a near-empty source: the pipe would read a
+        // brisk flow yet barely a trickle leaves the tank.
+        int actualFlow = actualEdgeFlow(graph, solution, edge);
         FluidStack fluid = solution.edgeFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
         if (fluid.isEmpty()) {
             // An idle run can still be full of RESTING fluid (equalized/settled). Surfacing
@@ -59,7 +64,7 @@ public final class PipeProbe {
         }
 
         Direction direction = null;
-        if (flow.direction() != EdgeFlow.Direction.NONE) {
+        if (actualFlow > 0 && flow.direction() != EdgeFlow.Direction.NONE) {
             boolean towardB = flow.direction() == EdgeFlow.Direction.A_TO_B;
             BlockPos next = towardB
                     ? (cell + 1 < edge.pipes().size() ? edge.pipes().get(cell + 1) : graph.node(edge.b()).pos())
@@ -81,7 +86,11 @@ public final class PipeProbe {
 
         Double ceilingA = solution.nodeCeilings().get(edge.a());
         Double ceilingB = solution.nodeCeilings().get(edge.b());
-        boolean hasHeadroom = ceilingA != null || ceilingB != null;
+        // A gas ceiling lives in buoyancy units, not world elevation, so "ceiling − cellY"
+        // is meaningless for it — suppress the whole lift/reach line, as budget() and the
+        // suction margin already are, instead of painting a false "Reach limit" on a gas
+        // pipe that is flowing fine.
+        boolean hasHeadroom = (ceilingA != null || ceilingB != null) && !isGas(fluid);
         float headroom = 0;
         float headTotal = 0;
         if (hasHeadroom) {
@@ -93,7 +102,7 @@ public final class PipeProbe {
             headTotal = budget(solution, winner, ceiling, cellY, fluid);
         }
 
-        byte status = status(solution, edge.index(), flow.mbPerTick());
+        byte status = status(solution, edge.index(), actualFlow);
         byte detail = detail(solution, edge.index(), status);
         if (status == PipeStatusPayload.STATUS_NO_FLOW && fluid.isEmpty()
                 && starvedDryEdges(level, graph, solution).contains(edge.index())) {
@@ -102,7 +111,7 @@ public final class PipeProbe {
         boolean hasSuction = hasPressure && runWorstPressure < -0.05f && !isGas(fluid);
         float suctionMargin = hasSuction
                 ? (float) (PipesNPhysicsConfig.SUCTION_LIMIT.get() + runWorstPressure) : 0;
-        return new PipeStatusPayload(pos, status, flow.mbPerTick(), direction,
+        return new PipeStatusPayload(pos, status, actualFlow, direction,
                 fluid.copyWithAmount(1), hasPressure, pressure, hasHeadroom, headroom, headTotal,
                 detail, hasSuction, suctionMargin, false, 0, 0);
     }
@@ -140,7 +149,7 @@ public final class PipeProbe {
     }
 
     private static boolean isGas(FluidStack fluid) {
-        return !fluid.isEmpty() && fluid.getFluid().getFluidType().getDensity() < 0;
+        return !fluid.isEmpty() && fluid.getFluid().getFluidType().isLighterThanAir();
     }
 
     /**
@@ -298,6 +307,47 @@ public final class PipeProbe {
         return new PipeStatusPayload(pos, status, strongestRate, null,
                 fluid.copyWithAmount(1), hasPressure, pressure, hasHeadroom, headroom, headTotal,
                 detail, hasSuction, suctionMargin, hasPumpLoad, headAgainst, frictionFactor);
+    }
+
+    /**
+     * The real fluid crossing this edge per tick: the net of the executed transfers across the
+     * cut this edge defines, NOT the solver's hydraulic flow (which the lip cap / max-flow cap
+     * can throttle below — so a near-empty source reads a brisk flow yet barely trickles out).
+     * Only a BRIDGE edge cleanly splits the graph; a parallel edge can't be cut, so it falls
+     * back to the solved flow.
+     */
+    public static int actualEdgeFlow(Graph graph, Solution solution, Edge edge) {
+        Set<Integer> aSide = reachableWithout(graph, edge.a(), edge.index());
+        if (aSide.contains(edge.b())) {
+            return solution.edgeFlows().get(edge.index()).mbPerTick();
+        }
+        int net = 0;
+        for (Solution.Transfer transfer : solution.transfers()) {
+            Node from = graph.nodeAt(transfer.from());
+            Node to = graph.nodeAt(transfer.to());
+            if (from == null || to == null) continue;
+            boolean fromA = aSide.contains(from.index());
+            boolean toA = aSide.contains(to.index());
+            if (fromA != toA) net += fromA ? transfer.fluid().getAmount() : -transfer.fluid().getAmount();
+        }
+        return Math.abs(net);
+    }
+
+    /** Nodes reachable from start without crossing the excluded edge — defines the edge's cut. */
+    private static Set<Integer> reachableWithout(Graph graph, int start, int excludeEdge) {
+        Set<Integer> seen = new HashSet<>();
+        Deque<Integer> queue = new ArrayDeque<>();
+        queue.add(start);
+        seen.add(start);
+        while (!queue.isEmpty()) {
+            int node = queue.poll();
+            for (Edge e : graph.edgesOf(node)) {
+                if (e.index() == excludeEdge) continue;
+                int other = e.a() == node ? e.b() : e.a();
+                if (seen.add(other)) queue.add(other);
+            }
+        }
+        return seen;
     }
 
     private static byte status(Solution solution, int edgeIndex, int mbPerTick) {

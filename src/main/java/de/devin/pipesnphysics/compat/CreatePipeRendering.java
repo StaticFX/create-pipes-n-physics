@@ -27,23 +27,24 @@ import java.util.Set;
  * owns the {@code PipeConnection.Flow} objects Create draws. After each solve we
  * set flows on carrying cells and clear the rest.
  *
- * A FLOWING edge fills as a travelling front. Each cell has two halves: the inbound
- * connection (upstream rim → centre) fills FIRST, then the outbound connection
- * (centre → downstream rim) — so the fluid reads as one continuous front entering and
- * leaving, not two fronts growing at once. Create's kept {@code tickFlowProgress}
- * animates each half; the next half/cell is seeded once the current one completes, so
- * the front crawls down the pipe over time. The front is stateless: it is read back
- * each tick from the cells' own flow-completeness, so it survives reloads and topology
- * edits. Fill speed scales with viscosity (gloopy fluids crawl slower).
+ * A FLOWING edge fills as a travelling front ({@link #chargeEdge}), seeded along the flow
+ * direction up to the front; within each cell the inbound half fills first, then the outbound.
+ * Fill speed SCALES WITH THE FLOW RATE ({@link #flowPressure}): a brisk pump fills the run fast,
+ * a trickle fills it slowly, so the visible fill tracks how hard fluid is actually moving.
+ * Delivery stays IN STEP — {@link #deliveryReady} releases the endpoint transfer only once this
+ * front reaches the sink, so visual and actual delivery line up. The front is stateless (read
+ * back each tick from the cells' own flow-completeness), so it survives reloads and edits; a flow
+ * restart no longer re-crawls a long run from scratch because the {@code isBackedUp}/drainDeadEdge
+ * guards keep the charged cells through a transient (the long-pipe "delivery in bursts" fix).
  *
  * A RESTING edge (full but not flowing, e.g. equalized tanks) is shown full at once
- * on each cell that sits below the connected fluid surface — there is no front to
- * travel. Every other network cell is swept clear, which also wipes flows stranded
- * by an edit since each such cell re-ticks its own network.
+ * on each cell that sits below the connected fluid surface. Every other network cell is
+ * swept clear, which also wipes flows stranded by an edit since each such cell re-ticks
+ * its own network.
  */
 public final class CreatePipeRendering {
-    /** Fill-speed knob (a Create "pressure") at water viscosity; scaled by 1000/viscosity. */
-    private static final float FILL_PRESSURE_BASE = 12f;
+    /** Fill-speed knob (a Create "pressure") per mB/t of flow: faster flow fills the run faster. */
+    private static final float FILL_PRESSURE_PER_MBPT = 0.6f;
     private static final float MIN_FILL_PRESSURE = 1f;
     private static final float MAX_FILL_PRESSURE = 128f;
 
@@ -82,7 +83,7 @@ public final class CreatePipeRendering {
             FluidStack flowing = solution.edgeFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
             if (!flowing.isEmpty() && flow.direction() != EdgeFlow.Direction.NONE) {
                 chargeEdge(level, graph, edge, flowing,
-                        flow.direction() == EdgeFlow.Direction.A_TO_B, filled);
+                        flow.direction() == EdgeFlow.Direction.A_TO_B, flow.mbPerTick(), filled);
                 continue;
             }
 
@@ -103,10 +104,18 @@ public final class CreatePipeRendering {
             if (!resting.isEmpty() && headA != null && headB != null) {
                 draining |= restEdge(level, graph, edge, resting, headA, headB, filled,
                         level.getGameTime(), edge.index());
-            } else if (graph.node(edge.a()).isHandler() && graph.node(edge.b()).isHandler()) {
-                // A tank-to-tank run whose supply dropped below it (e.g. the upper tank
-                // drained) is no longer solved at all, yet still holds rendered fluid —
-                // let that recede into the lower tank instead of vanishing.
+            } else {
+                // A run that is no longer solved (no flow, and no settled waterline to hold a
+                // resting column) yet still holds rendered fluid: let it RECEDE gradually
+                // instead of being swept this tick. This covers a tank-to-tank run whose upper
+                // supply drained, AND a PUMP run whose source briefly ran dry — e.g. a basin fed
+                // in recipe-sized chunks, which empties between outputs. Without it the charged
+                // pipe is blanked the instant the source dips empty, so the travelling front has
+                // to re-crawl the ENTIRE run when the source refills; on a long pipe that reads as
+                // delivery arriving in bursts ("pumps every N ticks, then a big slug"). Preserving
+                // the cells lets flow resume mid-pipe with no re-crawl (the same reason the
+                // sink-full {@code isBackedUp} guard keeps its charged cells). A genuinely empty
+                // run has no wet cells, so {@code drainDeadEdge} is a no-op for it.
                 draining |= drainDeadEdge(level, edge, filled, level.getGameTime());
             }
         }
@@ -179,15 +188,23 @@ public final class CreatePipeRendering {
         return conn == null || isComplete(conn);                // the front has exited toward the node
     }
 
-    /** Advance the travelling front of a flowing edge by one tick of fill. */
+    /**
+     * Advance the travelling front of a flowing edge by one tick, at a fill speed that SCALES
+     * WITH THE FLOW RATE ({@link #flowPressure}): a brisk pump fills the run fast, a trickle fills
+     * it slowly, so the visible fill tracks how hard fluid is moving. Delivery stays in step —
+     * {@link #deliveryReady} releases the endpoint transfer only once this front reaches the sink.
+     * (A long pipe no longer re-crawls from scratch on a flow restart: the {@code isBackedUp} /
+     * drainDeadEdge guards keep the charged cells through a transient, so the front resumes where
+     * it left off instead of re-travelling — that was the "delivery in bursts" symptom.)
+     */
     private static void chargeEdge(Level level, Graph graph, Edge edge, FluidStack fluid,
-                                   boolean flowFromA, Set<BlockPos> filled) {
+                                   boolean flowFromA, int mbPerTick, Set<BlockPos> filled) {
         List<BlockPos> pipes = edge.pipes();
         if (pipes.isEmpty()) return;
         List<BlockPos> order = flowFromA ? pipes : pipes.reversed();
         BlockPos upstream = (flowFromA ? graph.node(edge.a()) : graph.node(edge.b())).pos();
         BlockPos downstream = (flowFromA ? graph.node(edge.b()) : graph.node(edge.a())).pos();
-        float pressure = fillPressure(fluid);
+        float pressure = flowPressure(mbPerTick);
 
         boolean reached = true; // the upstream node always feeds the first cell
         for (int j = 0; j < order.size() && reached; j++) {
@@ -239,7 +256,7 @@ public final class CreatePipeRendering {
         BlockPos bEnd = graph.node(edge.b()).pos();
         // Gas head is a pressure value, not an elevation, so the waterline test below
         // is meaningless for it — a resting gas run simply fills every cell.
-        boolean gas = fluid.getFluid().getFluidType().getDensity() < 0;
+        boolean gas = fluid.getFluid().getFluidType().isLighterThanAir();
         boolean equalizing = graph.node(edge.a()).isHandler() && graph.node(edge.b()).isHandler();
         List<BlockPos> stranded = new ArrayList<>();
 
@@ -291,7 +308,12 @@ public final class CreatePipeRendering {
         return !stranded.isEmpty();
     }
 
-    /** Recede the leftover fluid in a no-longer-solved tank-to-tank run, top-down. */
+    /**
+     * Recede the leftover fluid in a no-longer-solved run, top-down: a drained tank-to-tank
+     * run, or a pump run whose source briefly ran dry. Holds the wet cells (so a refill resumes
+     * mid-pipe instead of re-crawling) and releases the highest one per heartbeat so a run that
+     * stays unfed empties gradually rather than freezing full.
+     */
     private static boolean drainDeadEdge(Level level, Edge edge, Set<BlockPos> filled, long gameTime) {
         List<BlockPos> wet = new ArrayList<>();
         for (BlockPos cell : edge.pipes()) {
@@ -362,14 +384,14 @@ public final class CreatePipeRendering {
         } else {
             accessor.pipesnphysics$setFlow(Optional.of(conn.new Flow(inbound, fluid.copy())));
         }
-        // Reset the fill-speed knob to this fluid's value on this side every (re)seed,
+        // Reset the fill-speed knob to this flow's value on this side every (re)seed,
         // so a flipped direction or a fluid swap never animates at a stale speed.
         conn.wipePressure();
         conn.addPressure(inbound, pressure);
         return true;
     }
 
-    /** Seed a finished (full) Flow immediately — for resting pipes. */
+    /** Seed a finished (full) Flow immediately — for flowing and resting pipes alike. */
     private static boolean seedComplete(PipeConnection conn, boolean inbound, FluidStack fluid) {
         if (!(conn instanceof PipeConnectionAccessor accessor)) return false;
         Optional<PipeConnection.Flow> current = accessor.pipesnphysics$getFlow();
@@ -419,10 +441,15 @@ public final class CreatePipeRendering {
         return false;
     }
 
-    private static float fillPressure(FluidStack fluid) {
-        int viscosity = Math.max(1, fluid.getFluid().getFluidType().getViscosity());
+    /**
+     * Fill-speed knob (a Create "pressure") scaling with the FLOW RATE, so the front crawls fast
+     * under a brisk pump and slowly under a trickle — the visible fill tracks the actual flow.
+     * (Replaced the old viscosity scaling, which made a fast pump down a long pipe crawl as slowly
+     * as a trickle and read as bursty delivery.)
+     */
+    private static float flowPressure(int mbPerTick) {
         return (float) Math.clamp(
-                FILL_PRESSURE_BASE * 1000.0 / viscosity, MIN_FILL_PRESSURE, MAX_FILL_PRESSURE);
+                Math.abs(mbPerTick) * FILL_PRESSURE_PER_MBPT, MIN_FILL_PRESSURE, MAX_FILL_PRESSURE);
     }
 
     private static Direction direction(BlockPos from, BlockPos to) {

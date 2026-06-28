@@ -202,12 +202,25 @@ public final class FlowSolver {
         for (Node pump : graph.pumps()) {
             float speed = level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
                     ? kinetic.getSpeed() : 0;
-            boolean open = Math.abs(speed) > MIN_PUMP_SPEED && pump.pumpFacing() != null;
             double head = Math.abs(speed) * headPerRpm;
-            pumps.put(pump.index(), new PumpState(open, head, pump.pumpFacing(),
+            pumps.put(pump.index(), new PumpState(isPumpRunning(level, pump), head, pump.pumpFacing(),
                     flowPerRpm / headPerRpm));
         }
         return pumps;
+    }
+
+    /**
+     * Whether a pump is spun up enough to develop head and behave as an OPEN check valve.
+     * A pump below this speed (or whose facing has not resolved) is a closed valve: it
+     * neither drives flow nor lets fluid pass. Shared with {@link EngineTickHandler}, which
+     * keeps a network holding a running pump on the fast re-check heartbeat even while it
+     * sits idle — the pump is ARMED, momentarily blocked by a full sink or a source below
+     * its draw lip, and must resume the instant either changes (neither fires a block event).
+     */
+    public static boolean isPumpRunning(Level level, Node pump) {
+        if (pump.pumpFacing() == null) return false;
+        return level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
+                && Math.abs(kinetic.getSpeed()) > MIN_PUMP_SPEED;
     }
 
     // ------------------------------------------------------------------ one fluid pass
@@ -220,8 +233,7 @@ public final class FlowSolver {
                                       Map<Integer, PumpState> pumps, FluidStack sample,
                                       Set<BlockPos> claimedEmpties, GroupResults results) {
         FluidType type = sample.getFluid().getFluidType();
-        boolean gas = type.getDensity() < 0;
-        double relDensity = Math.max(0.01, Math.abs(type.getDensity()) / 1000.0);
+        boolean gas = type.isLighterThanAir();
         double viscosityScale = 1000.0 / Math.max(1, type.getViscosity());
         double conductancePerTile = PipesNPhysicsConfig.PIPE_CONDUCTANCE.get() * viscosityScale;
 
@@ -235,7 +247,7 @@ public final class FlowSolver {
         for (BoundaryColumn column : columns.distinct) {
             if (!participates(level, column, sample, claimedEmpties)) continue;
             int index = nodeSpecs.size();
-            nodeSpecs.add(new NodeSpec(column.capacitance(), columnHead(column, gas, relDensity)));
+            nodeSpecs.add(new NodeSpec(column.capacitance(), columnHead(column, gas)));
             canSupply.add(!column.isEmpty());
             participants.add(column);
             columnIndex.put(column, index);
@@ -254,7 +266,7 @@ public final class FlowSolver {
         List<BranchMeta> meta = new ArrayList<>();
         for (Edge edge : graph.edges()) {
             assembleBranch(level, graph, columns, pumps, edge, solverIndex, sample,
-                    gas, relDensity, conductancePerTile, branches, meta, results);
+                    gas, conductancePerTile, branches, meta, results);
         }
         if (branches.isEmpty()) return false;
 
@@ -262,7 +274,7 @@ public final class FlowSolver {
                 PipesNPhysicsConfig.SUCTION_LIMIT.get());
 
         recordDisplayHeads(graph, solverIndex, nodeSpecs, canSupply, branches, result,
-                gas, relDensity, results.nodeHeads, results.nodeCeilings, results.nodeAnchors);
+                gas, results.nodeHeads, results.nodeCeilings, results.nodeAnchors);
 
         boolean active = false;
         for (int b = 0; b < branches.size(); b++) {
@@ -291,7 +303,7 @@ public final class FlowSolver {
         }
 
         TransferPlan plan = planTransfers(level, participants, columnIndex, branches, meta, result,
-                sample, gas, relDensity, claimedEmpties, results.transfers);
+                sample, gas, claimedEmpties, results.transfers);
 
         // Pressurized but nothing moved (sink full, source undrainable): the pass
         // is STALLED — distinguish it from genuine flow so the player isn't shown
@@ -352,11 +364,10 @@ public final class FlowSolver {
      * intake mouth (see {@link BoundaryColumn#forOpenEnd}) draws in only while the
      * network sits below the mouth ("vacuum"), never while it would spill.
      */
-    private static double columnHead(BoundaryColumn column, boolean gas, double relDensity) {
+    private static double columnHead(BoundaryColumn column, boolean gas) {
         if (!gas && column.isOpenEnd()) return column.baseY() + 0.5;
         double fillHeight = column.fillFraction() * column.heightBlocks();
-        return gas ? fillHeight - relDensity * column.baseY()
-                : column.baseY() + fillHeight;
+        return NetworkSolver.surfaceHead(column.baseY(), fillHeight, gas);
     }
 
     /**
@@ -389,7 +400,7 @@ public final class FlowSolver {
     private static void assembleBranch(Level level, Graph graph, Columns columns,
                                        Map<Integer, PumpState> pumps, Edge edge,
                                        int[] solverIndex, FluidStack sample,
-                                       boolean gas, double relDensity,
+                                       boolean gas,
                                        double conductancePerTile,
                                        List<BranchSpec> branches, List<BranchMeta> meta,
                                        GroupResults results) {
@@ -472,14 +483,14 @@ public final class FlowSolver {
             if (columnA != null) {
                 BlockPos opening = adjacentCell(graph, edge, edge.a());
                 lipA = SableCompat.getWorldY(level, opening) - 0.5;
-                if (!canDrawFrom(level, graph.node(edge.a()), columnA, opening, lipA, relDensity)) {
+                if (!canDrawFrom(level, graph.node(edge.a()), columnA, opening, lipA)) {
                     allowedSign = combineSign(allowedSign, -1);
                 }
             }
             if (columnB != null) {
                 BlockPos opening = adjacentCell(graph, edge, edge.b());
                 lipB = SableCompat.getWorldY(level, opening) - 0.5;
-                if (!canDrawFrom(level, graph.node(edge.b()), columnB, opening, lipB, relDensity)) {
+                if (!canDrawFrom(level, graph.node(edge.b()), columnB, opening, lipB)) {
                     allowedSign = combineSign(allowedSign, +1);
                 }
             }
@@ -542,9 +553,9 @@ public final class FlowSolver {
      * mouth submerged in a lake), wherever it points.
      */
     private static boolean canDrawFrom(Level level, Node handlerNode, BoundaryColumn column,
-                                       BlockPos opening, double lip, double relDensity) {
+                                       BlockPos opening, double lip) {
         if (column.isOpenEnd() || column.isInfiniteSource()) return true;
-        double surface = columnHead(column, false, relDensity);
+        double surface = columnHead(column, false);
         if (surface <= lip) return false;
         return SableCompat.canFluidReachPipe(level, handlerNode.pos(), opening, column.fillFraction());
     }
@@ -571,7 +582,7 @@ public final class FlowSolver {
                                               Map<BoundaryColumn, Integer> columnIndex,
                                               List<BranchSpec> branches, List<BranchMeta> meta,
                                               NetworkSolver.Result result, FluidStack sample,
-                                              boolean gas, double relDensity,
+                                              boolean gas,
                                               Set<BlockPos> claimedEmpties,
                                               List<Solution.Transfer> transfers) {
         int maxFlow = PipesNPhysicsConfig.MAX_FLOW_PER_ENDPOINT.get();
@@ -597,7 +608,7 @@ public final class FlowSolver {
             if (delta < 0) {
                 double outflow = Math.min(-delta, maxFlow);
                 outflow = Math.min(outflow, lipDrainCap(column, node,
-                        branches, meta, result, gas, relDensity));
+                        branches, meta, result, gas));
                 // An open-end intake mouth's contentMb is the real per-tick world yield;
                 // never request past it. Create's drain returns the requested amount even
                 // when the body holds less (a 250 mB honey block under the 256 cap), which
@@ -699,7 +710,7 @@ public final class FlowSolver {
      */
     private static double lipDrainCap(BoundaryColumn column, int solverIdx,
                                       List<BranchSpec> branches, List<BranchMeta> meta,
-                                      NetworkSolver.Result result, boolean gas, double relDensity) {
+                                      NetworkSolver.Result result, boolean gas) {
         if (gas || column.isOpenEnd() || column.isInfiniteSource()) return Double.MAX_VALUE;
 
         double minLip = Double.NaN;
@@ -720,7 +731,7 @@ public final class FlowSolver {
         }
         if (Double.isNaN(minLip)) return Double.MAX_VALUE;
 
-        double surface = columnHead(column, false, relDensity);
+        double surface = columnHead(column, false);
         double aboveLipMb = column.capacitance() * (surface - minLip);
         if (aboveLipMb <= 0) return 0;
         return Math.max(Math.min(aboveLipMb, LIP_DREGS_MB), LIP_DRAIN_RATE * aboveLipMb);
@@ -745,7 +756,7 @@ public final class FlowSolver {
                                            List<NodeSpec> nodeSpecs, List<Boolean> canSupply,
                                            List<BranchSpec> branches,
                                            NetworkSolver.Result result,
-                                           boolean gas, double relDensity,
+                                           boolean gas,
                                            Map<Integer, Double> nodeHeads,
                                            Map<Integer, Double> nodeCeilings,
                                            Map<Integer, Double> nodeAnchors) {
@@ -869,7 +880,7 @@ public final class FlowSolver {
         for (Node node : graph.nodes()) {
             int index = solverIndex[node.index()];
             if (index < 0 || ceilingKnown[index] || boostAhead[index] <= 0) continue;
-            anchor[index] = anchorHead(nodeSpecs.get(index), node, gas, relDensity);
+            anchor[index] = anchorHead(nodeSpecs.get(index), node, gas);
             ceiling[index] = anchor[index] + boostAhead[index];
             ceilingKnown[index] = true;
         }
@@ -888,9 +899,9 @@ public final class FlowSolver {
     }
 
     /** The head a fresh supply would have if its surface sat exactly at this node. */
-    private static double anchorHead(NodeSpec spec, Node node, boolean gas, double relDensity) {
+    private static double anchorHead(NodeSpec spec, Node node, boolean gas) {
         if (spec.capacitance() > 0) return spec.head();
-        return gas ? -relDensity * node.worldY() : node.worldY();
+        return NetworkSolver.surfaceHead(node.worldY(), 0, gas);
     }
 
     private static List<EdgeFlow> toEdgeFlows(Graph graph, double[] edgeFlow) {

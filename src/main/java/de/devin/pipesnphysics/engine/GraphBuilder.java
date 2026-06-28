@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.engine;
 
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
+import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.compat.SableCompat;
@@ -219,7 +220,14 @@ public final class GraphBuilder {
 
                 var handler = level.getCapability(
                         Capabilities.FluidHandler.BLOCK, neighbor, face.getOpposite());
-                if (handler != null) {
+                // A cauldron (and the other vanilla fluid targets) now exposes a NeoForge
+                // fluid-handler capability, but its CauldronWrapper only drains in whole
+                // 1000 mB increments — far above MAX_FLOW_PER_ENDPOINT — so the generic
+                // handler path reads it as empty and a pump beside it never pulls. Create
+                // itself drains these through the open-end (VanillaFluidTargets) path, so
+                // let them fall through to the OPEN_END branch below, exactly as Create's
+                // own isOpenEnd does (it returns true for canProvideFluidWithoutCapability).
+                if (handler != null && !VanillaFluidTargets.canProvideFluidWithoutCapability(nState)) {
                     d.handlers.add(neighbor.immutable());
                     conns.add(neighbor.immutable());
                     // A conduit handler is traversed THROUGH so its own chain is discovered.

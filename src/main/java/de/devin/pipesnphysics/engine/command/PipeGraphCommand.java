@@ -2,11 +2,14 @@ package de.devin.pipesnphysics.engine.command;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
+import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+import de.devin.pipesnphysics.engine.BoundaryColumn;
 import de.devin.pipesnphysics.engine.Edge;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.FluidEngine;
 import de.devin.pipesnphysics.engine.Graph;
 import de.devin.pipesnphysics.engine.Node;
+import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
@@ -18,6 +21,8 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
+import net.neoforged.neoforge.fluids.FluidStack;
+import net.neoforged.neoforge.fluids.FluidType;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.util.ArrayList;
@@ -61,39 +66,49 @@ public final class PipeGraphCommand {
         }
         Solution solution = FluidEngine.simulate(level, target);
 
-        sendText(player, graph, solution);
+        sendText(player, level, graph, solution);
         PacketDistributor.sendToPlayer(player, buildPayload(level, graph, solution));
         return 1;
     }
 
-    private static void sendText(ServerPlayer player, Graph g, Solution s) {
+    private static void sendText(ServerPlayer player, ServerLevel level, Graph g, Solution s) {
         send(player, "§e--- Pipe Graph ---");
         send(player, "§7Nodes: §f" + g.nodes().size() + "  §7Edges: §f" + g.edges().size());
         for (Node n : g.nodes()) {
             Double head = s.nodeHeads().get(n.index());
             Double ceiling = s.nodeCeilings().get(n.index());
-            send(player, String.format("  §f%s §7%s §7y=§f%.1f%s%s%s",
-                    n.pos().toShortString(), n.kind(),
+            String block = blockName(level, n);
+            send(player, String.format("  §f%s §7%s §b%s §7y=§f%.1f%s%s%s",
+                    n.pos().toShortString(), n.kind(), block,
                     n.worldY(),
                     head != null ? String.format(" §7head=§f%.2f", head) : "",
                     ceiling != null ? String.format(" §7ceil=§b%.2f", ceiling) : " §8ceil=∅",
                     n.pumpFacing() != null ? " §7face=§f" + n.pumpFacing() : ""));
+            BoundaryColumn column = columnOf(level, n);
+            if (column != null && !column.contents().isEmpty() && column.contentMb() > 0) {
+                send(player, "      §7" + (n.isOpenEnd()
+                        ? "draws §f" + column.contents().getHoverName().getString()
+                        : fluidSummary(column)));
+            }
         }
+        sendFluidStats(player, level, g);
         send(player, "§e--- Edges ---");
         for (Edge e : g.edges()) {
             EdgeFlow flow = s.edgeFlows().get(e.index());
+            int rate = PipeProbe.actualEdgeFlow(g, s, e); // mB actually moved, not the hydraulic flow
             String dir = switch (flow.direction()) {
                 case A_TO_B -> "a→b";
                 case B_TO_A -> "b→a";
                 case NONE -> "idle";
             };
+            if (rate == 0) dir = "idle";
             if (s.stalledEdges().contains(e.index())) dir = "§6stalled§7";
             if (s.noHeadEdges().contains(e.index())) dir = "§cno head§7";
             Node a = g.node(e.a()), b = g.node(e.b());
             send(player, String.format("  §e%s §f%s §7↔ §f%s §7len=%d §7%s §7%d mB/t",
                     GraphOverlayPayload.edgeLetter(e.index()),
                     a.pos().toShortString(), b.pos().toShortString(),
-                    e.length(), dir, flow.mbPerTick()));
+                    e.length(), dir, rate));
         }
         if (s.hasTransfer()) {
             for (Solution.Transfer transfer : s.transfers()) {
@@ -117,7 +132,7 @@ public final class PipeGraphCommand {
                 case OPEN_END -> GraphOverlayPayload.NodeEntry.KIND_OPEN_END;
             };
             nodes.add(new GraphOverlayPayload.NodeEntry(
-                    n.pos().getX(), n.pos().getY(), n.pos().getZ(), kind));
+                    n.pos().getX(), n.pos().getY(), n.pos().getZ(), kind, nodeLabel(level, n)));
         }
 
         List<GraphOverlayPayload.EdgeEntry> edges = new ArrayList<>(g.edges().size());
@@ -174,6 +189,89 @@ public final class PipeGraphCommand {
         List<T> out = new ArrayList<>(in.size());
         for (int i = in.size() - 1; i >= 0; i--) out.add(in.get(i));
         return out;
+    }
+
+    /** Localized name of the block at a node — the tank, basin, pump, cauldron, etc. */
+    private static String blockName(ServerLevel level, Node n) {
+        return level.getBlockState(n.pos()).getBlock().getName().getString();
+    }
+
+    /**
+     * The fluid column behind a source/sink node, or null for pumps, junctions, and
+     * handlers that no longer expose a capability. Open ends report the fluid their
+     * mouth would draw in (empty for a plain spill outlet).
+     */
+    private static BoundaryColumn columnOf(ServerLevel level, Node n) {
+        if (n.isHandler()) return BoundaryColumn.resolve(level, n);
+        if (n.isOpenEnd()) return BoundaryColumn.forOpenEnd(level, n, false);
+        return null;
+    }
+
+    /** "4000/8000 mB Water (50%)" — a column's contents, capacity, and fill. */
+    private static String fluidSummary(BoundaryColumn column) {
+        return String.format("%d/%d mB §f%s §7(%.0f%%)",
+                column.contentMb(), column.capacityMb(),
+                column.contents().getHoverName().getString(),
+                column.fillFraction() * 100);
+    }
+
+    /**
+     * The floating in-world label for a node: the block it is, plus a fluid line for
+     * sources/sinks (and RPM for pumps). Empty for junctions, which the overlay leaves
+     * unannotated to avoid clutter. Lines are {@code \n}-separated for the client.
+     */
+    private static String nodeLabel(ServerLevel level, Node n) {
+        String block = blockName(level, n);
+        return switch (n.kind()) {
+            case HANDLER -> {
+                BoundaryColumn column = columnOf(level, n);
+                yield block + "\n" + (column != null && !column.contents().isEmpty() && column.contentMb() > 0
+                        ? String.format("%d mB %s", column.contentMb(), column.contents().getHoverName().getString())
+                        : "empty");
+            }
+            case OPEN_END -> {
+                BoundaryColumn column = columnOf(level, n);
+                yield block + "\n" + (column != null && !column.contents().isEmpty()
+                        ? "draws " + column.contents().getHoverName().getString()
+                        : "open end");
+            }
+            case PUMP -> {
+                float rpm = level.getBlockEntity(n.pos()) instanceof KineticBlockEntity k ? k.getSpeed() : 0;
+                yield block + "\n" + String.format("%.0f RPM%s", rpm,
+                        n.pumpFacing() != null ? " →" + n.pumpFacing() : "");
+            }
+            case JUNCTION -> "";
+        };
+    }
+
+    /**
+     * A per-fluid summary of everything held across the network's sources/sinks: total
+     * volume plus the physical properties that drive the engine — density (gravity/
+     * buoyancy sign), viscosity (flow rate), and temperature. Flags a lighter-than-air
+     * fluid, which inverts the gravity model.
+     */
+    private static void sendFluidStats(ServerPlayer player, ServerLevel level, Graph g) {
+        List<FluidStack> totals = new ArrayList<>();
+        for (Node n : g.nodes()) {
+            BoundaryColumn column = columnOf(level, n);
+            if (column == null || column.contents().isEmpty() || column.contentMb() <= 0) continue;
+            FluidStack running = null;
+            for (FluidStack present : totals) {
+                if (FluidStack.isSameFluidSameComponents(present, column.contents())) { running = present; break; }
+            }
+            if (running != null) running.grow(column.contentMb());
+            else totals.add(column.contents().copyWithAmount(column.contentMb()));
+        }
+        if (totals.isEmpty()) return;
+
+        send(player, "§e--- Fluids ---");
+        for (FluidStack fluid : totals) {
+            FluidType type = fluid.getFluid().getFluidType();
+            send(player, String.format("  §b%s§7: §f%d mB  §7density §f%d §7visc §f%d §7temp §f%dK%s",
+                    fluid.getHoverName().getString(), fluid.getAmount(),
+                    type.getDensity(), type.getViscosity(), type.getTemperature(),
+                    type.isLighterThanAir() ? "  §e(lighter than air ↑)" : ""));
+        }
     }
 
     private static void send(ServerPlayer player, String message) {

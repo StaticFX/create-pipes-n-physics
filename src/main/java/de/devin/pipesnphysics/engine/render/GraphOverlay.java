@@ -84,7 +84,9 @@ public final class GraphOverlay {
         buffers.endBatch(RenderType.lines());
 
         for (ActiveOverlay a : ACTIVE) {
-            drawEdgeLabels(buffers, a.payload, lifeFraction(a, now));
+            float fade = lifeFraction(a, now);
+            drawEdgeLabels(buffers, a.payload, fade);
+            drawNodeLabels(buffers, a.payload, fade);
         }
         buffers.endBatch();
     }
@@ -113,6 +115,36 @@ public final class GraphOverlay {
                     GraphOverlayPayload.edgeLetter(ei), x, y, z, color,
                     0.035f, true, 0, true);
         }
+    }
+
+    /**
+     * Floating label above each source/sink node: the block it is (colored by kind),
+     * then its fluid/RPM line(s) below. Junctions carry an empty label and are skipped
+     * so the overlay stays readable. Mirrors {@link #drawEdgeLabels}' billboarding.
+     */
+    private static void drawNodeLabels(MultiBufferSource buffers,
+                                       GraphOverlayPayload payload, float fade) {
+        for (var n : payload.nodes()) {
+            if (n.label().isEmpty()) continue;
+            String[] lines = n.label().split("\n");
+            double x = n.x() + 0.5, top = n.y() + 1.35, z = n.z() + 0.5;
+            int alpha = (int) (255 * Math.max(0.25f, fade));
+            for (int i = 0; i < lines.length; i++) {
+                int rgb = i == 0 ? nodeRgb(n.kind()) : 0xD0D0D0;
+                DebugRenderer.renderFloatingText(new PoseStack(), buffers, lines[i],
+                        x, top - i * 0.26, z, (alpha << 24) | rgb, 0.028f, true, 0, true);
+            }
+        }
+    }
+
+    /** Label color per node kind, matching the box colors in {@link #drawSnapshot}. */
+    private static int nodeRgb(byte kind) {
+        return switch (kind) {
+            case GraphOverlayPayload.NodeEntry.KIND_HANDLER -> 0x40DC40;
+            case GraphOverlayPayload.NodeEntry.KIND_PUMP -> 0xFA8C1E;
+            case GraphOverlayPayload.NodeEntry.KIND_OPEN_END -> 0x50B4FF;
+            default -> 0xFFFFFF;
+        };
     }
 
     private static float lifeFraction(ActiveOverlay a, long now) {

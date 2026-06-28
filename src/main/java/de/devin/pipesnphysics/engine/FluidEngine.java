@@ -1,5 +1,6 @@
 package de.devin.pipesnphysics.engine;
 
+import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.neoforge.fluids.FluidStack;
@@ -93,9 +94,20 @@ public final class FluidEngine {
         }
     }
 
-    /** Block capability, or the open-end pipe behind a world-space position. */
+    /**
+     * Block capability, or the open-end pipe behind a world-space position. A vanilla
+     * fluid target (cauldron/honey) exposes a coarse-granularity capability — NeoForge's
+     * {@code CauldronWrapper} only drains in whole 1000 mB steps — but the engine treats
+     * it as an OPEN_END (see {@code GraphBuilder}), so it must drain through the open-end
+     * pipe (atomic drain + buffered delivery), NOT that capability. Resolving the
+     * capability here would refuse every sub-1000 mB transfer and show flow while moving
+     * nothing — the same hijack that misclassified the node, one layer down.
+     */
     private static IFluidHandler handlerAt(ServerLevel level, BlockPos pos) {
-        IFluidHandler handler = BoundaryColumn.findHandler(level, pos);
-        return handler != null ? handler : OpenEndPipes.existing(level, pos);
+        if (!VanillaFluidTargets.canProvideFluidWithoutCapability(level.getBlockState(pos))) {
+            IFluidHandler handler = BoundaryColumn.findHandler(level, pos);
+            if (handler != null) return handler;
+        }
+        return OpenEndPipes.existing(level, pos);
     }
 }
