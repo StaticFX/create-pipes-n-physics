@@ -64,49 +64,5 @@
   "pipesnphysics.ponder.siphons.text_2": "This allows for siphoning over crests",
   "pipesnphysics.ponder.siphons.text_3": "However, if suction is too high, the fluid column breaks",
   "pipesnphysics.ponder.siphons.text_4": "This 'air break' stops all flow until the crest is lowered or pressure is added",
-  "pipesnphysics.ponder.siphons.text_5": "Use Engineer's Goggles to monitor suction and find air breaks",
-
-  "pipesnphysics.ponder.pump.header": "Mechanical Pump",
-  "pipesnphysics.ponder.pump.text_1": "A fluid tank filled with water",
-  "pipesnphysics.ponder.pump.text_2": "We want to move the fluid to this empty tank",
-  "pipesnphysics.ponder.pump.text_3": "Connect them with fluid pipes",
-  "pipesnphysics.ponder.pump.text_4": "Fluid won't move on its own through horizontal pipes — it needs a pump",
-  "pipesnphysics.ponder.pump.text_5": "A Mechanical Pump adds head to push fluid through the network",
-  "pipesnphysics.ponder.pump.text_6": "Give it rotational power and the pump starts moving fluid",
-  "pipesnphysics.ponder.pump.text_7": "Throughput and lift both depend on RPM — inspect with Engineer's Goggles",
-
-  "pipesnphysics.ponder.friction.header": "Pipe Run Friction",
-  "pipesnphysics.ponder.friction.text_1": "Long horizontal runs add friction",
-  "pipesnphysics.ponder.friction.text_2": "Throughput falls as the run grows longer",
-  "pipesnphysics.ponder.friction.text_3": "Viscous fluids like lava are hit even harder on the same layout",
-  "pipesnphysics.ponder.friction.text_4": "Gravity assists on downhill runs — the pump gets help instead of fighting lift",
-  "pipesnphysics.ponder.friction.text_5": "Sneak with goggles on a running pump to see lift vs pipe-run limits",
-
-  "pipesnphysics.ponder.pressure.header": "Head and Pressure",
-  "pipesnphysics.ponder.pressure.text_1": "A vertical drop creates head",
-  "pipesnphysics.ponder.pressure.text_2": "Fluid naturally seeks the lower tank",
-  "pipesnphysics.ponder.pressure.text_3": "Connected tanks equalize to the same surface height",
-  "pipesnphysics.ponder.pressure.text_4": "A mechanical pump adds head from RPM when it must push uphill",
-  "pipesnphysics.ponder.pressure.text_5": "Use Engineer's Goggles to read flow, pressure, and why a line stalled",
-
-  "pipesnphysics.ponder.l_shape.header": "Pressure vs Friction",
-  "pipesnphysics.ponder.l_shape.text_1": "A high tank builds head down the vertical leg of the run",
-  "pipesnphysics.ponder.l_shape.text_2": "That head is preserved on the vertical drop",
-  "pipesnphysics.ponder.l_shape.text_3": "The horizontal leg spends head on friction — only so much reach remains",
-  "pipesnphysics.ponder.l_shape.text_4": "More height above the turn means more horizontal reach",
-
-  "pipesnphysics.ponder.uphill.header": "Pumping Uphill",
-  "pipesnphysics.ponder.uphill.text_1": "A tank at ground level feeding a vertical run",
-  "pipesnphysics.ponder.uphill.text_2": "The pump must supply enough head for every block of rise",
-  "pipesnphysics.ponder.uphill.text_3": "Default 0.25 blocks of head per RPM — 64 RPM lifts about 16 blocks",
-  "pipesnphysics.ponder.uphill.text_4": "Stack pumps in series or raise RPM to reach higher tanks",
-
-  "pipesnphysics.ponder.vertical_drop.header": "Gravity Equalization",
-  "pipesnphysics.ponder.vertical_drop.text_1": "No pump is required for a simple drop between two tanks",
-  "pipesnphysics.ponder.vertical_drop.text_2": "The upper tank drains until both surfaces match — fluid is conserved every tick",
-
-  "pipesnphysics.ponder.siphon.header": "Siphon Limits",
-  "pipesnphysics.ponder.siphon.text_1": "Pulling over a tall crest creates suction at the highest pipe",
-  "pipesnphysics.ponder.siphon.text_2": "If the column hangs too far below that point, the siphon breaks",
-  "pipesnphysics.ponder.siphon.text_3": "Goggles will report an 'air break' when the suction limit is exceeded"
+  "pipesnphysics.ponder.siphons.text_5": "Use Engineer's Goggles to monitor suction and find air breaks"
 }
