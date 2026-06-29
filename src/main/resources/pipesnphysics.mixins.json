@@ -23,8 +23,7 @@
     "GlassPipeVisualMixin",
     "TransparentStraightPipeRendererMixin",
     "PonderSceneRegistryMixin",
-    "PonderSceneRegistryAccessor",
-    "PonderIndexMixin"
+    "PonderTagRegistryMixin"
   ],
   "injectors": {
     "defaultRequire": 1
