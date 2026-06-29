@@ -1,6 +1,8 @@
 package de.devin.pipesnphysics.client.ponder;
 
 import com.simibubi.create.AllBlocks;
+import com.simibubi.create.content.fluids.pipes.FluidPipeBlock;
+import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import com.simibubi.create.foundation.ponder.CreateSceneBuilder;
@@ -18,6 +20,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluids;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
@@ -36,7 +39,7 @@ public final class PipesNPhysicsPonderScenes {
                 .addStoryBoard("uphill", PipesNPhysicsPonderScenes::fluidDynamics,
                         AllCreatePonderTags.KINETIC_APPLIANCES, tag)
                 .addStoryBoard("siphon", PipesNPhysicsPonderScenes::siphonsAndSuction, tag);
-    }
+    }   
 
     private static void fillTank(SceneBuilder scene, BlockPos pos) {
         scene.world().modifyBlockEntity(pos, FluidTankBlockEntity.class, tank -> {
@@ -69,6 +72,10 @@ public final class PipesNPhysicsPonderScenes {
         scene.idle(5);
 
         var createScene = new CreateSceneBuilder(scene);
+        BlockPos pumpPos = new BlockPos(3, 1, 3);
+        BlockState gapPipe = AllBlocks.FLUID_PIPE.getDefaultState()
+                .setValue(FluidPipeBlock.WEST, true)
+                .setValue(FluidPipeBlock.EAST, true);
 
         // Show base and tanks
         scene.world().showSection(util.select().layer(0), Direction.DOWN);
@@ -81,7 +88,9 @@ public final class PipesNPhysicsPonderScenes {
         scene.addKeyframe();
         fillTank(scene, new BlockPos(4, 5, 3));
         scene.idle(10);
-        scene.world().showSection(util.select().fromTo(1, 1, 3, 4, 5, 3).substract(util.select().position(3, 1, 3)), Direction.DOWN);
+        scene.world().showSection(util.select().fromTo(1, 1, 3, 4, 5, 3).substract(util.select().position(pumpPos)), Direction.DOWN);
+        scene.world().setBlock(pumpPos, gapPipe, true);
+        scene.world().showSection(util.select().position(pumpPos), Direction.DOWN);
         scene.idle(15);
 
         scene.overlay().showText(80)
@@ -122,23 +131,25 @@ public final class PipesNPhysicsPonderScenes {
 
         // 3. Pumping Uphill
         scene.addKeyframe();
-        scene.world().showSection(util.select().position(3, 1, 3), Direction.DOWN); // Show pump
+        scene.world().setBlock(pumpPos, AllBlocks.MECHANICAL_PUMP.getDefaultState()
+                .setValue(PumpBlock.FACING, Direction.EAST), true);
+        createScene.world().propagatePipeChange(pumpPos);
         scene.idle(15);
 
         scene.overlay().showText(80)
                 .text("text_5")
-                .pointAt(util.vector().centerOf(3, 1, 3))
+                .pointAt(util.vector().centerOf(pumpPos))
                 .placeNearTarget();
         scene.idle(90);
 
         // Start with low RPM - not enough to reach the top
         scene.addKeyframe();
         createScene.world().setKineticSpeed(util.select().everywhere(), 8);
-        showFlow(scene, new BlockPos(3, 1, 3));
+        showFlow(scene, pumpPos);
         
         scene.overlay().showText(80)
                 .text("text_6")
-                .pointAt(util.vector().centerOf(3, 1, 3))
+                .pointAt(util.vector().centerOf(pumpPos))
                 .placeNearTarget();
         scene.idle(90);
 
@@ -146,7 +157,7 @@ public final class PipesNPhysicsPonderScenes {
         scene.addKeyframe();
         scene.overlay().showText(80)
                 .text("text_7")
-                .pointAt(util.vector().centerOf(3, 1, 3))
+                .pointAt(util.vector().centerOf(pumpPos))
                 .placeNearTarget();
         scene.idle(20);
         
@@ -157,7 +168,7 @@ public final class PipesNPhysicsPonderScenes {
             float progress = i / 60f;
             setTankFill(scene, new BlockPos(1, 1, 3), 0.5f - 0.5f * progress);
             setTankFill(scene, new BlockPos(4, 5, 3), 0.5f + 0.5f * progress);
-            showFlow(scene, new BlockPos(3, 1, 3));
+            showFlow(scene, pumpPos);
             scene.idle(1);
         }
 
