@@ -13,6 +13,11 @@
     "PipeConnectionAccessor",
     "PipeGoggleInfoMixin"
   ],
+  "client": [
+    "PonderSceneRegistryMixin",
+    "PonderSceneRegistryAccessor",
+    "PonderIndexMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   }
