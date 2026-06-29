@@ -84,7 +84,7 @@ public final class PipesNPhysicsPonderScenes {
         scene.idle(15);
 
         scene.addKeyframe();
-        scene.world().showSection(util.select().fromTo(0, 1, 4, 0, 2, 4), Direction.DOWN);
+        scene.world().showSection(util.select().position(0, 1, 4).add(util.select().position(0, 2, 4)), Direction.DOWN);
         fillTank(scene, new BlockPos(0, 1, 4));
         scene.idle(15);
 
@@ -104,8 +104,8 @@ public final class PipesNPhysicsPonderScenes {
         scene.idle(100);
 
         scene.addKeyframe();
-        scene.world().showSection(util.select().fromTo(1, 1, 4, 3, 1, 4), Direction.DOWN);
-        scene.world().showSection(util.select().fromTo(1, 1, 1, 3, 1, 1), Direction.DOWN);
+        scene.world().showSection(util.select().fromTo(1, 1, 4, 2, 1, 4), Direction.DOWN);
+        scene.world().showSection(util.select().fromTo(1, 1, 1, 2, 1, 1), Direction.DOWN);
         scene.idle(15);
 
         scene.overlay().showText(80)
@@ -153,8 +153,8 @@ public final class PipesNPhysicsPonderScenes {
         scene.idle(60);
 
         scene.addKeyframe();
-        scene.world().showSection(util.select().position(4, 1, 1), Direction.DOWN);
-        scene.world().showSection(util.select().fromTo(4, 1, 4, 4, 2, 4), Direction.DOWN);
+        scene.world().showSection(util.select().fromTo(3, 1, 1, 4, 1, 1), Direction.DOWN);
+        scene.world().showSection(util.select().fromTo(3, 1, 4, 4, 2, 4), Direction.DOWN);
         scene.idle(15);
 
         scene.overlay().showText(100)
@@ -268,19 +268,19 @@ public final class PipesNPhysicsPonderScenes {
                 .placeNearTarget();
         scene.idle(120);
 
-        scene.overlay().showText(100)
-                .text("text_2")
-                .pointAt(util.vector().centerOf(2, 2, 4))
-                .placeNearTarget();
-        scene.idle(120);
-
         scene.addKeyframe();
         scene.world().showSection(util.select().fromTo(1, 1, 0, 4, 1, 4), Direction.DOWN);
         scene.idle(15);
 
         scene.overlay().showText(100)
+                .text("text_2")
+                .pointAt(util.vector().centerOf(1, 1, 0))
+                .placeNearTarget();
+        scene.idle(120);
+
+        scene.overlay().showText(100)
                 .text("text_3")
-                .pointAt(util.vector().centerOf(2, 2, 4))
+                .pointAt(util.vector().centerOf(1, 1, 0))
                 .placeNearTarget();
 
         for (int i = 0; i < 40; i++) {
@@ -309,7 +309,7 @@ public final class PipesNPhysicsPonderScenes {
         scene.addKeyframe();
         scene.overlay().showText(80)
                 .text("text_5")
-                .pointAt(util.vector().centerOf(4, 1, 4))
+                .pointAt(util.vector().centerOf(3, 1, 2))
                 .placeNearTarget();
         scene.idle(100);
 
@@ -398,7 +398,7 @@ public final class PipesNPhysicsPonderScenes {
         scene.idle(100);
 
         scene.addKeyframe();
-        scene.world().showSection(util.select().fromTo(2, 1, 3, 4, 5, 3), Direction.DOWN);
+        scene.world().showSection(util.select().fromTo(1, 1, 3, 4, 5, 3), Direction.DOWN);
         scene.idle(15);
 
         scene.overlay().showOutline(PonderPalette.GREEN, "pump",
@@ -508,14 +508,12 @@ public final class PipesNPhysicsPonderScenes {
         scene.idle(15);
 
         scene.addKeyframe();
-        scene.world().showSection(util.select().fromTo(0, 1, 2, 4, 1, 2), Direction.EAST);
-        scene.world().showSection(util.select().fromTo(0, 2, 2, 0, 3, 2), Direction.DOWN);
-        scene.world().showSection(util.select().fromTo(4, 2, 2, 4, 3, 2), Direction.DOWN);
+        scene.world().showSection(util.select().fromTo(1, 1, 2, 3, 1, 2), Direction.EAST);
         scene.idle(15);
 
         scene.addKeyframe();
-        scene.world().showSection(util.select().fromTo(0, 4, 0, 0, 4, 2), Direction.DOWN);
-        scene.world().showSection(util.select().position(4, 4, 2), Direction.DOWN);
+        scene.world().showSection(util.select().fromTo(0, 1, 2, 0, 4, 2).add(util.select().fromTo(0, 4, 0, 0, 4, 1)), Direction.DOWN);
+        scene.world().showSection(util.select().fromTo(4, 1, 2, 4, 4, 2), Direction.DOWN);
         fillTank(scene, sourceTank);
         scene.idle(10);
 
