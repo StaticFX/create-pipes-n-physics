@@ -1,11 +1,14 @@
 package de.devin.pipesnphysics.client;
 
 import de.devin.pipesnphysics.PipesNPhysics;
+import de.devin.pipesnphysics.client.ponder.PipesNPhysicsPonderPlugin;
+import net.createmod.ponder.foundation.PonderIndex;
 import net.minecraft.client.resources.model.ModelResourceLocation;
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.neoforge.client.event.ModelEvent;
 
 /**
@@ -17,6 +20,11 @@ public final class ClientEvents {
             new ModelResourceLocation(ResourceLocation.fromNamespaceAndPath(PipesNPhysics.ID, "pipe_arrow"), "standalone");
 
     private ClientEvents() {}
+
+    @SubscribeEvent
+    public static void onClientSetup(FMLClientSetupEvent event) {
+        PonderIndex.addPlugin(new PipesNPhysicsPonderPlugin());
+    }
 
     @SubscribeEvent
     public static void onRegisterAdditionalModels(ModelEvent.RegisterAdditional event) {
