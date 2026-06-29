@@ -56,6 +56,13 @@ public final class CreatePipeRendering {
 
     private CreatePipeRendering() {}
 
+    /** Wipe rendered fluid from every pipe cell in a network (e.g. ponder air-break beat). */
+    public static void clearNetwork(Level level, Graph graph) {
+        for (BlockPos cell : graph.coverage()) {
+            clearCell(level, cell);
+        }
+    }
+
     /**
      * Reflect one solve's per-edge fluid into Create's pipe Flow objects. Returns
      * true while an equalized hump is still receding — the caller must keep ticking
