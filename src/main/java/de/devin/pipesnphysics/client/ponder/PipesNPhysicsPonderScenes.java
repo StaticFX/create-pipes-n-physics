@@ -1,7 +1,6 @@
 package de.devin.pipesnphysics.client.ponder;
 
 import com.simibubi.create.AllBlocks;
-import com.simibubi.create.AllItems;
 import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import com.simibubi.create.foundation.ponder.CreateSceneBuilder;
@@ -43,9 +42,6 @@ public final class PipesNPhysicsPonderScenes {
                 .addStoryBoard("pressure_2", PipesNPhysicsPonderScenes::pressureIntro, tag)
                 .addStoryBoard("uphill", PipesNPhysicsPonderScenes::pumpUphill, tag)
                 .addStoryBoard("siphon", PipesNPhysicsPonderScenes::siphonLimit, tag);
-
-        helper.forComponents(AllItems.GOGGLES.getId())
-                .addStoryBoard("pressure_2", PipesNPhysicsPonderScenes::gogglesHint, tag);
     }
 
     private static void fillTank(SceneBuilder scene, BlockPos pos) {
@@ -557,33 +553,6 @@ public final class PipesNPhysicsPonderScenes {
         }
 
         scene.idle(60);
-        scene.markAsFinished();
-    }
-
-    public static void gogglesHint(SceneBuilder scene, SceneBuildingUtil util) {
-        scene.title("goggles", "Engineer's Goggles");
-        scene.scaleSceneView(0.55f);
-        scene.idle(5);
-
-        scene.world().showSection(util.select().layer(0), Direction.DOWN);
-        scene.idle(10);
-        scene.world().showSection(util.select().fromTo(1, 1, 0, 4, 1, 4), Direction.DOWN);
-        scene.idle(15);
-
-        scene.addKeyframe();
-        scene.overlay().showText(80)
-                .text("text_1")
-                .placeNearTarget()
-                .pointAt(util.vector().centerOf(3, 1, 2));
-        scene.idle(90);
-
-        scene.addKeyframe();
-        scene.overlay().showText(80)
-                .text("text_2")
-                .placeNearTarget()
-                .pointAt(util.vector().centerOf(3, 1, 2));
-        scene.idle(90);
-
         scene.markAsFinished();
     }
 }

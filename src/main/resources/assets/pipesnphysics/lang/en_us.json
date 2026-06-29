@@ -92,9 +92,5 @@
   "pipesnphysics.ponder.siphon.header": "Siphon Limits",
   "pipesnphysics.ponder.siphon.text_1": "Pulling over a tall crest creates suction at the highest pipe",
   "pipesnphysics.ponder.siphon.text_2": "If the column hangs too far below that point, the siphon breaks",
-  "pipesnphysics.ponder.siphon.text_3": "Goggles will report an 'air break' when the suction limit is exceeded",
-
-  "pipesnphysics.ponder.goggles.header": "Engineer's Goggles",
-  "pipesnphysics.ponder.goggles.text_1": "Wear goggles and look at any pipe or pump in a live network",
-  "pipesnphysics.ponder.goggles.text_2": "Read flow, head remaining, stall reasons, and pump load while sneaking"
+  "pipesnphysics.ponder.siphon.text_3": "Goggles will report an 'air break' when the suction limit is exceeded"
 }

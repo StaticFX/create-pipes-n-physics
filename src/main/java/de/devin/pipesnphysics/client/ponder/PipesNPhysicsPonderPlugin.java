@@ -6,7 +6,7 @@ import net.createmod.ponder.api.registration.PonderSceneRegistrationHelper;
 import net.createmod.ponder.api.registration.PonderTagRegistrationHelper;
 import net.minecraft.resources.ResourceLocation;
 
-public class PipesNPhysicsPonderPlugin implements PonderPlugin {
+public final class PipesNPhysicsPonderPlugin implements PonderPlugin {
     @Override
     public String getModId() {
         return PipesNPhysics.ID;
