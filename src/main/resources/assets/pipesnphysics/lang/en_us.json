@@ -50,6 +50,22 @@
   "pipesnphysics.ponder.tag.pipe_physics": "Pipe Physics",
   "pipesnphysics.ponder.tag.pipe_physics.description": "Realistic fluid pressure, lift limits, and flow for Create pipe networks",
 
+  "pipesnphysics.ponder.fluid_dynamics.header": "Fluid Dynamics",
+  "pipesnphysics.ponder.fluid_dynamics.text_1": "Fluid naturally flows from high to low pressure",
+  "pipesnphysics.ponder.fluid_dynamics.text_2": "A vertical drop creates 'head', pushing fluid down",
+  "pipesnphysics.ponder.fluid_dynamics.text_3": "Without a pump, connected tanks will equalize their levels",
+  "pipesnphysics.ponder.fluid_dynamics.text_4": "Long pipe runs add friction, slowing down the flow",
+  "pipesnphysics.ponder.fluid_dynamics.text_5": "A Mechanical Pump adds extra head to overcome gravity or friction",
+  "pipesnphysics.ponder.fluid_dynamics.text_6": "The pump's lift capacity depends directly on its RPM",
+  "pipesnphysics.ponder.fluid_dynamics.text_7": "Higher RPM allows pumping to greater heights",
+
+  "pipesnphysics.ponder.siphons.header": "Siphons & Suction",
+  "pipesnphysics.ponder.siphons.text_1": "Pumps can pull fluid up, creating suction in the pipes",
+  "pipesnphysics.ponder.siphons.text_2": "This allows for siphoning over crests",
+  "pipesnphysics.ponder.siphons.text_3": "However, if suction is too high, the fluid column breaks",
+  "pipesnphysics.ponder.siphons.text_4": "This 'air break' stops all flow until the crest is lowered or pressure is added",
+  "pipesnphysics.ponder.siphons.text_5": "Use Engineer's Goggles to monitor suction and find air breaks",
+
   "pipesnphysics.ponder.pump.header": "Mechanical Pump",
   "pipesnphysics.ponder.pump.text_1": "A fluid tank filled with water",
   "pipesnphysics.ponder.pump.text_2": "We want to move the fluid to this empty tank",
