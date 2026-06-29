@@ -111,6 +111,13 @@ public final class CreatePipeRendering {
 
     private CreatePipeRendering() {}
 
+    /** Wipe rendered fluid from every pipe cell in a network (e.g. ponder air-break beat). */
+    public static void clearNetwork(Level level, Graph graph) {
+        for (BlockPos cell : graph.coverage()) {
+            clearCell(level, cell);
+        }
+    }
+
     /**
      * Map a node's hydraulic head to the surface Create actually RENDERS for a fluid tank there, so
      * the pipe waterline lines up with the tank's visible fluid. Create's {@code FluidTankRenderer}
