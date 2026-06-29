@@ -47,6 +47,10 @@ public record PipeStatusPayload(
     public static final byte DETAIL_SOURCE_DRY = 5;
     /** A dry no-flow run whose powered pump is running but can't pull a supply. */
     public static final byte DETAIL_PUMP_STARVED = 6;
+    /** A pump-fed run holding its pressurized column up to a shut valve (the head doesn't reset). */
+    public static final byte DETAIL_HELD = 7;
+    /** A dry no-flow run whose powered pump has nothing on its push side — nowhere to deliver. */
+    public static final byte DETAIL_PUMP_NO_OUTPUT = 8;
 
     public static final Type<PipeStatusPayload> TYPE =
             new Type<>(PipesNPhysics.asResource("pipe_status"));

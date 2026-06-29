@@ -2,9 +2,11 @@ package de.devin.pipesnphysics.engine.net;
 
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.client.PumpRangeClient;
+import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.PumpRangeProbe;
 import de.devin.pipesnphysics.engine.render.GraphOverlay;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.neoforge.network.PacketDistributor;
@@ -20,6 +22,16 @@ public final class EnginePackets {
     private static final double MAX_PROBE_DISTANCE_SQ = 64 * 64;
 
     private EnginePackets() {}
+
+    /**
+     * Range-gate a probe by the pipe's REAL world position, not its raw BlockPos. A pipe on a
+     * Sable sub-level lives at far-away plot coordinates (~30M blocks out), so a raw distSqr
+     * always exceeds the range and the goggle never updates — projecting through the sub-level
+     * pose puts it back where the player actually sees it.
+     */
+    private static boolean pipesnphysics$tooFar(ServerLevel level, BlockPos pos, ServerPlayer player) {
+        return SableCompat.getWorldPos(level, pos).distanceToSqr(player.position()) > MAX_PROBE_DISTANCE_SQ;
+    }
 
     public static void register(RegisterPayloadHandlersEvent event) {
         var registrar = event.registrar(PipesNPhysics.ID).versioned("2");
@@ -58,7 +70,7 @@ public final class EnginePackets {
             if (now - player.getPersistentData().getLong("pipesnphysics_range_at") < PROBE_THROTTLE_TICKS) return;
             player.getPersistentData().putLong("pipesnphysics_range_at", now);
 
-            if (request.pos().distSqr(player.blockPosition()) > MAX_PROBE_DISTANCE_SQ) return;
+            if (pipesnphysics$tooFar(level, request.pos(), player)) return;
             if (!level.isLoaded(request.pos())) return;
 
             PacketDistributor.sendToPlayer(player, PumpRangeProbe.probe(level, request.pos()));
@@ -81,7 +93,7 @@ public final class EnginePackets {
             if (now - player.getPersistentData().getLong("pipesnphysics_probe_at") < PROBE_THROTTLE_TICKS) return;
             player.getPersistentData().putLong("pipesnphysics_probe_at", now);
 
-            if (request.pos().distSqr(player.blockPosition()) > MAX_PROBE_DISTANCE_SQ) return;
+            if (pipesnphysics$tooFar(level, request.pos(), player)) return;
             if (!level.isLoaded(request.pos())) return;
 
             PacketDistributor.sendToPlayer(player, PipeProbe.probe(level, request.pos()));

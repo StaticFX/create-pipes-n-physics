@@ -3,11 +3,13 @@ package de.devin.pipesnphysics.compat;
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.PipeConnection;
+import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import de.devin.pipesnphysics.engine.Edge;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.Graph;
 import de.devin.pipesnphysics.engine.Node;
 import de.devin.pipesnphysics.engine.Solution;
+import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -87,13 +89,14 @@ public final class CreatePipeRendering {
                 continue;
             }
 
-            // A run backed up against a full sink (SINK_FULL stall) or one a pump cannot
-            // out-lift (a dead-headed NO_HEAD edge) carries no flow THIS tick — it rounds
-            // to zero, so there is no direction to chargeEdge — yet it is genuinely full of
-            // fluid pressed against the blockage. Preserve its already-charged cells: without
-            // this the sweep blanks them, and when the sink makes room the front has to
-            // re-travel the whole pipe, which reads as the flow being delayed all over again.
-            if (isBackedUp(solution, edge)) {
+            // A run backed up against a blockage carries no flow THIS tick — it rounds to zero,
+            // so there is no direction to chargeEdge — yet it is genuinely full of fluid pressed
+            // against the stop. Preserve its already-charged cells so the head doesn't reset and
+            // flow resumes with no re-crawl when the stop clears. Two shapes: a full sink / a
+            // pump that cannot out-lift ({@code isBackedUp}: SINK_FULL / NO_HEAD), and a pump
+            // dead-heading a SHUT VALVE ({@code heldEdges} — the run SPLIT at the valve, so this
+            // feed segment ends AT the valve and its cells ARE the held column up to it).
+            if (isBackedUp(solution, edge) || solution.heldEdges().contains(edge.index())) {
                 filled.addAll(edge.pipes());
                 continue;
             }
@@ -101,6 +104,17 @@ public final class CreatePipeRendering {
             FluidStack resting = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
             Double headA = solution.nodeHeads().get(edge.a());
             Double headB = solution.nodeHeads().get(edge.b());
+            // A closed-gate endpoint (a shut valve) is a wall with no head of its own. A SETTLING
+            // run touching it takes the opposite endpoint's head so it settles to that reservoir —
+            // but ONLY if the opposite end is a real reservoir (a HANDLER). An OPEN END is air / a
+            // spill threshold, not a water surface, so a gate↔open-end segment has no supply and
+            // must stay DRY (its mouth head would otherwise read as a full waterline). A pump-fed
+            // feed segment is held above, not here.
+            if (graph.node(edge.a()).isClosedGate() && graph.node(edge.b()).isHandler() && headB != null) {
+                headA = headB;
+            } else if (graph.node(edge.b()).isClosedGate() && graph.node(edge.a()).isHandler() && headA != null) {
+                headB = headA;
+            }
             if (!resting.isEmpty() && headA != null && headB != null) {
                 draining |= restEdge(level, graph, edge, resting, headA, headB, filled,
                         level.getGameTime(), edge.index());
@@ -118,6 +132,16 @@ public final class CreatePipeRendering {
                 // run has no wet cells, so {@code drainDeadEdge} is a no-op for it.
                 draining |= drainDeadEdge(level, edge, filled, level.getGameTime());
             }
+        }
+
+        // A shut valve is a NODE, so it sits in no edge and would render empty — a one-cell gap
+        // between the held feed and the settled downstream. Fill it: the held column presses fluid
+        // right up to the valve and the far side sits settled against it, so the valve cell is full.
+        // Closing this gap is also what stops the downstream from "despawning" on reopen — otherwise
+        // the merged run's front stalls at the empty valve cell and the sweep wipes the settled
+        // downstream before the front reaches it.
+        for (Node node : graph.nodes()) {
+            if (node.isClosedGate()) fillGateCell(level, graph, node, solution, filled);
         }
 
         for (BlockPos cell : graph.coverage()) {
@@ -260,25 +284,26 @@ public final class CreatePipeRendering {
         boolean equalizing = graph.node(edge.a()).isHandler() && graph.node(edge.b()).isHandler();
         List<BlockPos> stranded = new ArrayList<>();
 
+        // Flatten an open-end side to the reservoir surface for the fill ORIENTATION below
+        // (the per-cell waterline does the same inside restingCellSubmerged). An open end has
+        // no surface of its own — its node head is pinned at the mouth — so a resting run reads
+        // the connected reservoir.
+        if (!gas) {
+            boolean aOpen = graph.node(edge.a()).isOpenEnd();
+            boolean bOpen = graph.node(edge.b()).isOpenEnd();
+            if (aOpen && !bOpen) headA = headB;
+            else if (bOpen && !aOpen) headB = headA;
+        }
+
+        // A pump endpoint orients a RESTING run by its push/pull side even when the heads tie.
+        Boolean pumpRest = pumpRestOrientation(graph, edge);
+
         for (int i = 0; i < pipes.size(); i++) {
             BlockPos cell = pipes.get(i);
             FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
             if (pipe == null) continue;
 
-            boolean submerged = gas;
-            if (!gas) {
-                double frac = (i + 1.0) / (edge.length() + 1);
-                double headHere = headA + (headB - headA) * frac;
-                // A pipe holds fluid once the waterline is above its BOTTOM, not its
-                // centre — two level tanks settle with the surface inside the
-                // connecting cell, and that cell is still full. (Tanks only draw
-                // while their surface is above the pipe mouth = the cell bottom, so
-                // an equalized run never settles below it.)
-                double cellBottom = SableCompat.getWorldY(level, cell) - 0.5;
-                submerged = headHere + SUBMERSION_EPS >= cellBottom;
-            }
-
-            if (!submerged) {
+            if (!restingCellSubmerged(level, graph, edge, i, headA, headB, gas)) {
                 // Above the waterline: only tank-to-tank fluid recedes; the rest is
                 // left for the sweep to clear this tick.
                 if (equalizing && hasFluid(pipe)) stranded.add(cell);
@@ -297,15 +322,143 @@ public final class CreatePipeRendering {
             // boundary is what stops the next charge from flipping inbound and receding a
             // full pipe — the "equalized pipe drains and refills" revert, which only bit
             // edges whose flow ran toward node a (this used to hardcode a as the inbound rim).
-            boolean aInbound = headA >= headB;
-            boolean changed = seedComplete(pipe.getConnection(towardA), aInbound, fluid);
-            changed |= seedComplete(pipe.getConnection(towardB), !aInbound, fluid);
+            // On a TIE (heads settled equal — e.g. a suction line once the pump's draw-down
+            // vanishes), the head sign no longer marks a real direction, so KEEP whatever the
+            // cell already shows rather than flipping it (which scrolls the fluid the wrong way).
+            PipeConnection cA = pipe.getConnection(towardA);
+            PipeConnection cB = pipe.getConnection(towardB);
+            boolean aInbound;
+            if (Math.abs(headA - headB) > SUBMERSION_EPS) {
+                aInbound = headA >= headB;
+            } else if (pumpRest != null) {
+                // A pump endpoint fixes a tied run by its push/pull side: a pump pulling from a tank
+                // shows the column leaving the TANK toward the pump, never flowing into it. This is
+                // order-independent, unlike the headA>=headB fallback that keyed off graph node order.
+                aInbound = pumpRest;
+            } else {
+                // Two settled reservoirs: no real direction, so keep what the cell shows (don't flip).
+                aInbound = existingInbound(cA, headA >= headB);
+            }
+            boolean changed = seedComplete(cA, aInbound, fluid);
+            changed |= seedComplete(cB, !aInbound, fluid);
             if (changed) pipe.blockEntity.notifyUpdate();
             filled.add(cell);
         }
 
         drainColumn(level, stranded, filled, gameTime, edgeIndex);
         return !stranded.isEmpty();
+    }
+
+    /**
+     * Whether a RESTING (non-flowing) edge holds fluid at cell {@code i}: a liquid cell is wet
+     * once it sits below the connected fluid surface; a gas cell once it sits above the gas's
+     * lower boundary (the mirror test). An open end is a VENT pinned at its mouth (a spill/intake
+     * threshold), NOT a surface, so for a resting run an open-end side takes the OPPOSITE
+     * endpoint's head — a resting run never spills, so the reservoir surface is the real level.
+     *
+     * Shared by the renderer ({@link #restEdge}) and the goggle probe ({@code PipeProbe}) so a dry
+     * riser cell above the waterline never renders fluid NOR reports "settled, levels balanced".
+     */
+    public static boolean restingCellSubmerged(Level level, Graph graph, Edge edge, int i,
+                                               double headA, double headB, boolean gas) {
+        BlockPos cell = edge.pipes().get(i);
+        double frac = (i + 1.0) / (edge.length() + 1);
+        if (gas) {
+            // A gas pools at the TOP and won't sink, so a cell holds it only if it is ABOVE the
+            // gas's lower boundary. Per reservoir column that boundary is `height − gasHead`
+            // (gasHead = fillHeight − baseY); a pump/open end holds no gas, so it imposes no floor.
+            Double floorA = graph.node(edge.a()).isHandler()
+                    ? columnHeight(level, graph.node(edge.a()).pos()) - headA : null;
+            Double floorB = graph.node(edge.b()).isHandler()
+                    ? columnHeight(level, graph.node(edge.b()).pos()) - headB : null;
+            if (floorA == null && floorB == null) return true; // conduit-only run: fill all
+            double floor = floorA != null && floorB != null
+                    ? floorA + (floorB - floorA) * frac
+                    : floorA != null ? floorA : floorB;
+            return SableCompat.getWorldY(level, cell) + 0.5 + SUBMERSION_EPS >= floor;
+        }
+        boolean aOpen = graph.node(edge.a()).isOpenEnd();
+        boolean bOpen = graph.node(edge.b()).isOpenEnd();
+        if (aOpen && !bOpen) headA = headB;
+        else if (bOpen && !aOpen) headB = headA;
+        double headHere = headA + (headB - headA) * frac;
+        // Between two reservoirs (communicating vessels) a cell fills as soon as the waterline clears
+        // its BOTTOM face, so two tanks settling with the surface inside the connecting cell keep it
+        // full (the regression `flatEqualizedPipeKeepsFluid` guards). But a run DEAD-ENDING at a
+        // non-reservoir — a pump capped by a solid block, a capped pipe stub — has water tapering in
+        // from one side only; there the waterline must reach the pipe's CENTRE to fill it, so a
+        // near-empty supply does not paint a full pipe (and a dry pipe shows no false "Reach limit").
+        boolean deadEnd = graph.node(edge.a()).isPump() || graph.node(edge.a()).isJunction()
+                || graph.node(edge.b()).isPump() || graph.node(edge.b()).isJunction();
+        double cellWorldY = SableCompat.getWorldY(level, cell);
+        double threshold = deadEnd ? cellWorldY : cellWorldY - 0.5;
+        return headHere + SUBMERSION_EPS >= threshold;
+    }
+
+    /**
+     * Render a shut-valve (CLOSED_GATE) cell full of the fluid held against it. The gate is a node
+     * in no edge, so nothing else fills it; left empty it is a one-cell gap that strands the settled
+     * downstream when the valve reopens (the merged run's front stalls there and the sweep wipes the
+     * downstream). Seeded from an incident run's resting/held fluid; a dry shut valve (no fluid on
+     * either side) is left empty.
+     */
+    private static void fillGateCell(Level level, Graph graph, Node gate, Solution solution,
+                                     Set<BlockPos> filled) {
+        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, gate.pos());
+        if (pipe == null) return;
+        boolean changed = false;
+        boolean anyWet = false;
+        for (Edge edge : graph.edgesOf(gate.index())) {
+            // Fill the gate's connection toward this run ONLY if the run actually holds fluid at
+            // the valve: a held feed, or a settled neighbour cell the edge pass kept (in `filled`).
+            // A dry side — a shut valve facing an open end / an empty run — stays empty, so the
+            // valve never paints phantom water on a sourceless side.
+            BlockPos adj = adjacentCell(graph, edge, gate.index());
+            boolean wet = solution.heldEdges().contains(edge.index()) || filled.contains(adj);
+            if (!wet) continue;
+            FluidStack fluid = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+            if (fluid.isEmpty()) continue;
+            Direction dir = direction(gate.pos(), adj);
+            if (dir == null) continue;
+            changed |= seedComplete(pipe.getConnection(dir), true, fluid);
+            anyWet = true;
+        }
+        if (changed) pipe.blockEntity.notifyUpdate();
+        if (anyWet) filled.add(gate.pos());
+    }
+
+    /** The cell on {@code edge} nearest {@code nodeIndex} (its first/last pipe, or the far node if no pipes). */
+    private static BlockPos adjacentCell(Graph graph, Edge edge, int nodeIndex) {
+        List<BlockPos> pipes = edge.pipes();
+        if (pipes.isEmpty()) return graph.node(edge.other(nodeIndex)).pos();
+        return edge.a() == nodeIndex ? pipes.get(0) : pipes.get(pipes.size() - 1);
+    }
+
+    /**
+     * The resting fill orientation a PUMP endpoint forces on a tied run, or null if neither end is a
+     * pump. Fluid leaves a pump's PUSH side and is drawn into its PULL side, so even with equal heads
+     * the resting column reads the way live flow would — a pump pulling from a tank shows the fluid
+     * leaving the TANK toward the pump, not flowing into the tank. Returns whether the A side is the
+     * inbound (source) rim.
+     */
+    private static Boolean pumpRestOrientation(Graph graph, Edge edge) {
+        Boolean a = pumpSideInbound(graph, edge, edge.a(), true);
+        return a != null ? a : pumpSideInbound(graph, edge, edge.b(), false);
+    }
+
+    /**
+     * Whether the A side is inbound given that {@code nodeIndex} (if a pump) sits on this edge. A
+     * pump's PUSH side is the source rim (fluid leaves the pump → the pump rim is inbound); its PULL
+     * side is the sink rim (fluid is drawn toward the pump → the pump rim is outbound). Returns null
+     * when the node is not a pump (or its facing is unresolved).
+     */
+    private static Boolean pumpSideInbound(Graph graph, Edge edge, int nodeIndex, boolean nodeIsA) {
+        Node node = graph.node(nodeIndex);
+        if (!node.isPump() || node.pumpFacing() == null) return null;
+        Direction towardEdge = direction(node.pos(), adjacentCell(graph, edge, nodeIndex));
+        if (towardEdge == null) return null;
+        boolean pumpRimInbound = towardEdge == node.pumpFacing(); // push side: fluid leaves the pump
+        return nodeIsA == pumpRimInbound;
     }
 
     /**
@@ -344,6 +497,15 @@ public final class CreatePipeRendering {
         for (BlockPos cell : stranded) {
             if (!cell.equals(top)) filled.add(cell); // keep; the top (if any) drains via the sweep
         }
+    }
+
+    /** Block height of a reservoir column at {@code pos} (a multiblock tank's controller height), 1 otherwise. */
+    private static int columnHeight(Level level, BlockPos pos) {
+        if (level.getBlockEntity(pos) instanceof FluidTankBlockEntity tank) {
+            FluidTankBlockEntity controller = tank.getControllerBE();
+            if (controller != null) return ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
+        }
+        return 1;
     }
 
     private static boolean hasFluid(FluidTransportBehaviour pipe) {
@@ -412,6 +574,15 @@ public final class CreatePipeRendering {
         flow.complete = true;
         accessor.pipesnphysics$setFlow(Optional.of(flow));
         return true;
+    }
+
+    /** The inbound flag a connection's current flow shows, or {@code fallback} if it has none. */
+    private static boolean existingInbound(PipeConnection conn, boolean fallback) {
+        if (conn instanceof PipeConnectionAccessor accessor) {
+            Optional<PipeConnection.Flow> flow = accessor.pipesnphysics$getFlow();
+            if (flow.isPresent()) return flow.get().inbound;
+        }
+        return fallback;
     }
 
     /** A missing or empty connection is NOT complete — the front must not skip past it. */

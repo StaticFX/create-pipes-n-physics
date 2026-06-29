@@ -104,6 +104,10 @@ public final class PipeGraphCommand {
             if (rate == 0) dir = "idle";
             if (s.stalledEdges().contains(e.index())) dir = "§6stalled§7";
             if (s.noHeadEdges().contains(e.index())) dir = "§cno head§7";
+            if (s.heldEdges().contains(e.index())) {
+                Double h = heldHead(s, e);
+                dir = h != null ? String.format("§dheld §7(stored §f%.2f§7)", h) : "§dheld§7";
+            }
             Node a = g.node(e.a()), b = g.node(e.b());
             send(player, String.format("  §e%s §f%s §7↔ §f%s §7len=%d §7%s §7%d mB/t",
                     GraphOverlayPayload.edgeLetter(e.index()),
@@ -128,11 +132,12 @@ public final class PipeGraphCommand {
             byte kind = switch (n.kind()) {
                 case HANDLER -> GraphOverlayPayload.NodeEntry.KIND_HANDLER;
                 case PUMP -> GraphOverlayPayload.NodeEntry.KIND_PUMP;
-                case JUNCTION -> GraphOverlayPayload.NodeEntry.KIND_JUNCTION;
+                case JUNCTION, CLOSED_GATE -> GraphOverlayPayload.NodeEntry.KIND_JUNCTION;
                 case OPEN_END -> GraphOverlayPayload.NodeEntry.KIND_OPEN_END;
             };
             nodes.add(new GraphOverlayPayload.NodeEntry(
-                    n.pos().getX(), n.pos().getY(), n.pos().getZ(), kind, nodeLabel(level, n)));
+                    n.pos().getX(), n.pos().getY(), n.pos().getZ(), kind,
+                    nodeLabel(level, n, s.nodeHeads().get(n.index()))));
         }
 
         List<GraphOverlayPayload.EdgeEntry> edges = new ArrayList<>(g.edges().size());
@@ -150,7 +155,9 @@ public final class PipeGraphCommand {
             List<BlockPos> ordered = reversed ? reverse(orderedFromA) : orderedFromA;
             List<Float> pressures = reversed ? reverse(pressuresFromA) : pressuresFromA;
 
-            byte dir = flow.direction() == EdgeFlow.Direction.NONE
+            byte dir = s.heldEdges().contains(e.index())
+                    ? GraphOverlayPayload.EdgeEntry.DIR_HELD
+                    : flow.direction() == EdgeFlow.Direction.NONE
                     ? GraphOverlayPayload.EdgeEntry.DIR_NONE
                     : s.stalledEdges().contains(e.index())
                     ? GraphOverlayPayload.EdgeEntry.DIR_STALLED
@@ -217,12 +224,14 @@ public final class PipeGraphCommand {
 
     /**
      * The floating in-world label for a node: the block it is, plus a fluid line for
-     * sources/sinks (and RPM for pumps). Empty for junctions, which the overlay leaves
-     * unannotated to avoid clutter. Lines are {@code \n}-separated for the client.
+     * sources/sinks (and RPM for pumps), then the stored head it carries. Empty for
+     * junctions, which the overlay leaves unannotated to avoid clutter. The head is the
+     * value /pipegraph prints in chat, now shown in-world so you can SEE where it sits.
+     * Lines are {@code \n}-separated for the client.
      */
-    private static String nodeLabel(ServerLevel level, Node n) {
+    private static String nodeLabel(ServerLevel level, Node n, Double head) {
         String block = blockName(level, n);
-        return switch (n.kind()) {
+        String body = switch (n.kind()) {
             case HANDLER -> {
                 BoundaryColumn column = columnOf(level, n);
                 yield block + "\n" + (column != null && !column.contents().isEmpty() && column.contentMb() > 0
@@ -240,8 +249,20 @@ public final class PipeGraphCommand {
                 yield block + "\n" + String.format("%.0f RPM%s", rpm,
                         n.pumpFacing() != null ? " →" + n.pumpFacing() : "");
             }
+            case CLOSED_GATE -> block + "\nvalve shut (holding)";
             case JUNCTION -> "";
         };
+        // Append the stored head where the node has one — except a junction, kept unannotated.
+        return head != null && !body.isEmpty() ? body + String.format("\nhead %.2f", head) : body;
+    }
+
+    /** The stored head a HELD edge holds: the higher of its two endpoint display heads. */
+    private static Double heldHead(Solution s, Edge e) {
+        Double a = s.nodeHeads().get(e.a());
+        Double b = s.nodeHeads().get(e.b());
+        if (a == null) return b;
+        if (b == null) return a;
+        return Math.max(a, b);
     }
 
     /**

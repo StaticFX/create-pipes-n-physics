@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Hydraulic Engine — A Field Manual</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Spectral:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a1a26;
+    --bg2:#0c2030;
+    --panel:#0f2839;
+    --panel2:#123047;
+    --line:rgba(125,211,232,.10);
+    --line-strong:rgba(125,211,232,.22);
+    --cyan:#7fd3e8;
+    --cyan-dim:#56a7c2;
+    --ink:#dde9ef;
+    --muted:#8ba8b6;
+    --amber:#f6a623;
+    --amber-bright:#ffb347;
+    --water:#ff8c42;
+    --green:#7ee0a8;
+    --red:#ff6b6b;
+    --violet:#b69cff;
+    --r:14px;
+    --maxw:1080px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;
+    background:
+      radial-gradient(1200px 700px at 80% -10%, rgba(246,166,35,.06), transparent 60%),
+      radial-gradient(900px 600px at -10% 20%, rgba(127,211,232,.06), transparent 55%),
+      var(--bg);
+    color:var(--ink);
+    font-family:'Spectral', Georgia, serif;
+    font-size:18px;
+    line-height:1.7;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  /* blueprint grid + grain overlays */
+  body::before{
+    content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background-image:
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size:32px 32px;
+    mask-image:radial-gradient(circle at 50% 30%, #000 0%, rgba(0,0,0,.55) 100%);
+  }
+  body::after{
+    content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.035;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .wrap{position:relative;z-index:1;max-width:var(--maxw);margin:0 auto;padding:0 26px}
+
+  /* ---- top progress + nav ---- */
+  #progress{position:fixed;top:0;left:0;height:3px;width:0;z-index:50;
+    background:linear-gradient(90deg,var(--cyan),var(--amber));box-shadow:0 0 12px var(--amber)}
+  nav{position:fixed;top:0;left:0;right:0;z-index:40;
+    backdrop-filter:blur(10px);background:rgba(10,26,38,.72);
+    border-bottom:1px solid var(--line-strong)}
+  nav .wrap{display:flex;align-items:center;gap:18px;padding:11px 26px}
+  nav .brand{font-family:'Space Mono',monospace;font-size:12px;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--cyan);white-space:nowrap}
+  nav .brand b{color:var(--amber)}
+  nav .links{display:flex;gap:4px;margin-left:auto;flex-wrap:wrap;justify-content:flex-end}
+  nav .links a{font-family:'Space Mono',monospace;font-size:11px;letter-spacing:.05em;
+    color:var(--muted);text-decoration:none;padding:5px 9px;border-radius:7px;transition:.2s}
+  nav .links a:hover{color:var(--ink);background:var(--panel)}
+  @media(max-width:760px){nav .links{display:none}}
+
+  /* ---- hero ---- */
+  header.hero{min-height:100vh;display:flex;flex-direction:column;justify-content:center;
+    padding:120px 0 80px;position:relative}
+  .eyebrow{font-family:'Space Mono',monospace;font-size:12px;letter-spacing:.32em;
+    text-transform:uppercase;color:var(--amber);margin-bottom:22px;
+    opacity:0;animation:rise .8s .1s forwards}
+  h1{font-family:'Syne',sans-serif;font-weight:800;line-height:.96;letter-spacing:-.02em;
+    font-size:clamp(46px,9vw,108px);margin:0 0 8px;
+    background:linear-gradient(180deg,#fff,var(--cyan));-webkit-background-clip:text;
+    background-clip:text;color:transparent;opacity:0;animation:rise .9s .2s forwards}
+  h1 .o{display:block;color:transparent;background:linear-gradient(120deg,var(--amber),var(--water));
+    -webkit-background-clip:text;background-clip:text}
+  .hero .sub{font-size:clamp(19px,2.4vw,26px);color:var(--muted);max-width:680px;
+    margin:26px 0 0;font-weight:300;opacity:0;animation:rise 1s .45s forwards}
+  .hero .sub b{color:var(--ink);font-weight:500}
+  .thesis{margin-top:46px;padding:24px 28px;border:1px solid var(--line-strong);
+    border-left:3px solid var(--amber);border-radius:var(--r);max-width:760px;
+    background:linear-gradient(120deg,var(--panel),transparent);
+    font-size:21px;opacity:0;animation:rise 1s .65s forwards}
+  .thesis b{color:var(--amber-bright)}
+  .scrollcue{position:absolute;bottom:34px;left:50%;transform:translateX(-50%);
+    font-family:'Space Mono',monospace;font-size:11px;letter-spacing:.2em;color:var(--muted);
+    text-transform:uppercase;opacity:0;animation:rise 1s 1s forwards}
+  .scrollcue span{display:block;text-align:center;margin-top:8px;animation:bob 1.8s ease-in-out infinite}
+
+  @keyframes rise{from{opacity:0;transform:translateY(26px)}to{opacity:1;transform:none}}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(7px)}}
+
+  /* ---- sections ---- */
+  section{padding:84px 0;position:relative}
+  .reveal{opacity:0;transform:translateY(34px);transition:opacity .7s cubic-bezier(.2,.7,.2,1),transform .7s cubic-bezier(.2,.7,.2,1)}
+  .reveal.in{opacity:1;transform:none}
+  .secnum{font-family:'Space Mono',monospace;font-size:13px;letter-spacing:.2em;color:var(--amber);
+    display:flex;align-items:center;gap:12px;margin-bottom:14px}
+  .secnum::after{content:"";height:1px;flex:1;background:var(--line-strong)}
+  h2{font-family:'Syne',sans-serif;font-weight:700;letter-spacing:-.01em;
+    font-size:clamp(30px,5vw,52px);margin:0 0 18px;line-height:1.02}
+  h3{font-family:'Syne',sans-serif;font-weight:600;font-size:clamp(20px,2.6vw,27px);
+    margin:38px 0 12px;color:var(--cyan)}
+  p{margin:0 0 18px;color:#cfe0e8}
+  p .key{color:var(--amber-bright);font-weight:500}
+  strong{color:var(--ink);font-weight:600}
+  .lead{font-size:21px;color:var(--ink);max-width:760px}
+  a.inline{color:var(--cyan);text-decoration:none;border-bottom:1px dashed var(--cyan-dim)}
+
+  /* term highlight */
+  .term{color:var(--cyan);font-weight:500;font-style:italic}
+
+  /* ---- cards ---- */
+  .grid{display:grid;gap:18px}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  .g2{grid-template-columns:repeat(2,1fr)}
+  @media(max-width:820px){.g3,.g2{grid-template-columns:1fr}}
+  .card{background:linear-gradient(160deg,var(--panel),var(--bg2));
+    border:1px solid var(--line-strong);border-radius:var(--r);padding:24px;
+    position:relative;overflow:hidden;transition:.3s}
+  .card:hover{border-color:var(--cyan-dim);transform:translateY(-4px)}
+  .card .ico{font-family:'Space Mono',monospace;font-size:12px;letter-spacing:.15em;
+    color:var(--amber);text-transform:uppercase;margin-bottom:10px}
+  .card h4{font-family:'Syne',sans-serif;font-size:21px;margin:0 0 4px;color:var(--ink)}
+  .card .eq{font-family:'Space Mono',monospace;color:var(--cyan);font-size:14px;margin:6px 0 12px}
+  .card p{font-size:16px;margin:0;color:var(--muted)}
+  .card .corner{position:absolute;top:0;right:0;width:46px;height:46px;
+    border-left:1px solid var(--line);border-bottom:1px solid var(--line);
+    border-bottom-left-radius:12px}
+
+  /* glossary */
+  .gloss{display:grid;grid-template-columns:200px 1fr;gap:0;
+    border:1px solid var(--line-strong);border-radius:var(--r);overflow:hidden}
+  .gloss .t,.gloss .d{padding:16px 20px;border-bottom:1px solid var(--line)}
+  .gloss .t{font-family:'Syne',sans-serif;font-weight:600;color:var(--cyan);
+    background:var(--bg2);font-size:17px}
+  .gloss .d{font-size:16px;color:#cfe0e8}
+  .gloss .d code{font-family:'Space Mono',monospace;font-size:13px;color:var(--amber);
+    background:rgba(246,166,35,.08);padding:1px 6px;border-radius:5px}
+  .gloss>div:nth-last-child(-n+2){border-bottom:none}
+  @media(max-width:640px){.gloss{grid-template-columns:1fr}.gloss .t{border-bottom:none}}
+
+  /* formula block */
+  .formula{background:var(--bg2);border:1px solid var(--line-strong);border-radius:var(--r);
+    padding:34px 28px;text-align:center;font-family:'Space Mono',monospace;
+    font-size:clamp(20px,4vw,34px);margin:24px 0;position:relative;overflow-x:auto}
+  .formula .lbl{position:absolute;top:8px;left:14px;font-size:11px;letter-spacing:.15em;
+    color:var(--muted);text-transform:uppercase}
+  .f-head{color:var(--cyan)}
+  .f-emf{color:var(--amber)}
+  .f-cond{color:var(--green)}
+  .f-q{color:var(--water)}
+  .f-op{color:var(--muted)}
+  .legend{display:flex;flex-wrap:wrap;gap:18px;justify-content:center;margin-top:18px;
+    font-family:'Space Mono',monospace;font-size:13px}
+  .legend span{display:flex;align-items:center;gap:7px;color:var(--muted)}
+  .legend i{width:13px;height:13px;border-radius:3px;display:inline-block}
+
+  /* callouts */
+  .note{border-left:3px solid var(--cyan);background:linear-gradient(100deg,var(--panel),transparent);
+    padding:18px 22px;border-radius:0 var(--r) var(--r) 0;margin:24px 0;font-size:16.5px}
+  .note.warn{border-color:var(--amber)}
+  .note.danger{border-color:var(--red)}
+  .note b{color:var(--ink)}
+  .note .tag{font-family:'Space Mono',monospace;font-size:11px;letter-spacing:.15em;
+    text-transform:uppercase;color:var(--cyan);display:block;margin-bottom:6px}
+  .note.warn .tag{color:var(--amber)}
+  .note.danger .tag{color:var(--red)}
+
+  /* interactive panel */
+  .lab{background:
+      radial-gradient(600px 200px at 50% 0%, rgba(127,211,232,.06), transparent),
+      linear-gradient(160deg,var(--panel),var(--bg2));
+    border:1px solid var(--line-strong);border-radius:18px;padding:26px;margin:28px 0;
+    position:relative}
+  .lab::before{content:"INTERACTIVE";position:absolute;top:14px;right:18px;
+    font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.25em;color:var(--amber);
+    border:1px solid var(--amber);padding:3px 9px;border-radius:20px;opacity:.7}
+  .lab h4{font-family:'Syne',sans-serif;font-size:20px;margin:0 0 4px;color:var(--ink)}
+  .lab .hint{font-size:14.5px;color:var(--muted);margin:0 0 20px}
+  .ctrls{display:grid;grid-template-columns:1fr 1fr;gap:16px 28px;margin-bottom:18px}
+  @media(max-width:640px){.ctrls{grid-template-columns:1fr}}
+  .ctrl label{display:flex;justify-content:space-between;font-family:'Space Mono',monospace;
+    font-size:13px;color:var(--muted);margin-bottom:6px}
+  .ctrl label b{color:var(--cyan)}
+  input[type=range]{-webkit-appearance:none;width:100%;height:5px;border-radius:5px;
+    background:linear-gradient(90deg,var(--cyan-dim),var(--panel2));outline:none}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;
+    border-radius:50%;background:var(--amber);cursor:pointer;border:3px solid var(--bg);
+    box-shadow:0 0 10px rgba(246,166,35,.5)}
+  input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:var(--amber);
+    cursor:pointer;border:3px solid var(--bg)}
+  .toggle{display:flex;align-items:center;gap:10px;font-family:'Space Mono',monospace;font-size:13px;color:var(--muted)}
+  .switch{position:relative;width:44px;height:24px;background:var(--panel2);border-radius:20px;
+    cursor:pointer;transition:.25s;border:1px solid var(--line-strong)}
+  .switch.on{background:var(--amber)}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+    background:var(--ink);transition:.25s}
+  .switch.on::after{left:22px;background:var(--bg)}
+
+  .readout{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:6px}
+  @media(max-width:640px){.readout{grid-template-columns:repeat(2,1fr)}}
+  .ro{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;text-align:center}
+  .ro .v{font-family:'Space Mono',monospace;font-size:25px;font-weight:700;color:var(--water)}
+  .ro .v.cyan{color:var(--cyan)} .ro .v.green{color:var(--green)} .ro .v.amber{color:var(--amber)}
+  .ro .k{font-family:'Space Mono',monospace;font-size:10.5px;letter-spacing:.08em;color:var(--muted);
+    text-transform:uppercase;margin-top:3px}
+
+  /* animated pipe */
+  .pipescene{margin:22px 0 6px;position:relative;height:96px;display:flex;align-items:center}
+  .tankL,.tankR{width:74px;height:88px;border:2px solid var(--cyan-dim);border-radius:6px;
+    position:relative;overflow:hidden;background:rgba(127,211,232,.04);flex:none}
+  .tankfill{position:absolute;left:0;right:0;bottom:0;
+    background:linear-gradient(180deg,var(--water),#c25a1f);transition:height .4s}
+  .pipeH{flex:1;height:20px;border-top:2px solid var(--cyan-dim);border-bottom:2px solid var(--cyan-dim);
+    position:relative;overflow:hidden;background:rgba(255,140,66,.07)}
+  .pipeflow{position:absolute;inset:0;
+    background:repeating-linear-gradient(90deg,transparent 0 14px,var(--water) 14px 22px);
+    opacity:.85;background-size:36px 100%;animation:flowmove 1s linear infinite;animation-play-state:paused}
+  @keyframes flowmove{to{background-position:36px 0}}
+  .tlabel{font-family:'Space Mono',monospace;font-size:11px;color:var(--muted);
+    position:absolute;top:-18px;width:100%;text-align:center}
+
+  /* euler canvas */
+  .eulerwrap{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:640px){.eulerwrap{grid-template-columns:1fr}}
+  .ebox{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .ebox h5{font-family:'Syne',sans-serif;margin:0 0 8px;font-size:16px}
+  .ebox.exp h5{color:var(--red)} .ebox.imp h5{color:var(--green)}
+  canvas{width:100%;display:block;border-radius:8px}
+  .btnrow{display:flex;gap:12px;margin-top:16px;flex-wrap:wrap}
+  button.run{font-family:'Space Mono',monospace;font-size:13px;letter-spacing:.05em;
+    background:var(--amber);color:var(--bg);border:none;padding:11px 22px;border-radius:9px;
+    cursor:pointer;font-weight:700;transition:.2s}
+  button.run:hover{background:var(--amber-bright);transform:translateY(-2px)}
+  button.ghost{background:transparent;color:var(--cyan);border:1px solid var(--cyan-dim)}
+
+  /* pipeline steps */
+  .pipeline{display:flex;flex-direction:column;gap:0;margin-top:10px}
+  .step{display:grid;grid-template-columns:54px 1fr;gap:20px;padding:18px 0;
+    border-bottom:1px solid var(--line);align-items:start}
+  .step:last-child{border-bottom:none}
+  .step .n{font-family:'Syne',sans-serif;font-weight:800;font-size:30px;
+    color:transparent;-webkit-text-stroke:1.4px var(--cyan-dim);line-height:1}
+  .step h4{font-family:'Syne',sans-serif;font-size:20px;margin:0 0 4px;color:var(--ink)}
+  .step h4 code{font-family:'Space Mono',monospace;font-size:13px;color:var(--amber);font-weight:400}
+  .step p{font-size:16px;margin:0;color:var(--muted)}
+
+  /* svg figures */
+  figure{margin:26px 0;border:1px solid var(--line-strong);border-radius:var(--r);
+    background:var(--bg2);padding:22px;overflow:hidden}
+  figure svg{width:100%;height:auto;display:block}
+  figcaption{font-family:'Space Mono',monospace;font-size:12.5px;color:var(--muted);
+    margin-top:14px;text-align:center;letter-spacing:.03em}
+  .svglbl{font-family:'Space Mono',monospace;font-size:11px;fill:var(--muted)}
+  .svgval{font-family:'Space Mono',monospace;font-size:12px;fill:var(--cyan)}
+  .svgval.amber{fill:var(--amber)}
+
+  footer{padding:70px 0 90px;border-top:1px solid var(--line-strong);margin-top:40px;
+    font-family:'Space Mono',monospace;font-size:13px;color:var(--muted);text-align:center}
+  footer b{color:var(--cyan)}
+
+  ::selection{background:var(--amber);color:var(--bg)}
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<nav>
+  <div class="wrap">
+    <div class="brand">PIPES<b>·</b>N<b>·</b>PHYSICS / v2 ENGINE</div>
+    <div class="links">
+      <a href="#idea">Big Idea</a>
+      <a href="#head">Head</a>
+      <a href="#words">Vocabulary</a>
+      <a href="#flow">Flow Math</a>
+      <a href="#euler">Stability</a>
+      <a href="#tick">The Tick</a>
+      <a href="#models">Mental Models</a>
+      <a href="#glossary">Glossary</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">Operating Manual · Hydraulic Solver · Implicit Euler</div>
+    <h1>The Hydraulic<br>Engine<span class="o">explained.</span></h1>
+    <p class="sub">A field guide to how water actually moves through your pipes — every word defined, every number derived. Built for the <b>curious plumber</b>, not the mathematician.</p>
+    <div class="thesis">
+      Your pipe network is an <b>electrical circuit.</b> Water height is voltage, pipes are resistors, pumps are batteries. Every game tick, the engine solves the circuit <b>once</b> to decide how much water should move — then moves it.
+    </div>
+  </div>
+  <div class="scrollcue">Scroll to begin<span>↓</span></div>
+</header>
+
+<!-- 01 BIG IDEA -->
+<section id="idea">
+  <div class="wrap reveal">
+    <div class="secnum">01 — THE BIG IDEA</div>
+    <h2>Buckets, straws, and a little bit of electricity</h2>
+    <p class="lead">Imagine buckets connected by straws. A bucket with more water — or one sitting higher up — <span class="key">wants</span> to push water out. A long thin straw fights that push; a short fat one barely resists. A pump is you blowing into the straw. Water flows from high want to low want until everything balances.</p>
+    <p>The whole engine is that picture, made precise by borrowing three parts from a circuit. Learn these three swaps and you understand the model:</p>
+
+    <div class="grid g3" style="margin-top:26px">
+      <div class="card">
+        <div class="corner"></div>
+        <div class="ico">⌁ Capacitor</div>
+        <h4>Tank</h4>
+        <div class="eq">stores fluid · has a water line</div>
+        <p>A bucket. Holds volume. Its <em>capacitance</em> is how many millibuckets it takes to raise the surface by one block. Wide tank = high capacitance.</p>
+      </div>
+      <div class="card">
+        <div class="corner"></div>
+        <div class="ico">⏚ Resistor</div>
+        <h4>Pipe run</h4>
+        <div class="eq">a path · stores nothing</div>
+        <p>A straw. It does <strong>not</strong> hold water — it only decides how <em>fast</em> water moves between tanks. Long &amp; thick &amp; sticky = slow.</p>
+      </div>
+      <div class="card">
+        <div class="corner"></div>
+        <div class="ico">⎓ Battery (EMF)</div>
+        <h4>Pump</h4>
+        <div class="eq">adds push · one-way doors</div>
+        <p>Blows into the straw, adding head that wasn't there. Has check valves (no backflow) and a top speed set by its RPM.</p>
+      </div>
+    </div>
+
+    <div class="note">
+      <span class="tag">The one rule</span>
+      Water flows from <b>high "want" to low "want"</b> until balanced. The fancy name for "want" is <span class="term">head</span> — and head is just <b>how high the water's surface is sitting.</b> That word does almost all the work in this engine, so it gets its own chapter.
+    </div>
+  </div>
+</section>
+
+<!-- 02 HEAD -->
+<section id="head">
+  <div class="wrap reveal">
+    <div class="secnum">02 — THE MASTER CONCEPT</div>
+    <h2>Head is a height, not a pressure</h2>
+    <p class="lead">Head is the single most important number in the engine. It is the Y-coordinate of the <span class="key">top surface</span> of the fluid. Higher surface → more push. Water always flows from high head toward low head.</p>
+
+    <figure>
+      <svg viewBox="0 0 760 280" role="img" aria-label="A tank showing head equals base Y plus fill height">
+        <!-- ground -->
+        <line x1="40" y1="240" x2="720" y2="240" stroke="var(--line-strong)" stroke-width="1.5" stroke-dasharray="3 5"/>
+        <text x="40" y="258" class="svglbl">world Y = 0 (bottom of the world reference)</text>
+        <!-- tank -->
+        <rect x="120" y="70" width="170" height="170" fill="none" stroke="var(--cyan-dim)" stroke-width="2.5" rx="6"/>
+        <!-- fluid -->
+        <rect x="123" y="150" width="164" height="87" fill="url(#wg)" opacity=".9"/>
+        <defs>
+          <linearGradient id="wg" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#ff8c42"/><stop offset="1" stop-color="#b8501c"/>
+          </linearGradient>
+        </defs>
+        <!-- surface line -->
+        <line x1="100" y1="150" x2="640" y2="150" stroke="var(--amber)" stroke-width="2" stroke-dasharray="6 4"/>
+        <text x="648" y="148" class="svgval amber">surface = head</text>
+        <text x="648" y="164" class="svglbl">the only number that matters</text>
+        <!-- baseY bracket -->
+        <line x1="205" y1="240" x2="205" y2="150" stroke="var(--muted)" stroke-width="1" stroke-dasharray="2 3" opacity=".5"/>
+        <line x1="90" y1="240" x2="90" y2="150" stroke="var(--green)" stroke-width="1.5"/>
+        <text x="50" y="200" class="svglbl" transform="rotate(-90 50 200)">fillHeight</text>
+        <line x1="90" y1="245" x2="90" y2="240" stroke="var(--green)"/>
+        <text x="320" y="206" class="svgval green">head = baseY + fillHeight</text>
+        <text x="320" y="224" class="svglbl">baseY = the tank's floor · fillHeight = how deep the fluid is</text>
+      </svg>
+      <figcaption>FIG. 1 — Head is a surface elevation. Empty the tank and the surface (head) drops.</figcaption>
+    </figure>
+
+    <h3>Why "surface" and not "amount"?</h3>
+    <p>Because that's the trick that makes a thin pipe and a fat tank settle correctly. Connect them at the bottom and they stop when their <strong>surfaces</strong> line up — even though the fat tank holds far more fluid. Engineers call that <span class="term">communicating vessels</span>, and you get it for free by defining head as surface height. Drag the level below and watch it happen:</p>
+
+    <div class="lab" id="vesselLab">
+      <h4>Communicating Vessels</h4>
+      <p class="hint">Set the left tank's level, then hit <em>Connect</em>. The surfaces equalize — not the volumes. (The narrow tank barely changes the line; the wide one moves a lot of water to match it.)</p>
+      <div class="ctrls" style="grid-template-columns:1fr">
+        <div class="ctrl">
+          <label>Left tank level <b><span id="vLvl">75</span>%</span></b></label>
+          <input type="range" id="vSlider" min="5" max="100" value="75">
+        </div>
+      </div>
+      <div class="pipescene" style="height:120px;align-items:flex-end;padding-bottom:18px">
+        <div class="tankL" id="vTankL" style="width:64px;height:110px">
+          <div class="tlabel">narrow</div>
+          <div class="tankfill" id="vFillL" style="height:75%"></div>
+        </div>
+        <div class="pipeH" style="flex:none;width:120px;align-self:flex-end;margin-bottom:6px">
+          <div class="pipeflow" id="vFlow"></div>
+        </div>
+        <div class="tankR" id="vTankR" style="width:150px;height:110px">
+          <div class="tlabel">wide (3× capacity)</div>
+          <div class="tankfill" id="vFillR" style="height:20%"></div>
+        </div>
+      </div>
+      <div class="btnrow">
+        <button class="run" id="vConnect">Connect &amp; settle</button>
+        <button class="run ghost" id="vReset">Reset</button>
+      </div>
+    </div>
+
+    <div class="note">
+      <span class="tag">Gravity is not special-cased</span>
+      Nobody wrote "if higher, flow down." Because head <b>is</b> elevation, a tall tank automatically has more head than a low one, so water falls on its own. Gravity feeds, water towers, siphons, draining — all <b>emerge</b> from this one definition.
+    </div>
+  </div>
+</section>
+
+<!-- 03 VOCABULARY -->
+<section id="words">
+  <div class="wrap reveal">
+    <div class="secnum">03 — THE VOCABULARY</div>
+    <h2>Every word, defined once</h2>
+    <p class="lead">The spec is dense with jargon. Here is the entire dictionary — kid version on the left isn't needed; each term gets the real meaning in one line.</p>
+
+    <div class="gloss" style="margin-top:24px">
+      <div class="t">Head</div><div class="d">Height of the fluid's top surface: <code>baseY + fillHeight</code>. Flow goes high → low. The master quantity.</div>
+      <div class="t">Capacitance</div><div class="d">How much fluid it takes to raise a tank's surface by one block. Wide tank = big. Pipes have none (they store nothing).</div>
+      <div class="t">Conductance</div><div class="d">How <em>easily</em> fluid moves through a pipe — the opposite of resistance. Big = fast. Set by length &amp; viscosity.</div>
+      <div class="t">Viscosity</div><div class="d">Stickiness. Water ≈ 1000, honey ≈ 5000. Higher viscosity lowers conductance → slower steady rate (never travel time).</div>
+      <div class="t">EMF</div><div class="d">The pump's "battery push," in blocks of extra head: <code>|RPM| × 0.25</code>. A 64-RPM pump can lift water 16 blocks.</div>
+      <div class="t">Node</div><div class="d">An <em>important</em> spot: a tank, a pump, a junction (T/cross), or an open pipe mouth. Where decisions happen.</div>
+      <div class="t">Edge</div><div class="d">A boring straight pipe run between two nodes — every 2-connection cell is squashed into one edge to shrink the math.</div>
+      <div class="t">Junction</div><div class="d">Where pipes meet. Rule: flow in = flow out (Kirchhoff). Nothing piles up, because pipes can't store fluid.</div>
+      <div class="t">Open end</div><div class="d">A pipe mouth in open air. Default: a one-way <em>drain</em> (spills, never reclaims). Optionally a vacuum <em>intake</em>.</div>
+      <div class="t">Check valve</div><div class="d">A one-way door (built into pumps). Fluid may pass one direction only — enforced after solving.</div>
+      <div class="t">BoundaryColumn</div><div class="d">The code's model of a tank/open-end as a vertical column: knows its <code>baseY</code>, height, capacity and fill fraction.</div>
+      <div class="t">Tick</div><div class="d">One game heartbeat — 20 per second. Each tick: solve the network once, move fluid once.</div>
+      <div class="t">Crest</div><div class="d">The highest cell of a pipe run. If it rises too far above reachable head, the column "breaks" (siphon limit).</div>
+    </div>
+  </div>
+</section>
+
+<!-- 04 FLOW MATH -->
+<section id="flow">
+  <div class="wrap reveal">
+    <div class="secnum">04 — HOW FLOW IS CALCULATED</div>
+    <h2>The formula at the heart of it all</h2>
+    <p class="lead">Everything reduces to one line. For a single pipe between point A and point B, the flow per tick is:</p>
+
+    <div class="formula">
+      <span class="lbl">flow through one pipe</span>
+      <span class="f-q">q</span> <span class="f-op">=</span>
+      <span class="f-cond">G</span> <span class="f-op">×</span> (
+      <span class="f-head">h<sub>A</sub></span> <span class="f-op">−</span> <span class="f-head">h<sub>B</sub></span>
+      <span class="f-op">+</span> <span class="f-emf">emf</span> )
+      <div class="legend">
+        <span><i style="background:var(--water)"></i> q — flow rate (mB/tick)</span>
+        <span><i style="background:var(--green)"></i> G — conductance (slipperiness)</span>
+        <span><i style="background:var(--cyan)"></i> h<sub>A</sub>, h<sub>B</sub> — the two heads</span>
+        <span><i style="background:var(--amber)"></i> emf — pump push</span>
+      </div>
+    </div>
+
+    <p>Read it in plain English: <span class="f-head" style="font-style:italic">(h<sub>A</sub> − h<sub>B</sub>)</span> is the <strong>difference in want</strong> between the two ends. Add any <span class="f-emf" style="font-style:italic">pump push</span>. Multiply by <span class="f-cond" style="font-style:italic">conductance</span> to scale it — a slippery pipe turns that difference into a torrent, a sticky one into a trickle.</p>
+
+    <div class="note warn">
+      <span class="tag">Direction is never stored</span>
+      Every tick the engine just recomputes <b>q</b>. Positive → water flows A→B; negative → B→A. That's why the <em>same</em> formula produces gravity drain, equalization, siphons, and uphill pumping — only the head values differ.
+    </div>
+
+    <h3>What goes into conductance (G)</h3>
+    <div class="formula" style="font-size:clamp(16px,3vw,24px)">
+      <span class="lbl">slipperiness of the pipe</span>
+      <span class="f-cond">G</span> <span class="f-op">=</span>
+      <span style="color:var(--ink)">120</span>
+      <span class="f-op">×</span>
+      <span style="color:var(--ink)">(1000 / viscosity)</span>
+      <span class="f-op">÷</span>
+      <span style="color:var(--ink)">(length + 1)</span>
+    </div>
+    <p><strong>120</strong> is <code style="font-family:'Space Mono';color:var(--amber)">PIPE_CONDUCTANCE</code>, a tuning constant. <strong>1000 ÷ viscosity</strong> makes water full-speed (1000/1000 = 1) and honey 5× slower (1000/5000 = 0.2). <strong>÷ (length + 1)</strong> means a long pipe flows <em>slower</em> — but, crucially, <span class="key">never stops</span>. Distance only lowers the rate.</p>
+
+    <h3>What goes into the pump push (emf)</h3>
+    <div class="formula" style="font-size:clamp(16px,3vw,24px)">
+      <span class="lbl">the battery</span>
+      <span class="f-emf">emf</span> <span class="f-op">=</span>
+      <span style="color:var(--ink)">|RPM|</span> <span class="f-op">×</span>
+      <span style="color:var(--ink)">0.25</span>
+      <span class="f-op" style="font-size:.6em">blocks of head per RPM</span>
+    </div>
+    <p>A pump spinning at 64 RPM adds <strong>16 blocks</strong> of head — it can lift water 16 blocks above the source surface. It also has an internal speed cap (≈ <code style="font-family:'Space Mono';color:var(--amber)">RPM × 1.0</code> mB/tick) so it can't shove infinitely fast no matter how big the head gap.</p>
+
+    <!-- INTERACTIVE CALCULATOR -->
+    <div class="lab" id="flowLab">
+      <h4>Live Flow Calculator</h4>
+      <p class="hint">These sliders feed the real formula with the engine's real constants. Watch <em>q</em> change — and watch the pipe animate at the speed it computes.</p>
+
+      <div class="ctrls">
+        <div class="ctrl">
+          <label>Head at A (source) <b><span id="oA">10.0</span> ↑</b></label>
+          <input type="range" id="iA" min="0" max="20" step="0.5" value="10">
+        </div>
+        <div class="ctrl">
+          <label>Head at B (sink) <b><span id="oB">4.0</span> ↑</b></label>
+          <input type="range" id="iB" min="0" max="20" step="0.5" value="4">
+        </div>
+        <div class="ctrl">
+          <label>Pipe length (blocks) <b><span id="oLen">5</span></b></label>
+          <input type="range" id="iLen" min="1" max="40" step="1" value="5">
+        </div>
+        <div class="ctrl">
+          <label>Viscosity <b><span id="oVisc">1000</span> <span id="oViscTag" style="color:var(--muted)">(water)</span></b></label>
+          <input type="range" id="iVisc" min="500" max="6000" step="100" value="1000">
+        </div>
+      </div>
+      <div class="toggle" style="margin-bottom:18px">
+        <div class="switch" id="pumpSw"></div>
+        <span>Pump on this line · <b style="color:var(--cyan)"><span id="oRpm">0</span> RPM</b></span>
+        <input type="range" id="iRpm" min="0" max="128" step="4" value="32" style="max-width:180px;margin-left:14px">
+      </div>
+
+      <div class="pipescene">
+        <div class="tankL"><div class="tlabel">A</div><div class="tankfill" id="fillA" style="height:50%"></div></div>
+        <div class="pipeH"><div class="pipeflow" id="pipeFlow"></div></div>
+        <div class="tankR"><div class="tlabel">B</div><div class="tankfill" id="fillB" style="height:20%"></div></div>
+      </div>
+
+      <div class="readout">
+        <div class="ro"><div class="v cyan" id="rDrive">+6.0</div><div class="k">drive (Δh+emf)</div></div>
+        <div class="ro"><div class="v green" id="rG">120</div><div class="k">conductance G</div></div>
+        <div class="ro"><div class="v" id="rQ">+120</div><div class="k">hydraulic q mB/t</div></div>
+        <div class="ro"><div class="v amber" id="rClamp">+120</div><div class="k">actually moved</div></div>
+      </div>
+      <p class="hint" id="explain" style="margin-top:16px"></p>
+    </div>
+
+    <h3>From one pipe to the whole network</h3>
+    <p>A single pipe is easy. But in a real network the head at every junction depends on every <em>other</em> junction at the same instant — it's circular, so you can't solve them one at a time. Instead the engine solves them <strong>all at once</strong> as one system of equations:</p>
+
+    <div class="formula" style="font-size:clamp(15px,2.8vw,22px)">
+      <span class="lbl">solve the whole circuit, one tick ahead</span>
+      ( <span class="f-cond">C/dt</span> <span class="f-op">+</span> <span class="f-cond">L</span> ) <span class="f-op">·</span>
+      <span class="f-q">h′</span> <span class="f-op">=</span>
+      ( <span class="f-cond">C/dt</span> ) <span class="f-op">·</span> <span class="f-head">h</span> <span class="f-op">+</span>
+      <span class="f-emf">EMF</span>
+    </div>
+    <div class="grid g2" style="margin-top:18px">
+      <div class="card"><div class="ico">Inputs</div>
+        <p style="color:#cfe0e8"><b style="color:var(--cyan)">h</b> = heads right now. <b style="color:var(--green)">C</b> = each tank's capacitance (how big it is). <b style="color:var(--green)">L</b> = the "wiring table" — which nodes connect, weighted by conductance. <b style="color:var(--amber)">EMF</b> = pump pushes.</p>
+      </div>
+      <div class="card"><div class="ico">Output</div>
+        <p style="color:#cfe0e8"><b style="color:var(--water)">h′</b> = the heads <em>one tick from now</em>. Plug them back into <span style="color:var(--water)">q</span> = G(h<sub>A</sub>−h<sub>B</sub>+emf) and you have every pipe's flow at once.</p>
+      </div>
+    </div>
+    <p style="margin-top:18px">You don't need the linear algebra. The equation just asks: <strong>"given where the water is now, and how everything is wired, where will it be next tick?"</strong> A computer solves it with Gaussian elimination (small networks, ≤128 nodes) or conjugate gradient (big ones).</p>
+  </div>
+</section>
+
+<!-- 05 STABILITY / EULER -->
+<section id="euler">
+  <div class="wrap reveal">
+    <div class="secnum">05 — WHY IT NEVER EXPLODES</div>
+    <h2>Implicit Euler: solve for the future, don't guess it</h2>
+    <p class="lead"><span class="term">Euler</span> just means "step the simulation forward one tick." There are two ways to do it, and the choice is the difference between a stable engine and a sloshing disaster.</p>
+
+    <div class="grid g2" style="margin:24px 0">
+      <div class="card" style="border-color:var(--red)">
+        <div class="ico" style="color:var(--red)">✗ Explicit</div>
+        <h4>Guess from now</h4>
+        <p style="color:#cfe0e8">Use the <em>current</em> heads to move water. Simple — but it <strong>overshoots</strong>: pushes too much, the level shoots past balance, then over-corrects back. Forever. This <b style="color:var(--red)">oscillation</b> killed the v1 engine.</p>
+      </div>
+      <div class="card" style="border-color:var(--green)">
+        <div class="ico" style="color:var(--green)">✓ Implicit</div>
+        <h4>Solve for the future</h4>
+        <p style="color:#cfe0e8">Solve for the <em>end-of-tick</em> heads where everything is already consistent. It <strong>cannot overshoot</strong> — mathematically it always settles toward balance, never past it.</p>
+      </div>
+    </div>
+
+    <div class="lab" id="eulerLab">
+      <h4>Watch them race to balance</h4>
+      <p class="hint">Two connected tanks start far apart and try to equalize. Press play. Same starting point, two stepping methods — one settles, one sloshes.</p>
+      <div class="eulerwrap">
+        <div class="ebox exp"><h5>Explicit — overshoots</h5><canvas id="cExp" width="360" height="150"></canvas></div>
+        <div class="ebox imp"><h5>Implicit — settles</h5><canvas id="cImp" width="360" height="150"></canvas></div>
+      </div>
+      <div class="btnrow">
+        <button class="run" id="ePlay">▶ Play</button>
+        <button class="run ghost" id="eReset">Reset</button>
+      </div>
+    </div>
+
+    <div class="note danger">
+      <span class="tag">Load-bearing rule</span>
+      The spec says in bold: <b>do not replace implicit stepping with explicit.</b> The whole engine's stability rests on it. The active-set loop (fixing one-way valves) and the one-shot crest gate (siphons) sit on top of this stable solve — they're touch-ups, not the foundation.
+    </div>
+  </div>
+</section>
+
+<!-- 06 THE TICK -->
+<section id="tick">
+  <div class="wrap reveal">
+    <div class="secnum">06 — ONE TICK, START TO FINISH</div>
+    <h2>The seven steps the engine runs, 20× a second</h2>
+    <p class="lead">Up until the very last step the engine is <span class="key">read-only</span> — it only thinks. Then it acts, both-or-neither, never half a transfer.</p>
+
+    <div class="pipeline">
+      <div class="step"><div class="n">1</div><div>
+        <h4>Wake up <code>EngineTickHandler</code></h4>
+        <p>Pipes mark themselves dirty; pump flips and speed changes also wake sleeping networks. Idle networks nap up to 20 ticks — unless they hold a running pump, which re-checks every 4.</p>
+      </div></div>
+      <div class="step"><div class="n">2</div><div>
+        <h4>Build the graph <code>GraphBuilder</code></h4>
+        <p>Walk the pipes outward (BFS). Squash every 2-connection cell into an edge; tanks, pumps, junctions and open mouths become nodes. A 30-block straight run becomes one edge.</p>
+      </div></div>
+      <div class="step"><div class="n">3</div><div>
+        <h4>Collect columns</h4>
+        <p>Read every tank's surface height (its head) and its size (capacitance). Multiblock tanks resolve to one column. Open ends pin their head at the mouth.</p>
+      </div></div>
+      <div class="step"><div class="n">4</div><div>
+        <h4>Assemble branches</h4>
+        <p>For each edge: conductance from length &amp; viscosity, EMF from pump flanks, one-way rules from check valves &amp; valve throttles, and the crest (highest cell) for siphon checks.</p>
+      </div></div>
+      <div class="step"><div class="n">5</div><div>
+        <h4>Solve <code>NetworkSolver</code></h4>
+        <p>One implicit-Euler linear solve → all end-of-tick heads. The active-set loop zeroes any branch flowing a forbidden direction and re-solves. The one-shot crest gate tapers siphon flow.</p>
+      </div></div>
+      <div class="step"><div class="n">6</div><div>
+        <h4>Plan transfers</h4>
+        <p>Net flow per tank, clamped by <code>MAX_FLOW_PER_ENDPOINT</code> (256), the lip-drain cap, and a SIMULATE probe. Pair sources to sinks — only within the same connected island.</p>
+      </div></div>
+      <div class="step"><div class="n">7</div><div>
+        <h4>Apply <code>FluidEngine.apply</code></h4>
+        <p>Re-resolve handlers (the world may have changed), simulate drain + fill, then execute <strong>both or neither</strong>. The only step that touches real fluid.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- 07 MENTAL MODELS -->
+<section id="models">
+  <div class="wrap reveal">
+    <div class="secnum">07 — THE THREE BIG SHIFTS</div>
+    <h2>What makes this engine feel different</h2>
+
+    <h3>① Pipes hold no water</h3>
+    <p>They are pure conduits. Only tanks, basins and open ends actually store fluid; the pipe just sets how fast it moves between them. The fluid you <em>see</em> in a pipe is painted on afterward to match the solved flow — it's a rendering, not storage.</p>
+
+    <h3>② Reach is bounded by height, not distance</h3>
+    <p>A long horizontal pipe just flows <em>slower</em> — it never stops. But you genuinely cannot push water higher than <span class="key">source surface + RPM × 0.25</span> blocks. Downhill is free; lifting costs RPM. That's the entire puzzle of the mod.</p>
+    <figure>
+      <svg viewBox="0 0 760 260" role="img" aria-label="Reach is set by height, not horizontal distance">
+        <line x1="40" y1="220" x2="720" y2="220" stroke="var(--line-strong)" stroke-width="1.5" stroke-dasharray="3 5"/>
+        <!-- source tank -->
+        <rect x="60" y="150" width="60" height="70" fill="none" stroke="var(--cyan-dim)" stroke-width="2" rx="4"/>
+        <rect x="63" y="178" width="54" height="40" fill="url(#wg)" opacity=".85"/>
+        <text x="60" y="244" class="svglbl">source</text>
+        <!-- pump -->
+        <rect x="135" y="184" width="34" height="34" fill="none" stroke="var(--amber)" stroke-width="2" rx="4"/>
+        <text x="133" y="244" class="svgval amber">pump</text>
+        <!-- horizontal run (long, just slower) -->
+        <line x1="169" y1="201" x2="470" y2="201" stroke="var(--water)" stroke-width="6" opacity=".5"/>
+        <text x="250" y="192" class="svglbl">long horizontal run → only SLOWER, never blocked</text>
+        <!-- vertical reach -->
+        <line x1="470" y1="201" x2="470" y2="80" stroke="var(--water)" stroke-width="6" opacity=".75"/>
+        <line x1="470" y1="80" x2="500" y2="80" stroke="var(--water)" stroke-width="6" opacity=".75"/>
+        <!-- ceiling line -->
+        <line x1="430" y1="80" x2="700" y2="80" stroke="var(--amber)" stroke-width="2" stroke-dasharray="6 4"/>
+        <text x="510" y="78" class="svgval amber">ceiling = supply + RPM × 0.25</text>
+        <text x="510" y="94" class="svglbl">can't lift past this line — add RPM or raise the source</text>
+        <!-- reach arrow -->
+        <line x1="700" y1="201" x2="700" y2="82" stroke="var(--green)" stroke-width="1.5"/>
+        <polygon points="700,80 696,88 704,88" fill="var(--green)"/>
+        <text x="712" y="150" class="svgval green" transform="rotate(-90 712 150)">max climb</text>
+      </svg>
+      <figcaption>FIG. 2 — Horizontal distance lowers the rate; only height can stop the flow.</figcaption>
+    </figure>
+
+    <h3>③ Gas flips gravity</h3>
+    <p>A lighter-than-air fluid uses the mirror-image head <span style="font-family:'Space Mono';color:var(--cyan)">fillHeight − baseY</span>, so it pools in the <strong>highest</strong> tank as hard as water pools in the lowest. Same engine, sign flipped — no special case.</p>
+    <figure>
+      <svg viewBox="0 0 760 220" role="img" aria-label="Liquid pools low, gas pools high">
+        <!-- liquid side -->
+        <text x="60" y="30" class="svglbl">LIQUID — pools low</text>
+        <rect x="60" y="50" width="60" height="140" fill="none" stroke="var(--cyan-dim)" stroke-width="2" rx="4"/>
+        <rect x="180" y="50" width="60" height="140" fill="none" stroke="var(--cyan-dim)" stroke-width="2" rx="4" transform="translate(0,-40)"/>
+        <rect x="63" y="150" width="54" height="38" fill="url(#wg)"/>
+        <rect x="183" y="110" width="54" height="38" fill="url(#wg)" transform="translate(0,-40)"/>
+        <line x1="120" y1="188" x2="180" y2="108" stroke="var(--water)" stroke-width="4" opacity=".5"/>
+        <text x="120" y="208" class="svglbl">settles in the lower vessel</text>
+        <!-- divider -->
+        <line x1="380" y1="20" x2="380" y2="200" stroke="var(--line-strong)" stroke-dasharray="3 4"/>
+        <!-- gas side -->
+        <text x="430" y="30" class="svgval amber">GAS — pools high</text>
+        <rect x="430" y="50" width="60" height="140" fill="none" stroke="var(--cyan-dim)" stroke-width="2" rx="4"/>
+        <rect x="560" y="10" width="60" height="140" fill="none" stroke="var(--cyan-dim)" stroke-width="2" rx="4"/>
+        <rect x="433" y="53" width="54" height="38" fill="var(--amber)" opacity=".5"/>
+        <rect x="563" y="13" width="54" height="38" fill="var(--amber)" opacity=".55"/>
+        <line x1="490" y1="72" x2="560" y2="32" stroke="var(--amber)" stroke-width="4" opacity=".5"/>
+        <text x="430" y="208" class="svglbl">rises into the higher vessel</text>
+      </svg>
+      <figcaption>FIG. 3 — Flip the sign on the elevation term and gravity inverts at full strength.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- 08 GLOSSARY / CONSTANTS -->
+<section id="glossary">
+  <div class="wrap reveal">
+    <div class="secnum">08 — QUICK REFERENCE</div>
+    <h2>The constants that tune the world</h2>
+    <p class="lead">These are the server-config knobs. Change them and the physics re-tunes — no code edits.</p>
+    <div class="gloss" style="margin-top:24px">
+      <div class="t">PIPE_CONDUCTANCE</div><div class="d"><code>120</code> — base mB/tick per block of head difference. The master "how fast pipes are."</div>
+      <div class="t">PUMP_HEAD_PER_RPM</div><div class="d"><code>0.25</code> — blocks of lift each RPM buys. 64 RPM → 16 blocks of reach.</div>
+      <div class="t">PUMP_FLOW_PER_RPM</div><div class="d"><code>1.0</code> — caps a pump's throughput at ≈ RPM mB/tick, no matter the head gap.</div>
+      <div class="t">SUCTION_LIMIT</div><div class="d"><code>8</code> — how far above the local head a crest may rise before the column breaks (siphon limit).</div>
+      <div class="t">MAX_FLOW_PER_ENDPOINT</div><div class="d"><code>256</code> — hard ceiling on mB moved through any one tank per tick.</div>
+      <div class="t">ENABLE_ENGINE</div><div class="d"><code>true</code> — the master switch. False reverts cleanly to stock Create transport.</div>
+    </div>
+
+    <div class="note" style="margin-top:34px">
+      <span class="tag">The whole machine in one breath</span>
+      Tanks are capacitors, pipes are resistors, pumps are batteries. Head is surface height. Each tick, solve the circuit one step into the future (implicit Euler, can't overshoot), fix the one-way valves, taper the siphons, then move fluid — <b>both or neither.</b> Direction is never stored; it falls out of <b>q = G(h<sub>A</sub> − h<sub>B</sub> + emf)</b> every single tick.
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    PIPES·N·PHYSICS — v2 HYDRAULIC ENGINE · NeoForge 1.21.1 · Create 6.0.10<br>
+    <b>Field manual</b> generated from CLAUDE.md · open in any browser, no server needed
+  </div>
+</footer>
+
+<script>
+/* ---------- scroll progress + reveal ---------- */
+const prog = document.getElementById('progress');
+addEventListener('scroll', () => {
+  const h = document.documentElement;
+  const pct = (h.scrollTop) / (h.scrollHeight - h.clientHeight) * 100;
+  prog.style.width = pct + '%';
+}, {passive:true});
+
+const io = new IntersectionObserver((es) => {
+  es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target);} });
+}, {threshold:.12});
+document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+
+/* ---------- engine constants (match the real spec) ---------- */
+const PIPE_CONDUCTANCE = 120, HEAD_PER_RPM = 0.25, FLOW_PER_RPM = 1.0, MAX_FLOW = 256;
+const fmt = (n, d=0) => (n>=0?'+':'') + n.toFixed(d);
+
+/* ---------- live flow calculator ---------- */
+(() => {
+  const iA=g('iA'),iB=g('iB'),iLen=g('iLen'),iVisc=g('iVisc'),iRpm=g('iRpm'),sw=g('pumpSw');
+  let pumpOn=false;
+  function g(id){return document.getElementById(id);}
+  function viscTag(v){return v<=900?'(thin)':v<=1600?'(water-ish)':v<=3500?'(syrupy)':'(thick)';}
+  function recompute(){
+    const hA=+iA.value, hB=+iB.value, len=+iLen.value, visc=+iVisc.value, rpm=+iRpm.value;
+    const emf = pumpOn ? rpm*HEAD_PER_RPM : 0;
+    const G = PIPE_CONDUCTANCE*(1000/visc)/(len+1);
+    const drive = hA - hB + emf;
+    const q = G*drive;
+    let cap = MAX_FLOW;
+    if(pumpOn) cap = Math.min(cap, rpm*FLOW_PER_RPM);
+    const clamped = Math.max(-cap, Math.min(cap, q));
+
+    document.getElementById('oA').textContent=hA.toFixed(1);
+    document.getElementById('oB').textContent=hB.toFixed(1);
+    document.getElementById('oLen').textContent=len;
+    document.getElementById('oVisc').textContent=visc;
+    document.getElementById('oViscTag').textContent=viscTag(visc);
+    document.getElementById('oRpm').textContent= pumpOn?rpm:0;
+    document.getElementById('rDrive').textContent=fmt(drive,1);
+    document.getElementById('rG').textContent=G.toFixed(0);
+    document.getElementById('rQ').textContent=fmt(q,0);
+    document.getElementById('rClamp').textContent=fmt(clamped,0);
+
+    // tank fills from heads (0..20 -> 8..92%)
+    document.getElementById('fillA').style.height=(8+hA/20*84)+'%';
+    document.getElementById('fillB').style.height=(8+hB/20*84)+'%';
+
+    // animate pipe: speed from |clamped|, direction from sign
+    const pf=document.getElementById('pipeFlow');
+    const mag=Math.abs(clamped);
+    if(mag<0.5){ pf.style.animationPlayState='paused'; pf.style.opacity=.18; }
+    else{
+      pf.style.animationPlayState='running';
+      pf.style.opacity=.85;
+      const dur=Math.max(0.18, 2.2 - mag/130*2);   // faster pipe for bigger flow
+      pf.style.animationDuration=dur+'s';
+      pf.style.animationDirection = clamped>=0 ? 'normal':'reverse';
+    }
+
+    // explanation line
+    const ex=document.getElementById('explain');
+    let msg='';
+    if(Math.abs(drive)<0.05) msg='Heads balanced and no pump push → drive is zero → <b style="color:var(--cyan)">no flow.</b> The tanks are settled.';
+    else if(clamped<0) msg='Drive is negative → water flows <b style="color:var(--water)">B → A</b> (uphill toward A or pushed by nothing). Same formula, opposite sign.';
+    else if(mag>=cap-0.5) msg='Hydraulic q wants more than the cap allows, so it\'s <b style="color:var(--amber)">clamped</b> — '+(pumpOn&&cap<MAX_FLOW?'the pump\'s own speed limit':'the per-tank 256 mB/t ceiling')+' is the bottleneck.';
+    else msg='Water flows <b style="color:var(--water)">A → B</b> at '+clamped.toFixed(0)+' mB/t. Raise the pipe length or viscosity to slow it; raise Δh or RPM to speed it.';
+    ex.innerHTML=msg;
+  }
+  [iA,iB,iLen,iVisc,iRpm].forEach(el=>el.addEventListener('input',recompute));
+  sw.addEventListener('click',()=>{pumpOn=!pumpOn;sw.classList.toggle('on',pumpOn);recompute();});
+  recompute();
+})();
+
+/* ---------- communicating vessels ---------- */
+(() => {
+  const slider=document.getElementById('vSlider'), lvl=document.getElementById('vLvl');
+  const fillL=document.getElementById('vFillL'), fillR=document.getElementById('vFillR');
+  const flow=document.getElementById('vFlow');
+  const NARROW=1, WIDE=3;           // capacitance ratio
+  let connected=false, anim;
+  function setIdle(){
+    connected=false; flow.style.animationPlayState='paused'; flow.style.opacity=.2;
+    fillL.style.height=slider.value+'%';
+  }
+  slider.addEventListener('input',()=>{lvl.textContent=slider.value; if(!connected) setIdle();});
+  document.getElementById('vConnect').addEventListener('click',()=>{
+    connected=true; flow.style.animationPlayState='running'; flow.style.opacity=.85;
+    // surfaces equalize -> weighted average by capacitance, but we track SURFACE not volume.
+    // Both tanks same height range, so equal surface = same % . Weighted by capacity for the settle target.
+    let L=parseFloat(fillL.style.height)||+slider.value, R=parseFloat(fillR.style.height)||20;
+    const target=(L*NARROW + R*WIDE)/(NARROW+WIDE);   // conserve "volume", settle to equal surface line
+    cancelAnimationFrame(anim);
+    (function tick(){
+      L += (target-L)*0.08; R += (target-R)*0.08;
+      fillL.style.height=L+'%'; fillR.style.height=R+'%';
+      if(Math.abs(L-target)>0.3||Math.abs(R-target)>0.3){anim=requestAnimationFrame(tick);}
+      else{ flow.style.animationPlayState='paused'; flow.style.opacity=.3; }
+    })();
+  });
+  document.getElementById('vReset').addEventListener('click',()=>{
+    cancelAnimationFrame(anim); slider.value=75; lvl.textContent=75;
+    fillR.style.height='20%'; setIdle();
+  });
+  setIdle();
+})();
+
+/* ---------- explicit vs implicit Euler ---------- */
+(() => {
+  const cE=document.getElementById('cExp'), cI=document.getElementById('cImp');
+  const xE=cE.getContext('2d'), xI=cI.getContext('2d');
+  const W=360,H=150, EQ=75;        // equilibrium level
+  let raf=null;
+  // model: two tanks, level difference drives flow. dt*k = rate.
+  function reset(){
+    cancelAnimationFrame(raf); raf=null;
+    drawFrame([{a:20,b:130,hist:[]}],xE,'#ff6b6b',true);
+    drawFrame([{a:20,b:130,hist:[]}],xI,'#7ee0a8',false);
+  }
+  function grid(x){
+    x.clearRect(0,0,W,H);
+    x.strokeStyle='rgba(125,211,232,.10)'; x.lineWidth=1;
+    for(let y=0;y<=H;y+=30){x.beginPath();x.moveTo(0,y);x.lineTo(W,y);x.stroke();}
+    // equilibrium line
+    x.strokeStyle='rgba(246,166,35,.5)'; x.setLineDash([5,4]);
+    const ey=H-(EQ/150*H); x.beginPath();x.moveTo(0,ey);x.lineTo(W,ey);x.stroke();
+    x.setLineDash([]);
+  }
+  function plot(x,hist,color){
+    grid(x);
+    x.strokeStyle=color; x.lineWidth=2; x.beginPath();
+    hist.forEach((v,i)=>{
+      const px=i/Math.max(hist.length-1,1)*W;
+      const py=H-(v/150*H);
+      i?x.lineTo(px,py):x.moveTo(px,py);
+    });
+    x.stroke();
+  }
+  function drawFrame(_,x,c){grid(x);}
+  function run(){
+    // tank A starts high(130); equilibrium is EQ(75). Each method steps it toward EQ.
+    let aE=130,histE=[], aI=130,histI=[];
+    let t=0;
+    function tick(){
+      // EXPLICIT: over-eager step. Gap multiplier 1.65 > 1, so the new gap flips sign
+      // (overshoots past EQ) and only slowly shrinks -> a visible damped ring.
+      const gapE=(aE-EQ);
+      aE = aE - gapE*1.65;
+      histE.push(aE); if(histE.length>120)histE.shift();
+      plot(xE,histE,'#ff6b6b');
+
+      // IMPLICIT: solve toward equilibrium. Gain < 1, so it's monotone — never past EQ.
+      const gapI=(aI-EQ);
+      aI = aI - gapI*0.16;
+      histI.push(aI); if(histI.length>120)histI.shift();
+      plot(xI,histI,'#7ee0a8');
+
+      t++;
+      if(t<120) raf=requestAnimationFrame(tick);
+    }
+    cancelAnimationFrame(raf); tick();
+  }
+  document.getElementById('ePlay').addEventListener('click',run);
+  document.getElementById('eReset').addEventListener('click',reset);
+  reset();
+})();
+</script>
+</body>
+</html>

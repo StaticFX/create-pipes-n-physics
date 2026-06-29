@@ -62,11 +62,12 @@ public final class BoundaryColumn {
     private final int contentMb;
     private final Direction openFace;
     private final boolean infiniteSource;
+    private final double fillScale;
     private final List<Integer> memberNodes = new ArrayList<>();
 
     private BoundaryColumn(BlockPos identity, BlockPos accessPos, double baseY,
                            int heightBlocks, int capacityMb, FluidStack contents, int contentMb,
-                           Direction openFace, boolean infiniteSource) {
+                           Direction openFace, boolean infiniteSource, double fillScale) {
         this.identity = identity;
         this.accessPos = accessPos;
         this.baseY = baseY;
@@ -76,6 +77,7 @@ public final class BoundaryColumn {
         this.contentMb = contentMb;
         this.openFace = openFace;
         this.infiniteSource = infiniteSource;
+        this.fillScale = fillScale;
     }
 
     /**
@@ -106,11 +108,14 @@ public final class BoundaryColumn {
             if (controller == null) return null; // multiblock mid-assembly or controller unloaded
             FluidTank inventory = controller.getTankInventory();
             int height = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
+            int width = ((FluidTankAccessor) (Object) controller).pipesnphysics$getWidth();
+            BlockPos controllerPos = controller.getBlockPos();
             FluidStack fluid = inventory.getFluid();
             return new BoundaryColumn(
-                    controller.getBlockPos(), pos,
-                    SableCompat.getWorldY(level, controller.getBlockPos()) - 0.5,
-                    height, inventory.getCapacity(), fluid.copy(), fluid.getAmount(), null, false);
+                    controllerPos, pos,
+                    SableCompat.getColumnBaseY(level, controllerPos, width, height),
+                    height, inventory.getCapacity(), fluid.copy(), fluid.getAmount(), null, false,
+                    SableCompat.getUpProjectionY(level, controllerPos));
         }
 
         // A hose pulley draws from a fluid body through its hose: when its handler
@@ -129,7 +134,7 @@ public final class BoundaryColumn {
                 return new BoundaryColumn(pos, pos,
                         SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_SOURCE_CAPACITY_MB,
                         drainable.copyWithAmount(PULLEY_SOURCE_CAPACITY_MB),
-                        PULLEY_SOURCE_CAPACITY_MB, null, true);
+                        PULLEY_SOURCE_CAPACITY_MB, null, true, 1.0);
             }
         }
 
@@ -150,7 +155,8 @@ public final class BoundaryColumn {
         if (capacity <= 0) return null;
 
         return new BoundaryColumn(pos, pos,
-                SableCompat.getWorldY(level, pos) - 0.5, 1, capacity, found, amount, null, false);
+                SableCompat.getColumnBaseY(level, pos, 1, 1), 1, capacity, found, amount, null, false,
+                SableCompat.getUpProjectionY(level, pos));
     }
 
     /** A Create hose pulley block, whose handler drains/fills a world fluid body. */
@@ -192,7 +198,7 @@ public final class BoundaryColumn {
         // over-reports a partial body, which would otherwise duplicate a few mB).
         return new BoundaryColumn(space, space, bottom, 1, OPEN_END_CAPACITY_MB,
                 canIntake ? intake : FluidStack.EMPTY,
-                canIntake ? intake.getAmount() : 0, openEndNode.openFace(), canIntake);
+                canIntake ? intake.getAmount() : 0, openEndNode.openFace(), canIntake, 1.0);
     }
 
     /**
@@ -306,6 +312,9 @@ public final class BoundaryColumn {
     public BlockPos accessPos() { return accessPos; }
 
     public double baseY() { return baseY; }
+
+    /** Scale on the fill height (cos of the sub-level tilt): fluid rises along local-up, not world-up. */
+    public double fillScale() { return fillScale; }
 
     public int heightBlocks() { return heightBlocks; }
 

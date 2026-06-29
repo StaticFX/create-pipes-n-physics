@@ -82,9 +82,11 @@ public final class FlowSolver {
         noHead.removeAll(results.movingEdges);
         Set<Integer> blocked = new HashSet<>(results.blockedEdges);
         blocked.removeAll(results.movingEdges);
+        Set<Integer> held = new HashSet<>(results.heldEdges);
+        held.removeAll(results.movingEdges);
         return new Solution(toEdgeFlows(graph, results.edgeFlow), results.transfers,
                 results.nodeHeads, results.nodeCeilings, results.nodeAnchors,
-                results.edgeFluids, results.restFluids, blocked, stalled, noHead,
+                results.edgeFluids, results.restFluids, blocked, stalled, noHead, held,
                 results.edgeReasons, results.pumpLoads, active);
     }
 
@@ -100,6 +102,7 @@ public final class FlowSolver {
         final Set<Integer> blockedEdges = new HashSet<>();
         final Set<Integer> stalledEdges = new HashSet<>();
         final Set<Integer> noHeadEdges = new HashSet<>();
+        final Set<Integer> heldEdges = new HashSet<>();
         final Set<Integer> movingEdges = new HashSet<>();
         final Map<Integer, Solution.Reason> edgeReasons = new HashMap<>();
         final Map<Integer, Solution.PumpLoad> pumpLoads = new HashMap<>();
@@ -253,19 +256,39 @@ public final class FlowSolver {
             columnIndex.put(column, index);
             for (int member : column.memberNodes()) solverIndex[member] = index;
         }
-        if (participants.size() < 2) return false;
+        // A SINGLE reservoir still solves: zero flow (nothing to move it TO), but it records the
+        // settled display heads + restFluids, so a pipe dead-ended below a lone tank's surface —
+        // e.g. a running pump capped by a solid block on its push side — renders the resting water
+        // instead of blanking. A walled neighbour assembles no branch (its node has no solver index),
+        // so the pass still bails at `branches.isEmpty()`; this only fires for a real conducting dead end.
+        if (participants.isEmpty()) return false;
 
         for (Node node : graph.nodes()) {
-            if (node.isHandler() || node.isOpenEnd()) continue;
+            if (node.isHandler() || node.isOpenEnd() || node.isClosedGate()) continue;
             solverIndex[node.index()] = nodeSpecs.size();
             nodeSpecs.add(new NodeSpec(0, 0));
             canSupply.add(false);
         }
 
+        // A closed gate (a fully-shut valve) is a WALL: give each incident edge its OWN
+        // zero-capacitance dead-end node so no flow crosses it. A pump on one side then
+        // dead-heads the gate (the implicit-Euler solve yields head = supply + pump boost —
+        // the held head, with zero flow), while the far side settles to its reservoir.
+        // Keyed (gateNode, edge) so assembleBranch resolves the right dead-end per edge.
+        Map<Long, Integer> gateEdgeIndex = new HashMap<>();
+        for (Node node : graph.nodes()) {
+            if (!node.isClosedGate()) continue;
+            for (Edge edge : graph.edgesOf(node.index())) {
+                gateEdgeIndex.put(gateKey(node.index(), edge.index()), nodeSpecs.size());
+                nodeSpecs.add(new NodeSpec(0, 0));
+                canSupply.add(false);
+            }
+        }
+
         List<BranchSpec> branches = new ArrayList<>();
         List<BranchMeta> meta = new ArrayList<>();
         for (Edge edge : graph.edges()) {
-            assembleBranch(level, graph, columns, pumps, edge, solverIndex, sample,
+            assembleBranch(level, graph, columns, pumps, edge, solverIndex, gateEdgeIndex, sample,
                     gas, conductancePerTile, branches, meta, results);
         }
         if (branches.isEmpty()) return false;
@@ -276,6 +299,15 @@ public final class FlowSolver {
         recordDisplayHeads(graph, solverIndex, nodeSpecs, canSupply, branches, result,
                 gas, results.nodeHeads, results.nodeCeilings, results.nodeAnchors);
 
+        // Which hydraulic islands hold a SUPPLY (a non-empty source), so a pump dead-heading a
+        // shut gate is only flagged "held" when it actually has water behind it — a pump placed
+        // where an open end was develops a head but holds NOTHING, and must not render a column.
+        int[] island = islands(branches, result);
+        Set<Integer> suppliedIslands = new HashSet<>();
+        for (int i = 0; i < canSupply.size(); i++) {
+            if (canSupply.get(i)) suppliedIslands.add(island[i]);
+        }
+
         boolean active = false;
         for (int b = 0; b < branches.size(); b++) {
             int edgeIndex = meta.get(b).edgeIndex();
@@ -283,9 +315,30 @@ public final class FlowSolver {
             results.edgeFlow[edgeIndex] += flow;
             active |= Math.abs(flow) > ACTIVE_FLOW_EPS;
 
-            // The fluid that fills this run even at rest: passes run largest-volume
-            // first, so the dominant fluid claims the edge for static rendering.
-            results.restFluids.putIfAbsent(edgeIndex, sample);
+            // A pump driving out toward a shut gate HOLDS its column up to it — but only if its
+            // island has a supply (see above). No flow crosses the gate; the head doesn't reset.
+            if (meta.get(b).pumpNode() >= 0) {
+                Edge e = graph.edge(edgeIndex);
+                int gateNode = graph.node(e.a()).isClosedGate() ? e.a()
+                        : graph.node(e.b()).isClosedGate() ? e.b() : -1;
+                if (gateNode >= 0) {
+                    int pumpSolver = solverIndex[e.other(gateNode)];
+                    if (pumpSolver >= 0 && suppliedIslands.contains(island[pumpSolver])) {
+                        results.heldEdges.add(edgeIndex);
+                    }
+                }
+            }
+
+            // The fluid that fills this run even at rest — but ONLY if the edge's island has a
+            // SOURCE of it. A run with no supply holds nothing at rest and must render DRY, not
+            // phantom water: this is the single invariant behind every "shut valve shows water on
+            // the far side" report — the downstream of a shut gate (into an empty tank, an open
+            // end, or an unsupplied pump) is a sourceless island. Passes run largest-volume first,
+            // so the dominant fluid claims the edge for static rendering.
+            if (suppliedIslands.contains(island[branches.get(b).a()])
+                    || suppliedIslands.contains(island[branches.get(b).b()])) {
+                results.restFluids.putIfAbsent(edgeIndex, sample);
+            }
 
             if (result.crestBlocked()[b]) {
                 results.blockedEdges.add(edgeIndex);
@@ -366,7 +419,10 @@ public final class FlowSolver {
      */
     private static double columnHead(BoundaryColumn column, boolean gas) {
         if (!gas && column.isOpenEnd()) return column.baseY() + 0.5;
-        double fillHeight = column.fillFraction() * column.heightBlocks();
+        // On a tilted sub-level the fill rises along the column's local-up, so it adds only
+        // fillHeight·cos(tilt) of world height (fillScale = 1 when level). Without this a tilted
+        // tank's surface is over-estimated and spills out an open end that is physically above it.
+        double fillHeight = column.fillFraction() * column.heightBlocks() * column.fillScale();
         return NetworkSolver.surfaceHead(column.baseY(), fillHeight, gas);
     }
 
@@ -399,16 +455,28 @@ public final class FlowSolver {
 
     private static void assembleBranch(Level level, Graph graph, Columns columns,
                                        Map<Integer, PumpState> pumps, Edge edge,
-                                       int[] solverIndex, FluidStack sample,
+                                       int[] solverIndex, Map<Long, Integer> gateEdgeIndex,
+                                       FluidStack sample,
                                        boolean gas,
                                        double conductancePerTile,
                                        List<BranchSpec> branches, List<BranchMeta> meta,
                                        GroupResults results) {
         Set<Integer> blockedEdges = results.blockedEdges;
-        int solverA = solverIndex[edge.a()];
-        int solverB = solverIndex[edge.b()];
+        int solverA = solverNodeFor(graph, solverIndex, gateEdgeIndex, edge, edge.a());
+        int solverB = solverNodeFor(graph, solverIndex, gateEdgeIndex, edge, edge.b());
         if (solverA < 0 || solverB < 0 || solverA == solverB) return;
         if (!runAcceptsFluid(level, graph, edge, sample)) {
+            blockedEdges.add(edge.index());
+            results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.VALVE);
+            return;
+        }
+
+        // A valve the shaft has opened still caps the run by the angle the player dialed
+        // in; 0 degrees shuts it as hard as the shaft would. The factor is applied to the
+        // FINAL conductance below (after the pump-internal cap), not here — a pump's tiny
+        // internal conductance otherwise masks the throttle on every pumped run.
+        double throttle = runThrottle(level, edge);
+        if (throttle <= 0) {
             blockedEdges.add(edge.index());
             results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.VALVE);
             return;
@@ -507,11 +575,36 @@ public final class FlowSolver {
             }
         }
 
+        // Throttle the FINAL conductance, so it scales whether the pipe run or the pump
+        // (its internal-conductance cap, applied above) is the limiter.
+        conductance *= throttle;
+
         branches.add(new BranchSpec(solverA, solverB, conductance, emf, allowedSign,
                 crestHeight, crestPos));
         meta.add(new BranchMeta(edge.index(),
                 columns.byNode.get(edge.a()), columns.byNode.get(edge.b()), lipA, lipB,
                 driveNode, driveHead, driveInternalG));
+        // Whether this is a held FEED candidate (a pump driving out toward a shut gate) is decided
+        // post-solve in solveGroup, where the hydraulic islands are known — the pump only HOLDS a
+        // column if it actually has a supply behind it (a source in its island).
+    }
+
+    /**
+     * The solver node for an edge endpoint. A closed-gate node is a WALL — each incident edge
+     * gets its OWN zero-cap dead-end node (from {@code gateEdgeIndex}) so no flow crosses it;
+     * every other node uses its shared index.
+     */
+    private static int solverNodeFor(Graph graph, int[] solverIndex,
+                                     Map<Long, Integer> gateEdgeIndex, Edge edge, int nodeIndex) {
+        if (graph.node(nodeIndex).isClosedGate()) {
+            return gateEdgeIndex.getOrDefault(gateKey(nodeIndex, edge.index()), -1);
+        }
+        return solverIndex[nodeIndex];
+    }
+
+    /** Stable key for a (closed-gate node, incident edge) pair's dead-end solver node. */
+    private static long gateKey(int nodeIndex, int edgeIndex) {
+        return ((long) nodeIndex << 32) | (edgeIndex & 0xffffffffL);
     }
 
     /**
@@ -542,6 +635,23 @@ public final class FlowSolver {
         return true;
     }
 
+    /**
+     * The tightest valve throttle along a run, as a 0..1 conductance factor (1 when no
+     * valve restricts it). A valve the shaft has shut is already rejected by
+     * {@link #runAcceptsFluid}, so only opened valves reach here; the most-closed one
+     * sets the rate.
+     */
+    private static double runThrottle(Level level, Edge edge) {
+        if (!PipesNPhysicsConfig.ENABLE_VALVE_THROTTLE.get()) return 1;
+        double factor = 1;
+        for (BlockPos cell : edge.pipes()) {
+            if (level.getBlockEntity(cell) instanceof ValveThrottle valve) {
+                factor = Math.min(factor, valve.pipesnphysics$valveThrottle());
+            }
+        }
+        return factor;
+    }
+
     private static Direction directionBetween(BlockPos from, BlockPos to) {
         return Direction.fromDelta(
                 to.getX() - from.getX(), to.getY() - from.getY(), to.getZ() - from.getZ());
@@ -566,7 +676,8 @@ public final class FlowSolver {
         return wanted;
     }
 
-    private static BlockPos adjacentCell(Graph graph, Edge edge, int nodeIndex) {
+    /** The cell (pipe or opposite node) an edge touches at the given node — its first step out. */
+    static BlockPos adjacentCell(Graph graph, Edge edge, int nodeIndex) {
         if (edge.pipes().isEmpty()) return graph.node(edge.other(nodeIndex)).pos();
         return nodeIndex == edge.a()
                 ? edge.pipes().get(0)
