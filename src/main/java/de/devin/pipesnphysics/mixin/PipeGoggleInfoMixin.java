@@ -7,6 +7,7 @@ import com.simibubi.create.content.fluids.pipes.StraightPipeBlockEntity;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.client.GoggleText;
+import de.devin.pipesnphysics.client.PipeStatusText;
 import de.devin.pipesnphysics.engine.net.PipeStatusClient;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import net.createmod.catnip.lang.LangBuilder;
@@ -58,8 +59,8 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         } else {
             // Every non-flowing state reads as one consistent, always-visible line —
             // "No Flow: <reason>" — with the specific culprit folded straight in.
-            pipesnphysics$lang(pipesnphysics$statusReasonKey(data))
-                    .style(pipesnphysics$statusColor(data.status()))
+            pipesnphysics$lang(PipeStatusText.reasonKey(data))
+                    .style(PipeStatusText.color(data.status()))
                     .forGoggles(tooltip, 1);
         }
 
@@ -73,62 +74,13 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
             if (isPlayerSneaking) pipesnphysics$addFluidProperties(tooltip, data);
         }
 
-        // A dry pipe has no fluid to lift, so its "Lift left" bar (the pump's spare reach)
-        // is noise that reads as "all good" next to a stalled run — suppress it. The reason
-        // line above already explains the stop.
-        boolean dry = data.status() == PipeStatusPayload.STATUS_NO_FLOW && data.fluid().isEmpty();
-        if (!dry) pipesnphysics$addHeadLeftLine(tooltip, data, isPlayerSneaking);
+        // The "Lift left / Reach limit" reach readout is suppressed on ANY idle NO_FLOW run — dry OR
+        // settled. A balanced pipe a hair above a low waterline would otherwise read a false "Reach
+        // limit" though nothing is trying to deliver; the reason line above already explains the stop.
+        // It stays for FLOWING (spare reach) and for a pump being asked to lift (NO_HEAD/BLOCKED/STALLED).
+        if (PipeStatusText.showsReach(data)) pipesnphysics$addHeadLeftLine(tooltip, data, isPlayerSneaking);
         if (isPlayerSneaking) pipesnphysics$addPressureLines(tooltip, data);
         return true;
-    }
-
-    /** Which "No flow" wording to show: settled (full, balanced), starved (a running pump
-     *  can't pull a supply), or plain dry (empty, nothing reaching it). */
-    @Unique
-    private String pipesnphysics$noFlowKey(PipeStatusPayload data) {
-        if (!data.fluid().isEmpty()) return "gui.goggles.no_flow_settled";
-        if (data.statusDetail() == PipeStatusPayload.DETAIL_PUMP_STARVED) {
-            return "gui.goggles.no_flow_starved";
-        }
-        return "gui.goggles.no_flow_dry";
-    }
-
-    /** The "No Flow: &lt;reason&gt;" line for a non-flowing status — the most specific cause known. */
-    @Unique
-    private String pipesnphysics$statusReasonKey(PipeStatusPayload data) {
-        return switch (data.status()) {
-            case PipeStatusPayload.STATUS_NOT_CONNECTED -> "gui.goggles.not_connected";
-            case PipeStatusPayload.STATUS_NO_HEAD -> "gui.goggles.no_head";
-            case PipeStatusPayload.STATUS_NO_FLOW -> pipesnphysics$noFlowKey(data);
-            case PipeStatusPayload.STATUS_BLOCKED, PipeStatusPayload.STATUS_STALLED ->
-                    pipesnphysics$detailReasonKey(data);
-            default -> "gui.goggles.no_flow_dry";
-        };
-    }
-
-    /** The folded-in culprit for a blocked/stalled run, or the generic line when unknown. */
-    @Unique
-    private String pipesnphysics$detailReasonKey(PipeStatusPayload data) {
-        return switch (data.statusDetail()) {
-            case PipeStatusPayload.DETAIL_VALVE -> "gui.goggles.detail.valve";
-            case PipeStatusPayload.DETAIL_PUMP_OFF -> "gui.goggles.detail.pump_off";
-            case PipeStatusPayload.DETAIL_CREST -> "gui.goggles.detail.crest";
-            case PipeStatusPayload.DETAIL_SINK_FULL -> "gui.goggles.detail.sink_full";
-            case PipeStatusPayload.DETAIL_SOURCE_DRY -> "gui.goggles.detail.source_dry";
-            default -> data.status() == PipeStatusPayload.STATUS_STALLED
-                    ? "gui.goggles.stalled" : "gui.goggles.blocked";
-        };
-    }
-
-    /** Severity colour, kept per status so the uniform "No Flow:" prefix still reads at a glance. */
-    @Unique
-    private ChatFormatting pipesnphysics$statusColor(byte status) {
-        return switch (status) {
-            case PipeStatusPayload.STATUS_NO_HEAD -> ChatFormatting.RED;
-            case PipeStatusPayload.STATUS_BLOCKED, PipeStatusPayload.STATUS_STALLED -> ChatFormatting.GOLD;
-            case PipeStatusPayload.STATUS_NOT_CONNECTED -> ChatFormatting.DARK_GRAY;
-            default -> ChatFormatting.GRAY;
-        };
     }
 
     /**

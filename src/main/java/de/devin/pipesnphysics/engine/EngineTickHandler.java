@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.engine;
 
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.CreatePipeRendering;
+import de.devin.pipesnphysics.compat.SableCompat;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
@@ -83,6 +84,13 @@ public final class EngineTickHandler {
 
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
+        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
+        // Sable contraptions are assembled with no place event and their dry pipes never
+        // self-tick, so the engine never wakes on a sub-level. Seed every sub-level pipe cell
+        // each tick (the QUIET sleep still throttles re-solves); a no-op without full Sable.
+        for (ServerLevel level : event.getServer().getAllLevels()) {
+            SableCompat.seedSubLevels(level, EngineTickHandler::markDirty);
+        }
         if (DIRTY.isEmpty() && URGENT.isEmpty()) return;
         event.getServer().getAllLevels().forEach(EngineTickHandler::tickLevel);
     }

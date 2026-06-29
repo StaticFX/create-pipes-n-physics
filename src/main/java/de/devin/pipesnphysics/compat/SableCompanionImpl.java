@@ -48,6 +48,30 @@ class SableCompanionImpl implements SableCompatProvider {
     }
 
     @Override
+    public double getUpProjectionY(Level level, BlockPos pos) {
+        SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
+        if (sub == null) return 1.0;
+        Pose3dc pose = sub.logicalPose();
+        if (pose == null) return 1.0;
+        Vector3d up = pose.transformNormal(new Vector3d(0, 1, 0), new Vector3d());
+        double len = Math.sqrt(up.x * up.x + up.y * up.y + up.z * up.z);
+        if (len < NORMALIZE_EPSILON) return 1.0;
+        return Math.clamp(up.y / len, 0.0, 1.0); // cos(tilt): a fluid column rises along local-up, not world-up
+    }
+
+    @Override
+    public double getColumnBaseY(Level level, BlockPos pos, int width, int height) {
+        // Anchor at the box's projected geometric CENTER, not the bottom corner: on a tilt the
+        // corner the controller sits at is not the lowest point, so baseY = getWorldY(controller)-0.5
+        // skews the surface and spills a partial tank. The center projects exactly, and the surface
+        // is then center + (fillFraction - 0.5)·height·cosTilt — i.e. baseY = center − 0.5·height·cosTilt.
+        Vector3d center = SableCompanion.INSTANCE.projectOutOfSubLevel(level,
+                new Vector3d(pos.getX() + width / 2.0, pos.getY() + height / 2.0, pos.getZ() + width / 2.0),
+                new Vector3d());
+        return center.y - 0.5 * height * getUpProjectionY(level, pos);
+    }
+
+    @Override
     public float getTiltAngle(Level level, BlockPos pos) {
         SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
         if (sub == null) return 0;

@@ -64,6 +64,17 @@ public final class GraphBuilder {
     }
 
     /**
+     * Whether a cell is a fully-SHUT fluid valve — a fluid-independent closure (it rejects every
+     * fluid, both directions), so it can safely become a wall in the shared topology. A partially
+     * open valve still conducts (throttled), so it stays a normal pipe cell. Reads the engine's own
+     * {@link ValveThrottle} angle (0 = shut); inert when the throttle feature is off (returns 1).
+     */
+    private static boolean isClosedGate(Level level, BlockPos pos) {
+        return level.getBlockEntity(pos) instanceof ValveThrottle valve
+                && valve.pipesnphysics$valveThrottle() <= 0f;
+    }
+
+    /**
      * Build a graph containing the network reachable from startPos.
      *
      * If startPos is not a pipe, pump, or handler, BFS extends one block outward
@@ -84,7 +95,11 @@ public final class GraphBuilder {
         nodePositions.addAll(d.openEnds.keySet());
         for (BlockPos pipe : d.pipes) {
             int conns = d.connections.getOrDefault(pipe, List.of()).size();
-            if (conns != 2) nodePositions.add(pipe);
+            // A fully-shut valve is forced to a node so the run SPLITS there (a wall): the
+            // supply side holds its head up to the valve, the far side settles. The graph
+            // stays connected (the gate bridges two edges) — only the solver treats it as
+            // non-conducting — so coverage/dedupe/wake are unaffected.
+            if (conns != 2 || isClosedGate(level, pipe)) nodePositions.add(pipe);
         }
         // If no junctions/handlers/pumps exist, treat the start as the single node.
         if (nodePositions.isEmpty()) nodePositions.add(d.pipes.iterator().next());
@@ -107,6 +122,8 @@ public final class GraphBuilder {
             } else if (d.openEnds.containsKey(pos)) {
                 kind = Node.Kind.OPEN_END;
                 openFace = d.openEnds.get(pos);
+            } else if (isClosedGate(level, pos)) {
+                kind = Node.Kind.CLOSED_GATE;
             } else {
                 kind = Node.Kind.JUNCTION;
             }
@@ -235,9 +252,18 @@ public final class GraphBuilder {
                     continue;
                 }
 
-                if (FluidPropagator.getPipe(level, neighbor) != null) {
-                    conns.add(neighbor.immutable());
-                    frontier.add(neighbor.immutable());
+                // Link to a neighbouring pipe ONLY if it opens back toward us. `getPipeConnections`
+                // reports the faces THIS pipe opens on (one-sided); Create's own propagation also
+                // checks the target's reciprocal opening. On the main world the two states are kept
+                // mutually consistent so the check is moot, but a Sable sub-level never re-runs the
+                // connection update (its BEs don't tick), so a stale one-sided opening would
+                // otherwise bridge two pipes that are not actually connected (a phantom edge).
+                var neighborPipe = FluidPropagator.getPipe(level, neighbor);
+                if (neighborPipe != null) {
+                    if (neighborPipe.canHaveFlowToward(nState, face.getOpposite())) {
+                        conns.add(neighbor.immutable());
+                        frontier.add(neighbor.immutable());
+                    }
                     continue;
                 }
 

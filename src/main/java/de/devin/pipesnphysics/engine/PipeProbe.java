@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.engine;
 
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.compat.CreatePipeRendering;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import net.minecraft.core.BlockPos;
@@ -11,7 +12,9 @@ import net.neoforged.neoforge.fluids.FluidStack;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -54,13 +57,38 @@ public final class PipeProbe {
         // throttle well below. They diverge on a near-empty source: the pipe would read a
         // brisk flow yet barely a trickle leaves the tank.
         int actualFlow = actualEdgeFlow(graph, solution, edge);
+
+        Double headA = solution.nodeHeads().get(edge.a());
+        Double headB = solution.nodeHeads().get(edge.b());
+        // A closed-gate endpoint (a shut valve) has no head of its own; mirror the renderer
+        // (CreatePipeRendering.apply) and take the opposite endpoint's head — but ONLY from a real
+        // reservoir (a HANDLER). A gate↔open-end segment has no supply (the open end is air, its
+        // head is the spill threshold), so it stays dry rather than reading the mouth as a waterline.
+        if (graph.node(edge.a()).isClosedGate() && graph.node(edge.b()).isHandler() && headB != null) {
+            headA = headB;
+        } else if (graph.node(edge.b()).isClosedGate() && graph.node(edge.a()).isHandler() && headA != null) {
+            headB = headA;
+        }
+        boolean knownHeads = headA != null && headB != null;
+
         FluidStack fluid = solution.edgeFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
-        if (fluid.isEmpty()) {
-            // An idle run can still be full of RESTING fluid (equalized/settled). Surfacing
-            // it lets the goggle distinguish "settled, levels balanced" from "dry, nothing
-            // reaching this pipe" — otherwise both read as a bare "No flow" and the player
-            // can't tell a healthy balance from a starved run.
-            fluid = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+        boolean flowing = !fluid.isEmpty();
+        if (!flowing) {
+            // An idle run can still hold RESTING fluid (equalized/settled), but only the cells
+            // BELOW the waterline. The dry cells above it — a vertical riser over the tank's
+            // surface, the run up to an open-end vent — hold none, so gate the fluid PER CELL with
+            // the same waterline the renderer uses. Without this every cell of a half-full run
+            // reads "settled, levels balanced": the goggle claiming water in a visibly dry pipe.
+            FluidStack rest = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+            // A HELD run (a pump dead-heading a shut valve) is full of pressurized fluid up to the
+            // gate — surface it regardless of the waterline test. Otherwise gate the resting fluid
+            // per-cell so a dry riser above the waterline reads dry, not "settled".
+            boolean held = solution.heldEdges().contains(edge.index());
+            if (!rest.isEmpty() && (held || (knownHeads && CreatePipeRendering.restingCellSubmerged(
+                    level, graph, edge, cell, headA, headB,
+                    rest.getFluid().getFluidType().isLighterThanAir())))) {
+                fluid = rest;
+            }
         }
 
         Direction direction = null;
@@ -72,11 +100,9 @@ public final class PipeProbe {
             direction = directionBetween(pos, next);
         }
 
-        Double headA = solution.nodeHeads().get(edge.a());
-        Double headB = solution.nodeHeads().get(edge.b());
         float pressure = 0;
         float runWorstPressure = 0;
-        boolean hasPressure = headA != null && headB != null;
+        boolean hasPressure = knownHeads;
         if (hasPressure) {
             double frac = (cell + 1.0) / (edge.length() + 1);
             double headHere = headA + (headB - headA) * frac;
@@ -104,9 +130,14 @@ public final class PipeProbe {
 
         byte status = status(solution, edge.index(), actualFlow);
         byte detail = detail(solution, edge.index(), status);
-        if (status == PipeStatusPayload.STATUS_NO_FLOW && fluid.isEmpty()
-                && starvedDryEdges(level, graph, solution).contains(edge.index())) {
-            detail = PipeStatusPayload.DETAIL_PUMP_STARVED;
+        if (status == PipeStatusPayload.STATUS_NO_FLOW && fluid.isEmpty()) {
+            Byte starvedCause = starvedDryEdges(level, graph, solution).get(edge.index());
+            if (starvedCause != null) detail = starvedCause;
+        }
+        // A pump holding its column against a shut valve: not idly settled, not dry — say "held".
+        if (status == PipeStatusPayload.STATUS_NO_FLOW
+                && solution.heldEdges().contains(edge.index())) {
+            detail = PipeStatusPayload.DETAIL_HELD;
         }
         boolean hasSuction = hasPressure && runWorstPressure < -0.05f && !isGas(fluid);
         float suctionMargin = hasSuction
@@ -190,9 +221,14 @@ public final class PipeProbe {
      * dry for an UNRELATED reason — a lip-gated connector boxed in by full runs, or a branch
      * behind a closed valve that holds resting fluid — is never reached, so it keeps the
      * neutral "dry" message instead of being blamed on a source it has nothing to do with.
+     *
+     * Each dry edge is tagged with WHY: a pump with no edge on its push (facing) side has nowhere
+     * to deliver ({@code DETAIL_PUMP_NO_OUTPUT} - its outlet faces a solid block); otherwise the
+     * supply it does have can't be drawn ({@code DETAIL_PUMP_STARVED}). Folding the two into one
+     * "check the source" message sent the player to a perfectly full tank.
      */
-    private static Set<Integer> starvedDryEdges(ServerLevel level, Graph graph, Solution solution) {
-        Set<Integer> dry = new HashSet<>();
+    private static Map<Integer, Byte> starvedDryEdges(ServerLevel level, Graph graph, Solution solution) {
+        Map<Integer, Byte> dry = new HashMap<>();
         for (Node pump : graph.pumps()) {
             float speed = level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
                     ? kinetic.getSpeed() : 0;
@@ -208,14 +244,33 @@ public final class PipeProbe {
                     break;
                 }
             }
-            if (movesNothing) floodDryRegion(graph, solution, pump.index(), dry);
+            if (!movesNothing) continue;
+            // A pump with nothing on its push side is not short of supply: it has nowhere to
+            // deliver. Tag its dry region so the message names the OUTPUT, not the source.
+            byte cause = pushSideConnected(graph, pump)
+                    ? PipeStatusPayload.DETAIL_PUMP_STARVED
+                    : PipeStatusPayload.DETAIL_PUMP_NO_OUTPUT;
+            floodDryRegion(graph, solution, pump.index(), cause, dry);
         }
         return dry;
     }
 
-    /** Flood the dry (no fluid, no flow) edges reachable from a starved pump's node. */
+    /**
+     * Whether the pump has a network connection on its PUSH (facing) side. With none, a running
+     * pump can pull from its source fine but has nowhere to deliver - its outlet faces a solid
+     * block (or open air with no pipe), so the failure is the OUTPUT, not the supply.
+     */
+    private static boolean pushSideConnected(Graph graph, Node pump) {
+        BlockPos pushBlock = pump.pos().relative(pump.pumpFacing());
+        for (Edge edge : graph.edgesOf(pump.index())) {
+            if (FlowSolver.adjacentCell(graph, edge, pump.index()).equals(pushBlock)) return true;
+        }
+        return false;
+    }
+
+    /** Flood the dry (no fluid, no flow) edges reachable from a starved pump, tagging the cause. */
     private static void floodDryRegion(Graph graph, Solution solution, int startNode,
-                                       Set<Integer> dryEdges) {
+                                       byte cause, Map<Integer, Byte> dryEdges) {
         Deque<Integer> queue = new ArrayDeque<>();
         Set<Integer> seen = new HashSet<>();
         queue.add(startNode);
@@ -226,7 +281,7 @@ public final class PipeProbe {
                 boolean wet = !solution.restFluids()
                         .getOrDefault(edge.index(), FluidStack.EMPTY).isEmpty();
                 if (wet || solution.edgeFlows().get(edge.index()).mbPerTick() != 0) continue;
-                dryEdges.add(edge.index());
+                dryEdges.putIfAbsent(edge.index(), cause);
                 int other = edge.a() == node ? edge.b() : edge.a();
                 if (seen.add(other)) queue.add(other);
             }
@@ -287,12 +342,10 @@ public final class PipeProbe {
             if (detail != PipeStatusPayload.DETAIL_NONE) break;
         }
         if (status == PipeStatusPayload.STATUS_NO_FLOW && fluid.isEmpty()) {
-            Set<Integer> starved = starvedDryEdges(level, graph, solution);
+            Map<Integer, Byte> starved = starvedDryEdges(level, graph, solution);
             for (Edge edge : graph.edgesOf(node.index())) {
-                if (starved.contains(edge.index())) {
-                    detail = PipeStatusPayload.DETAIL_PUMP_STARVED;
-                    break;
-                }
+                Byte cause = starved.get(edge.index());
+                if (cause != null) { detail = cause; break; }
             }
         }
         boolean hasSuction = hasPressure && pressure < -0.05f && !isGas(fluid);

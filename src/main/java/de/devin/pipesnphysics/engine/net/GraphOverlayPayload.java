@@ -72,7 +72,9 @@ public record GraphOverlayPayload(List<NodeEntry> nodes, List<EdgeEntry> edges) 
      * a polyline and an arrowhead pointing toward the last point.
      *
      * direction: 0 = NONE (drawn dim/no arrow), 1 = flowing along points order,
-     * 2 = stalled (pressurized along points order but nothing moves — no arrow).
+     * 2 = stalled (pressurized along points order but nothing moves — no arrow),
+     * 3 = HELD — a pump's stored column dead-headed by a shut valve, drawn solid
+     * magenta so the held head is visible at a glance (carries no flow, no arrow).
      *
      * pressures holds the gauge pressure (head minus elevation, in blocks) at each
      * point, aligned with the points list; empty when the edge had no solved heads.
@@ -82,6 +84,7 @@ public record GraphOverlayPayload(List<NodeEntry> nodes, List<EdgeEntry> edges) 
         public static final byte DIR_NONE = 0;
         public static final byte DIR_FORWARD = 1;
         public static final byte DIR_STALLED = 2;
+        public static final byte DIR_HELD = 3;
 
         public static final StreamCodec<RegistryFriendlyByteBuf, EdgeEntry> CODEC =
                 StreamCodec.composite(

@@ -5,7 +5,9 @@
   "pipesnphysics.gui.goggles.not_connected": "No Flow: not connected to a network",
   "pipesnphysics.gui.goggles.no_flow_dry": "No Flow: pipe is dry, nothing reaching it",
   "pipesnphysics.gui.goggles.no_flow_starved": "No Flow: pump can't pull its supply (check the source)",
+  "pipesnphysics.gui.goggles.no_flow_no_output": "No Flow: the pump has nowhere to push (its output isn't connected)",
   "pipesnphysics.gui.goggles.no_flow_settled": "No Flow: settled, levels are balanced",
+  "pipesnphysics.gui.goggles.held": "No Flow: holding pressure, a valve is shut ahead",
   "pipesnphysics.gui.goggles.blocked": "No Flow: this line is shut",
   "pipesnphysics.gui.goggles.stalled": "No Flow: the tank or machine ahead is full",
   "pipesnphysics.gui.goggles.no_head": "No Flow: not enough RPM to lift this high",
@@ -39,6 +41,11 @@
   "pipesnphysics.gui.goggles.visc_thick": "thick",
   "pipesnphysics.gui.goggles.fluid_weight": "Weight: ",
   "pipesnphysics.gui.goggles.kg": " kg",
+
+  "pipesnphysics.gui.valve.throttle": "Valve Flow",
+  "pipesnphysics.gui.goggles.valve_stats": "Valve",
+  "pipesnphysics.gui.goggles.valve_opening": "Letting through: ",
+  "pipesnphysics.gui.goggles.valve_shut_throttle": "No Flow: cranked shut",
 
   "pipesnphysics.direction.north": "→ North",
   "pipesnphysics.direction.south": "→ South",

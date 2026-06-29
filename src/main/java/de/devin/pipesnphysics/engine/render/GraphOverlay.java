@@ -41,6 +41,9 @@ public final class GraphOverlay {
     /** Half-width of the edge tube; sits just outside the pipe core so the outline is visible. */
     private static final float EDGE_TUBE_RADIUS = 0.35f;
 
+    /** Half-size of each head-plane tile; 0.5 makes adjacent cells' tiles abut into one surface. */
+    private static final float HEAD_PLANE_HALF = 0.5f;
+
     private static final List<ActiveOverlay> ACTIVE = new ArrayList<>();
 
     private GraphOverlay() {}
@@ -73,15 +76,23 @@ public final class GraphOverlay {
 
         MultiBufferSource.BufferSource buffers = Minecraft.getInstance()
                 .renderBuffers().bufferSource();
-        VertexConsumer lines = buffers.getBuffer(RenderType.lines());
 
+        // The BufferSource shares ONE builder across render types, so requesting a second type ends
+        // the first's buffer — finish (endBatch) the lines BEFORE asking for the quads buffer, or the
+        // next lines.addVertex throws "Not building!".
+        VertexConsumer lines = buffers.getBuffer(RenderType.lines());
         for (ActiveOverlay a : ACTIVE) {
-            float fade = lifeFraction(a, now);
-            drawSnapshot(pose, lines, a.payload, fade);
+            drawSnapshot(pose, lines, a.payload, lifeFraction(a, now));
         }
+        buffers.endBatch(RenderType.lines());
+
+        VertexConsumer planes = buffers.getBuffer(RenderType.debugQuads());
+        for (ActiveOverlay a : ACTIVE) {
+            drawHeadPlanes(pose, planes, a.payload, lifeFraction(a, now));
+        }
+        buffers.endBatch(RenderType.debugQuads());
 
         pose.popPose();
-        buffers.endBatch(RenderType.lines());
 
         for (ActiveOverlay a : ACTIVE) {
             float fade = lifeFraction(a, now);
@@ -176,11 +187,13 @@ public final class GraphOverlay {
         for (int ei = 0; ei < edges.size(); ei++) {
             var e = edges.get(ei);
             boolean flowing = e.direction() == GraphOverlayPayload.EdgeEntry.DIR_FORWARD;
+            boolean held = e.direction() == GraphOverlayPayload.EdgeEntry.DIR_HELD;
             List<Long> pts = e.points();
             List<Float> pressures = e.pressures();
-            boolean gradient = pressures.size() == pts.size() && pts.size() >= 2;
+            // A HELD column is drawn solid magenta (no gradient) so the stored head reads at a glance.
+            boolean gradient = !held && pressures.size() == pts.size() && pts.size() >= 2;
 
-            int[] fallback = DRY_EDGE_COLOR;
+            int[] fallback = held ? HELD_EDGE_COLOR : DRY_EDGE_COLOR;
             for (int i = 1; i < pts.size(); i++) {
                 BlockPos p0 = BlockPos.of(pts.get(i - 1));
                 BlockPos p1 = BlockPos.of(pts.get(i));
@@ -201,6 +214,41 @@ public final class GraphOverlay {
     }
 
     /**
+     * Draws the solved head as a translucent horizontal plane: one tile per edge point at the head
+     * elevation (gauge pressure + the cell's Y), colored by the same pressure ramp as the tube. A
+     * settled run reads as one flat sheet; a gradient steps. Lets you SEE where the head — the fluid
+     * surface the engine settles to — sits in the world. Only drawn where the edge had solved heads
+     * (its per-point pressures are populated); a dry run shows no plane.
+     */
+    private static void drawHeadPlanes(PoseStack pose, VertexConsumer buf,
+                                       GraphOverlayPayload payload, float fade) {
+        Matrix4f m = pose.last().pose();
+        int alpha = (int) (255 * 0.3f * Math.max(0.3f, fade));
+        for (var e : payload.edges()) {
+            List<Long> pts = e.points();
+            List<Float> pressures = e.pressures();
+            if (pressures.size() != pts.size()) continue; // no solved heads → no plane
+            for (int i = 0; i < pts.size(); i++) {
+                BlockPos p = BlockPos.of(pts.get(i));
+                float head = pressures.get(i) + p.getY() + 0.5f;
+                if (!Float.isFinite(head)) continue;
+                float x = p.getX() + 0.5f, z = p.getZ() + 0.5f;
+                int[] c = pressureColor(pressures.get(i));
+                float s = HEAD_PLANE_HALF;
+                planeVertex(m, buf, x - s, head, z - s, c, alpha);
+                planeVertex(m, buf, x + s, head, z - s, c, alpha);
+                planeVertex(m, buf, x + s, head, z + s, c, alpha);
+                planeVertex(m, buf, x - s, head, z + s, c, alpha);
+            }
+        }
+    }
+
+    private static void planeVertex(Matrix4f m, VertexConsumer buf,
+                                    float x, float y, float z, int[] c, int alpha) {
+        buf.addVertex(m, x, y, z).setColor(c[0], c[1], c[2], alpha);
+    }
+
+    /**
      * Maps gauge pressure to a color ramp matching the goggle readout: red under
      * suction, amber near ambient, green for a healthy column, cyan when strongly
      * pressurized. The ramp spans -8 (the suction limit) to +16 blocks of head.
@@ -212,6 +260,9 @@ public final class GraphOverlay {
 
     /** Dry runs (no reservoir can reach them) are dim gray — no pressure to show. */
     private static final int[] DRY_EDGE_COLOR = { 150, 150, 150 };
+
+    /** A pump's HELD/stored column (dead-headed by a shut valve): magenta, distinct from the ramp. */
+    private static final int[] HELD_EDGE_COLOR = { 220, 80, 220 };
 
     private static int[] hsvToRgb(float h, float s, float v) {
         float i = (float) Math.floor(h * 6f);

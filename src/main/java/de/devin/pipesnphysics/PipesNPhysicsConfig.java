@@ -20,6 +20,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.DoubleValue SUCTION_LIMIT;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_INTAKE;
     public static final ModConfigSpec.IntValue OPEN_END_INTAKE_COOLDOWN_TICKS;
+    public static final ModConfigSpec.BooleanValue ENABLE_VALVE_THROTTLE;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
@@ -75,6 +76,12 @@ public class PipesNPhysicsConfig {
                         "may pull a finite source again (the anti-reclaim window). Lakes and cauldrons",
                         "ignore this. Larger = safer against flicker on networks that both push and pull.")
                 .defineInRange("openEndIntakeCooldownTicks", 20, 0, 200);
+        ENABLE_VALVE_THROTTLE = server
+                .comment("Let a fluid valve throttle its flow by a 0-90 degree angle set with the scroll",
+                        "value (the box on its side faces). The shaft still opens and closes the valve;",
+                        "the angle only caps how much flows while it is open (90 = fully open). When",
+                        "false, valves stay plain on/off.")
+                .define("enableValveThrottle", true);
         server.pop();
 
         server.push("sableCompat");
