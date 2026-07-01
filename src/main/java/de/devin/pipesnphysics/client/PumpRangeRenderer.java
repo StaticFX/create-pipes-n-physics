@@ -6,6 +6,7 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.math.Axis;
 import com.simibubi.create.content.equipment.goggles.GogglesItem;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
+import de.devin.pipesnphysics.compat.CreateFluidCompat;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.net.PumpRangePayload;
@@ -18,6 +19,7 @@ import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -62,7 +64,7 @@ public final class PumpRangeRenderer {
         long now = mc.level.getGameTime();
         if (mc.hitResult instanceof BlockHitResult blockHit
                 && mc.hitResult.getType() == HitResult.Type.BLOCK
-                && mc.level.getBlockState(blockHit.getBlockPos()).getBlock() instanceof PumpBlock) {
+                && isPumpBlock(mc.level.getBlockState(blockHit.getBlockPos()))) {
             PumpRangeClient.looking(blockHit.getBlockPos(), now);
         }
 
@@ -140,6 +142,10 @@ public final class PumpRangeRenderer {
                     FULL_BRIGHTNESS, OverlayTexture.NO_OVERLAY);
         }
         poseStack.popPose();
+    }
+
+    private static boolean isPumpBlock(BlockState state) {
+        return state.getBlock() instanceof PumpBlock || CreateFluidCompat.isCentrifugalPump(state);
     }
 
     private static void applyDirectionRotation(PoseStack poseStack, Direction dir) {

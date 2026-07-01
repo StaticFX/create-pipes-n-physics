@@ -1,5 +1,6 @@
 package de.devin.pipesnphysics.mixin;
 
+import net.neoforged.fml.loading.FMLLoader;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
 import org.spongepowered.asm.mixin.extensibility.IMixinInfo;
@@ -15,26 +16,14 @@ import java.util.Set;
  *   <li>{@code FluidTankWeightGoggleMixin} — goggle weight readout for the mass feature,
  *       so it follows Sable Full as well</li>
  * </ul>
- * Without this, loading the mixin classes would crash with NoClassDefFoundError
- * because they reference Sable interfaces that don't exist without the mod.
+ * Mod presence is checked via the loading mod list so we never force-load Sable classes
+ * during mixin bootstrap.
  */
 public class SableMixinPlugin implements IMixinConfigPlugin {
-    private static final boolean SABLE_COMPANION_PRESENT;
-    private static final boolean SABLE_FULL_PRESENT;
-
-    static {
-        SABLE_COMPANION_PRESENT = classExists("dev.ryanhcode.sable.companion.SableCompanion");
-        SABLE_FULL_PRESENT = classExists("dev.ryanhcode.sable.api.block.BlockEntitySubLevelActor");
-    }
-
-    private static boolean classExists(String className) {
-        try {
-            Class.forName(className, false, SableMixinPlugin.class.getClassLoader());
-            return true;
-        } catch (ClassNotFoundException e) {
-            return false;
-        }
-    }
+    private static final boolean SABLE_COMPANION_PRESENT =
+            FMLLoader.getLoadingModList().getModFileById("sablecompanion") != null;
+    private static final boolean SABLE_FULL_PRESENT =
+            FMLLoader.getLoadingModList().getModFileById("sable") != null;
 
     @Override
     public void onLoad(String mixinPackage) {

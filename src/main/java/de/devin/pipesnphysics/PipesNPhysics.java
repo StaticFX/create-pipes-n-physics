@@ -4,6 +4,7 @@ import com.simibubi.create.foundation.data.CreateRegistrate;
 import com.simibubi.create.foundation.item.ItemDescription;
 import com.simibubi.create.foundation.item.KineticStats;
 import com.simibubi.create.foundation.item.TooltipModifier;
+import de.devin.pipesnphysics.compat.CreateFluidCompat;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.OpenEndPipes;
@@ -61,6 +62,9 @@ public class PipesNPhysics {
     }
 
     private void onCommonSetup(FMLCommonSetupEvent event) {
+        if (CreateFluidCompat.isLoaded()) {
+            LOGGER.info("Create: Fluid compatibility enabled");
+        }
         LOGGER.info("Common setup...");
     }
 }

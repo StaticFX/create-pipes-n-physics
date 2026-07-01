@@ -5,6 +5,7 @@ import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import de.devin.pipesnphysics.PipesNPhysics;
+import de.devin.pipesnphysics.compat.CreateFluidCompat;
 import de.devin.pipesnphysics.compat.SableCompat;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -95,12 +96,19 @@ public final class GraphBuilder {
         for (BlockPos pos : nodePositions) {
             Node.Kind kind;
             Direction facing = null;
+            Direction pullSide = null;
             Direction openFace = null;
             if (d.pumps.contains(pos)) {
                 kind = Node.Kind.PUMP;
                 BlockState bs = level.getBlockState(pos);
                 if (bs.getBlock() instanceof PumpBlock) {
                     facing = bs.getValue(PumpBlock.FACING);
+                } else if (CreateFluidCompat.isCentrifugalPump(bs)) {
+                    CreateFluidCompat.PumpPorts ports = CreateFluidCompat.getPumpPorts(level, pos, bs);
+                    if (ports != null) {
+                        facing = ports.push();
+                        pullSide = ports.pull();
+                    }
                 }
             } else if (d.handlers.contains(pos)) {
                 kind = Node.Kind.HANDLER;
@@ -111,7 +119,7 @@ public final class GraphBuilder {
                 kind = Node.Kind.JUNCTION;
             }
             int idx = nodes.size();
-            nodes.add(new Node(idx, pos, kind, SableCompat.getWorldY(level, pos), facing, openFace));
+            nodes.add(new Node(idx, pos, kind, SableCompat.getWorldY(level, pos), facing, pullSide, openFace));
             indexOf.put(pos, idx);
         }
 
@@ -201,7 +209,7 @@ public final class GraphBuilder {
             }
 
             BlockState curState = level.getBlockState(cur);
-            boolean isPump = curState.getBlock() instanceof PumpBlock;
+            boolean isPump = isPumpBlock(curState);
             if (isPump) d.pumps.add(cur);
             else d.pipes.add(cur);
 
@@ -211,7 +219,7 @@ public final class GraphBuilder {
                 if (!level.isLoaded(neighbor)) continue;
                 BlockState nState = level.getBlockState(neighbor);
 
-                if (nState.getBlock() instanceof PumpBlock) {
+                if (isPumpBlock(nState)) {
                     d.pumps.add(neighbor.immutable());
                     conns.add(neighbor.immutable());
                     frontier.add(neighbor.immutable());
@@ -284,7 +292,7 @@ public final class GraphBuilder {
             BlockPos neighbor = cur.relative(face);
             if (!level.isLoaded(neighbor)) continue;
 
-            if (level.getBlockState(neighbor).getBlock() instanceof PumpBlock) {
+            if (isPumpBlock(level.getBlockState(neighbor))) {
                 d.pumps.add(neighbor.immutable());
                 conns.add(neighbor.immutable());
                 frontier.add(neighbor.immutable());
@@ -302,6 +310,10 @@ public final class GraphBuilder {
             }
         }
         d.connections.put(cur, conns);
+    }
+
+    private static boolean isPumpBlock(BlockState state) {
+        return state.getBlock() instanceof PumpBlock || CreateFluidCompat.isCentrifugalPump(state);
     }
 
     /**

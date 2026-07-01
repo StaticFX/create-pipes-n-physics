@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.engine;
 
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.compat.CreateFluidCompat;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.net.PumpRangePayload;
 import net.minecraft.core.BlockPos;
@@ -42,7 +43,9 @@ public final class PumpRangeProbe {
         float speed = level.getBlockEntity(pumpPos) instanceof KineticBlockEntity kinetic
                 ? kinetic.getSpeed() : 0;
         if (Math.abs(speed) < 0.01f) return new PumpRangePayload(pumpPos, List.of());
-        double pumpHead = Math.abs(speed) * PipesNPhysicsConfig.PUMP_HEAD_PER_RPM.get();
+        double mult = CreateFluidCompat.isCentrifugalPump(level, pumpPos)
+                ? CreateFluidCompat.PERFORMANCE_MULTIPLIER : 1.0;
+        double pumpHead = Math.abs(speed) * PipesNPhysicsConfig.PUMP_HEAD_PER_RPM.get() * mult;
         double suction = PipesNPhysicsConfig.SUCTION_LIMIT.get();
 
         Solution solution = FlowSolver.solve(level, graph);
@@ -54,7 +57,7 @@ public final class PumpRangeProbe {
         for (Edge edge : graph.edgesOf(pump.index())) {
             BlockPos toward = adjacentCell(graph, edge, pump.index());
             boolean push = toward.equals(pumpPos.relative(pump.pumpFacing()));
-            boolean pull = toward.equals(pumpPos.relative(pump.pumpFacing().getOpposite()));
+            boolean pull = toward.equals(pumpPos.relative(pump.effectivePullSide()));
             if (!push && !pull) continue;
 
             List<BlockPos> seed = new ArrayList<>();
