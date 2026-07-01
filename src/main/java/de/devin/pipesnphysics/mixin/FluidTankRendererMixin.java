@@ -17,6 +17,7 @@ import dev.ryanhcode.sable.companion.math.Pose3dc;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
+import net.minecraft.client.renderer.Sheets;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.BlockPos;
 import net.minecraft.util.Mth;
@@ -79,6 +80,11 @@ public class FluidTankRendererMixin {
     @Unique private static final Map<BlockPos, float[]> WAVE_LAST_VEL = new HashMap<>();
     @Unique private static final Map<BlockPos, float[]> WAVE_LAST_QUAT = new HashMap<>();
     @Unique private static final Map<BlockPos, Float> SMOOTH_LEVEL = new HashMap<>();
+
+    /** Per-draw state for the active fluid layer (client render thread only). */
+    @Unique private static boolean pipesnphysics$entityFluidLayer;
+    @Unique private static int pipesnphysics$fluidLight;
+    @Unique private static int pipesnphysics$fluidOverlay;
 
     // ========================================================================
     // Main render method
@@ -205,7 +211,10 @@ public class FluidTankRendererMixin {
 
         Matrix4f mat = ms.last().pose();
 
-        VertexConsumer qvc = buffer.getBuffer(RenderType.translucent());
+        pipesnphysics$entityFluidLayer = Minecraft.useShaderTransparency();
+        pipesnphysics$fluidLight = light;
+        pipesnphysics$fluidOverlay = overlay;
+        VertexConsumer qvc = buffer.getBuffer(pipesnphysics$fluidRenderType());
 
         boolean hideTexture = PipesNPhysicsConfig.FLUID_HIDE_TEXTURE.get();
         if (!hideTexture) {
@@ -870,20 +879,41 @@ public class FluidTankRendererMixin {
         };
     }
 
+    /**
+     * Fast/Fancy BER fluid uses the chunk translucent layer. Fabulous! needs the block-atlas
+     * item-entity translucent sheet so the atlas binds and sorts correctly.
+     */
+    @Unique
+    private static RenderType pipesnphysics$fluidRenderType() {
+        if (pipesnphysics$entityFluidLayer) {
+            return Sheets.translucentItemSheet();
+        }
+        return RenderType.translucent();
+    }
+
+    @Unique
+    private static void pipesnphysics$putFluidVertex(VertexConsumer vc, Matrix4f mat,
+                                                      float x, float y, float z, FluidStyle s,
+                                                      float u, float v, float nx, float ny, float nz) {
+        var vertex = vc.addVertex(mat, x, y, z)
+                .setColor(s.cr(), s.cg(), s.cb(), s.ca())
+                .setUv(u, v);
+        if (pipesnphysics$entityFluidLayer) {
+            vertex.setOverlay(pipesnphysics$fluidOverlay);
+        }
+        vertex.setLight(pipesnphysics$fluidLight).setNormal(nx, ny, nz);
+    }
+
     /** Emits a single-sided quad (4 vertices). Winding is caller's responsibility. */
     @Unique
     private static void pipesnphysics$emitQuad(VertexConsumer vc, Matrix4f mat,
                                                 float[] p00, float[] p10, float[] p11, float[] p01,
                                                 float qu0, float qu1, float qv0, float qv1,
                                                 FluidStyle s) {
-        vc.addVertex(mat, p00[0], p00[1], p00[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                .setUv(qu0, qv0).setOverlay(0).setLight(15728880).setNormal(s.nx(), s.ny(), s.nz());
-        vc.addVertex(mat, p10[0], p10[1], p10[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                .setUv(qu1, qv0).setOverlay(0).setLight(15728880).setNormal(s.nx(), s.ny(), s.nz());
-        vc.addVertex(mat, p11[0], p11[1], p11[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                .setUv(qu1, qv1).setOverlay(0).setLight(15728880).setNormal(s.nx(), s.ny(), s.nz());
-        vc.addVertex(mat, p01[0], p01[1], p01[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                .setUv(qu0, qv1).setOverlay(0).setLight(15728880).setNormal(s.nx(), s.ny(), s.nz());
+        pipesnphysics$putFluidVertex(vc, mat, p00[0], p00[1], p00[2], s, qu0, qv0, s.nx(), s.ny(), s.nz());
+        pipesnphysics$putFluidVertex(vc, mat, p10[0], p10[1], p10[2], s, qu1, qv0, s.nx(), s.ny(), s.nz());
+        pipesnphysics$putFluidVertex(vc, mat, p11[0], p11[1], p11[2], s, qu1, qv1, s.nx(), s.ny(), s.nz());
+        pipesnphysics$putFluidVertex(vc, mat, p01[0], p01[1], p01[2], s, qu0, qv1, s.nx(), s.ny(), s.nz());
     }
 
     /**
@@ -960,14 +990,14 @@ public class FluidTankRendererMixin {
             float[] aUV = clippedUVs.get(ti), bUV = clippedUVs.get(ti + 1);
             float[] v1 = flip ? b : a,    v2 = flip ? a : b;
             float[] uv1 = flip ? bUV : aUV, uv2 = flip ? aUV : bUV;
-            vc.addVertex(mat, first[0], first[1], first[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                    .setUv(firstUV[0], firstUV[1]).setOverlay(0).setLight(15728880).setNormal(s.nx(), s.ny(), s.nz());
-            vc.addVertex(mat, v1[0], v1[1], v1[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                    .setUv(uv1[0], uv1[1]).setOverlay(0).setLight(15728880).setNormal(s.nx(), s.ny(), s.nz());
-            vc.addVertex(mat, v2[0], v2[1], v2[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                    .setUv(uv2[0], uv2[1]).setOverlay(0).setLight(15728880).setNormal(s.nx(), s.ny(), s.nz());
-            vc.addVertex(mat, v2[0], v2[1], v2[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                    .setUv(uv2[0], uv2[1]).setOverlay(0).setLight(15728880).setNormal(s.nx(), s.ny(), s.nz());
+            pipesnphysics$putFluidVertex(vc, mat, first[0], first[1], first[2], s,
+                    firstUV[0], firstUV[1], s.nx(), s.ny(), s.nz());
+            pipesnphysics$putFluidVertex(vc, mat, v1[0], v1[1], v1[2], s,
+                    uv1[0], uv1[1], s.nx(), s.ny(), s.nz());
+            pipesnphysics$putFluidVertex(vc, mat, v2[0], v2[1], v2[2], s,
+                    uv2[0], uv2[1], s.nx(), s.ny(), s.nz());
+            pipesnphysics$putFluidVertex(vc, mat, v2[0], v2[1], v2[2], s,
+                    uv2[0], uv2[1], s.nx(), s.ny(), s.nz());
         }
     }
 
@@ -1065,9 +1095,8 @@ public class FluidTankRendererMixin {
                     uvs = new float[][]{{quA, qvTA}, {quA, qvBot}, {quB, qvBot}, {quB, qvTB}};
                 }
                 for (int vi = 0; vi < 4; vi++) {
-                    vc.addVertex(mat, verts[vi][0], verts[vi][1], verts[vi][2])
-                            .setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                            .setUv(uvs[vi][0], uvs[vi][1]).setOverlay(0).setLight(light).setNormal(0, 1, 0);
+                    pipesnphysics$putFluidVertex(vc, mat, verts[vi][0], verts[vi][1], verts[vi][2], s,
+                            uvs[vi][0], uvs[vi][1], 0, 1, 0);
                 }
             }
         }
@@ -1122,8 +1151,7 @@ public class FluidTankRendererMixin {
                     for (float[] p : new float[][]{first, va, vb, vb}) {
                         float u = Mth.lerp(Mth.clamp((p[uAx] - mins[uAx]) / uRange, 0, 1), s.su0(), s.su1());
                         float v = Mth.lerp(Mth.clamp((p[vAx] - mins[vAx]) / vRange, 0, 1), s.sv0(), s.sv1());
-                        vc.addVertex(mat, p[0], p[1], p[2]).setColor(s.cr(), s.cg(), s.cb(), s.ca())
-                                .setUv(u, v).setOverlay(0).setLight(light).setNormal(0, 1, 0);
+                        pipesnphysics$putFluidVertex(vc, mat, p[0], p[1], p[2], s, u, v, fn[0], fn[1], fn[2]);
                     }
                 }
             }
