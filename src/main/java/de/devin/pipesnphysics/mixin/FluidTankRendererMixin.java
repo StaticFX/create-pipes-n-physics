@@ -522,9 +522,12 @@ public class FluidTankRendererMixin {
         if (!enabled || (lastTick != null && now - lastTick < 50)) return waveCur;
         WAVE_TICK.put(key, now);
 
-        // Derive wave parameters from fluid viscosity (water=1000, lava=6000)
+        // Derive wave parameters from fluid viscosity (water=1000, lava=6000).
+        // Clamp the lower bound: some modded fluids report viscosity 0 (e.g. JNE's
+        // ectoplasm), which would make speed/c2 infinite and fill the wave grid with
+        // NaN, rendering nothing. 0.5 also keeps the wave equation stable (c² < 1).
         int viscosity = fluidStack.getFluid().getFluidType().getViscosity();
-        float viscRatio = viscosity / 1000f;   // 1.0 for water, 6.0 for lava
+        float viscRatio = Math.max(0.5f, viscosity / 1000f);   // 1.0 for water, 6.0 for lava
         float speed = 0.4f / viscRatio;         // wave propagation speed
         float damp = Mth.clamp(1.0f - 0.06f / viscRatio, 0.85f, 0.99f); // energy loss per step
         float c2 = speed * speed;               // squared speed for wave equation
@@ -717,7 +720,9 @@ public class FluidTankRendererMixin {
         // Water (viscRatio=1) → 0.06, Lava (viscRatio=6) → 0.025, Honey → even less
         float maxAmplitude = 0.06f / (float) Math.sqrt(viscRatio);
         for (int i = 0; i < waveNext.length; i++) {
-            waveNext[i] = Mth.clamp(waveNext[i], -maxAmplitude, maxAmplitude);
+            float w = waveNext[i];
+            // NaN would propagate forever through the wave equation; reset to flat
+            waveNext[i] = Float.isNaN(w) ? 0 : Mth.clamp(w, -maxAmplitude, maxAmplitude);
         }
 
         WAVE_PREV.put(key, waveCur);
