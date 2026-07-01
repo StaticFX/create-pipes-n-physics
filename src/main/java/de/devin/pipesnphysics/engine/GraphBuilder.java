@@ -179,7 +179,9 @@ public final class GraphBuilder {
 
     private static boolean isPipeLike(Level level, BlockPos pos) {
         if (!level.isLoaded(pos)) return false;
-        return FluidPropagator.getPipe(level, pos) != null || isConduit(level, pos);
+        BlockState state = level.getBlockState(pos);
+        return FluidPropagator.getPipe(level, pos) != null || isConduit(level, pos)
+                || isPumpBlock(state);
     }
 
     /** BFS state. */
@@ -204,7 +206,9 @@ public final class GraphBuilder {
 
             FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cur);
             if (pipe == null) {
-                if (isConduit(level, cur)) discoverConduit(level, cur, d, frontier);
+                BlockState curState = level.getBlockState(cur);
+                if (isPumpBlock(curState)) discoverPump(level, cur, d, frontier);
+                else if (isConduit(level, cur)) discoverConduit(level, cur, d, frontier);
                 continue;
             }
 
@@ -277,6 +281,49 @@ public final class GraphBuilder {
         }
 
         return d;
+    }
+
+    /**
+     * Explore a pump that has no Create {@link FluidTransportBehaviour} (e.g. Create: Fluid's
+     * centrifugal pump). Without this, the pump can be queued from an adjacent pipe but is
+     * dropped on visit before its other port is scanned.
+     */
+    private static void discoverPump(Level level, BlockPos cur, Discovery d, Queue<BlockPos> frontier) {
+        d.pumps.add(cur);
+        List<BlockPos> conns = new ArrayList<>();
+        for (Direction face : Direction.values()) {
+            BlockPos neighbor = cur.relative(face);
+            if (!level.isLoaded(neighbor)) continue;
+            BlockState nState = level.getBlockState(neighbor);
+
+            if (isPumpBlock(nState)) {
+                d.pumps.add(neighbor.immutable());
+                conns.add(neighbor.immutable());
+                frontier.add(neighbor.immutable());
+                continue;
+            }
+
+            var handler = level.getCapability(
+                    Capabilities.FluidHandler.BLOCK, neighbor, face.getOpposite());
+            if (handler != null && !VanillaFluidTargets.canProvideFluidWithoutCapability(nState)) {
+                d.handlers.add(neighbor.immutable());
+                conns.add(neighbor.immutable());
+                if (isConduit(level, neighbor)) frontier.add(neighbor.immutable());
+                continue;
+            }
+
+            if (FluidPropagator.getPipe(level, neighbor) != null) {
+                conns.add(neighbor.immutable());
+                frontier.add(neighbor.immutable());
+                continue;
+            }
+
+            if (FluidPropagator.isOpenEnd(level, cur, face)) {
+                d.openEnds.putIfAbsent(neighbor.immutable(), face.getOpposite());
+                conns.add(neighbor.immutable());
+            }
+        }
+        d.connections.put(cur, conns);
     }
 
     /**
