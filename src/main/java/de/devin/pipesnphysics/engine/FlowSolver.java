@@ -3,6 +3,7 @@ package de.devin.pipesnphysics.engine;
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.compat.CreateFluidCompat;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver.BranchSpec;
@@ -202,7 +203,9 @@ public final class FlowSolver {
         for (Node pump : graph.pumps()) {
             float speed = level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
                     ? kinetic.getSpeed() : 0;
-            double head = Math.abs(speed) * headPerRpm;
+            double mult = CreateFluidCompat.isCentrifugalPump(level, pump.pos())
+                    ? CreateFluidCompat.PERFORMANCE_MULTIPLIER : 1.0;
+            double head = Math.abs(speed) * headPerRpm * mult;
             pumps.put(pump.index(), new PumpState(isPumpRunning(level, pump), head, pump.pumpFacing(),
                     flowPerRpm / headPerRpm));
         }
@@ -444,7 +447,7 @@ public final class FlowSolver {
                 driveNode = driveNode < 0 ? nodeIndex : -2;
                 driveHead = pump.head();
                 driveInternalG = pump.internalConductance();
-            } else if (toward.equals(pumpNode.pos().relative(pump.pushSide().getOpposite()))) {
+            } else if (toward.equals(pumpNode.pos().relative(pumpNode.effectivePullSide()))) {
                 allowedSign = combineSign(allowedSign, -outSign);
             } else {
                 blockedEdges.add(edge.index());

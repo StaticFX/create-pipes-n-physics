@@ -1,7 +1,6 @@
 package de.devin.pipesnphysics.mixin;
 
 import com.simibubi.create.content.fluids.pump.PumpBlock;
-import com.simibubi.create.content.fluids.pump.PumpBlockEntity;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.client.GoggleText;
@@ -11,6 +10,7 @@ import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import net.createmod.catnip.lang.LangBuilder;
 import net.createmod.catnip.lang.LangNumberFormat;
 import net.minecraft.ChatFormatting;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.Level;
@@ -30,25 +30,28 @@ import java.util.List;
  * current throughput against the pump-curve cap, and a boiler-style load bar.
  * When the engine is disabled in config, Create's logic runs untouched.
  */
-@Mixin(value = PumpBlockEntity.class, remap = false)
+@Mixin(targets = "com.simibubi.create.content.fluids.pump.PumpBlockEntity", remap = false)
 public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
+    private PumpBlockEntityMixin() {
+        super(null, null, null);
+    }
+
     @Unique
     private Direction pipesnphysics$lastFacing = null;
 
-    private PumpBlockEntityMixin() { super(null, null, null); }
-
     @Inject(method = "tick", at = @At("HEAD"))
     private void pipesnphysics$detectFlip(CallbackInfo ci) {
-        Level world = level;
+        Level world = getLevel();
         if (world == null || world.isClientSide()) return;
         if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
         BlockState state = getBlockState();
         if (!(state.getBlock() instanceof PumpBlock)) return;
+        BlockPos pos = getBlockPos();
         Direction front = state.getValue(PumpBlock.FACING);
         if (pipesnphysics$lastFacing != null && pipesnphysics$lastFacing != front) {
-            EngineTickHandler.markChanged(world, worldPosition);
-            EngineTickHandler.markChanged(world, worldPosition.relative(front));
-            EngineTickHandler.markChanged(world, worldPosition.relative(front.getOpposite()));
+            EngineTickHandler.markChanged(world, pos);
+            EngineTickHandler.markChanged(world, pos.relative(front));
+            EngineTickHandler.markChanged(world, pos.relative(front.getOpposite()));
         }
         pipesnphysics$lastFacing = front;
     }
@@ -56,27 +59,28 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity {
     @Inject(method = "distributePressureTo", at = @At("HEAD"), cancellable = true)
     private void pipesnphysics$replacePressureDistribution(Direction side, CallbackInfo ci) {
         if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
-        PumpBlockEntity self = (PumpBlockEntity) (Object) this;
-        if (self.getLevel() != null && !self.getLevel().isClientSide()) {
-            EngineTickHandler.markChanged(self.getLevel(), self.getBlockPos().relative(side));
+        Level world = getLevel();
+        if (world != null && !world.isClientSide()) {
+            EngineTickHandler.markChanged(world, getBlockPos().relative(side));
         }
         ci.cancel();
     }
 
     @Override
     public boolean addToGoggleTooltip(List<Component> tooltip, boolean isPlayerSneaking) {
-        boolean base = super.addToGoggleTooltip(tooltip, isPlayerSneaking);
-        if (!PipesNPhysicsConfig.SHOW_PIPE_GOGGLE_INFO.get()) return base;
-        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return base;
-        Level world = level;
-        if (world == null || !world.isClientSide()) return base;
+        boolean result = super.addToGoggleTooltip(tooltip, isPlayerSneaking);
+        if (!PipesNPhysicsConfig.SHOW_PIPE_GOGGLE_INFO.get()) return result;
+        if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return result;
+        Level world = getLevel();
+        if (world == null || !world.isClientSide()) return result;
 
         float speed = Math.abs(getSpeed());
-        if (speed <= 0.01f) return base;
+        if (speed <= 0.01f) return result;
 
+        BlockPos pos = getBlockPos();
         long now = world.getGameTime();
-        PipeStatusClient.requestIfStale(worldPosition, now);
-        PipeStatusPayload data = PipeStatusClient.current(worldPosition, now);
+        PipeStatusClient.requestIfStale(pos, now);
+        PipeStatusPayload data = PipeStatusClient.current(pos, now);
 
         GoggleText.lang("gui.goggles.pump_stats")
                 .style(ChatFormatting.WHITE)

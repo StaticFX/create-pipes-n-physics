@@ -5,6 +5,7 @@ import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import de.devin.pipesnphysics.PipesNPhysics;
+import de.devin.pipesnphysics.compat.CreateFluidCompat;
 import de.devin.pipesnphysics.compat.SableCompat;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -95,12 +96,19 @@ public final class GraphBuilder {
         for (BlockPos pos : nodePositions) {
             Node.Kind kind;
             Direction facing = null;
+            Direction pullSide = null;
             Direction openFace = null;
             if (d.pumps.contains(pos)) {
                 kind = Node.Kind.PUMP;
                 BlockState bs = level.getBlockState(pos);
                 if (bs.getBlock() instanceof PumpBlock) {
                     facing = bs.getValue(PumpBlock.FACING);
+                } else if (CreateFluidCompat.isCentrifugalPump(bs)) {
+                    CreateFluidCompat.PumpPorts ports = CreateFluidCompat.getPumpPorts(level, pos, bs);
+                    if (ports != null) {
+                        facing = ports.push();
+                        pullSide = ports.pull();
+                    }
                 }
             } else if (d.handlers.contains(pos)) {
                 kind = Node.Kind.HANDLER;
@@ -111,7 +119,7 @@ public final class GraphBuilder {
                 kind = Node.Kind.JUNCTION;
             }
             int idx = nodes.size();
-            nodes.add(new Node(idx, pos, kind, SableCompat.getWorldY(level, pos), facing, openFace));
+            nodes.add(new Node(idx, pos, kind, SableCompat.getWorldY(level, pos), facing, pullSide, openFace));
             indexOf.put(pos, idx);
         }
 
@@ -171,7 +179,9 @@ public final class GraphBuilder {
 
     private static boolean isPipeLike(Level level, BlockPos pos) {
         if (!level.isLoaded(pos)) return false;
-        return FluidPropagator.getPipe(level, pos) != null || isConduit(level, pos);
+        BlockState state = level.getBlockState(pos);
+        return FluidPropagator.getPipe(level, pos) != null || isConduit(level, pos)
+                || isPumpBlock(state);
     }
 
     /** BFS state. */
@@ -196,12 +206,14 @@ public final class GraphBuilder {
 
             FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cur);
             if (pipe == null) {
-                if (isConduit(level, cur)) discoverConduit(level, cur, d, frontier);
+                BlockState curState = level.getBlockState(cur);
+                if (isPumpBlock(curState)) discoverPump(level, cur, d, frontier);
+                else if (isConduit(level, cur)) discoverConduit(level, cur, d, frontier);
                 continue;
             }
 
             BlockState curState = level.getBlockState(cur);
-            boolean isPump = curState.getBlock() instanceof PumpBlock;
+            boolean isPump = isPumpBlock(curState);
             if (isPump) d.pumps.add(cur);
             else d.pipes.add(cur);
 
@@ -211,7 +223,8 @@ public final class GraphBuilder {
                 if (!level.isLoaded(neighbor)) continue;
                 BlockState nState = level.getBlockState(neighbor);
 
-                if (nState.getBlock() instanceof PumpBlock) {
+                if (isPumpBlock(nState)) {
+                    if (!isPumpPortFace(level, neighbor, nState, face.getOpposite())) continue;
                     d.pumps.add(neighbor.immutable());
                     conns.add(neighbor.immutable());
                     frontier.add(neighbor.immutable());
@@ -272,6 +285,51 @@ public final class GraphBuilder {
     }
 
     /**
+     * Explore a pump that has no Create {@link FluidTransportBehaviour} (e.g. Create: Fluid's
+     * centrifugal pump). Without this, the pump can be queued from an adjacent pipe but is
+     * dropped on visit before its other port is scanned.
+     */
+    private static void discoverPump(Level level, BlockPos cur, Discovery d, Queue<BlockPos> frontier) {
+        d.pumps.add(cur);
+        BlockState curState = level.getBlockState(cur);
+        List<BlockPos> conns = new ArrayList<>();
+        for (Direction face : pumpPortFaces(level, cur, curState)) {
+            BlockPos neighbor = cur.relative(face);
+            if (!level.isLoaded(neighbor)) continue;
+            BlockState nState = level.getBlockState(neighbor);
+
+            if (isPumpBlock(nState)) {
+                if (!isPumpPortFace(level, neighbor, nState, face.getOpposite())) continue;
+                d.pumps.add(neighbor.immutable());
+                conns.add(neighbor.immutable());
+                frontier.add(neighbor.immutable());
+                continue;
+            }
+
+            var handler = level.getCapability(
+                    Capabilities.FluidHandler.BLOCK, neighbor, face.getOpposite());
+            if (handler != null && !VanillaFluidTargets.canProvideFluidWithoutCapability(nState)) {
+                d.handlers.add(neighbor.immutable());
+                conns.add(neighbor.immutable());
+                if (isConduit(level, neighbor)) frontier.add(neighbor.immutable());
+                continue;
+            }
+
+            if (FluidPropagator.getPipe(level, neighbor) != null) {
+                conns.add(neighbor.immutable());
+                frontier.add(neighbor.immutable());
+                continue;
+            }
+
+            if (FluidPropagator.isOpenEnd(level, cur, face)) {
+                d.openEnds.putIfAbsent(neighbor.immutable(), face.getOpposite());
+                conns.add(neighbor.immutable());
+            }
+        }
+        d.connections.put(cur, conns);
+    }
+
+    /**
      * Explore a fluid-conduit block: a fluid-holding node the BFS traverses THROUGH,
      * linking it to adjacent pumps, pipes, other conduits, and plain handlers on every
      * face — so a row of conduits (e.g. chained liquid burners) becomes one connected
@@ -284,7 +342,9 @@ public final class GraphBuilder {
             BlockPos neighbor = cur.relative(face);
             if (!level.isLoaded(neighbor)) continue;
 
-            if (level.getBlockState(neighbor).getBlock() instanceof PumpBlock) {
+            BlockState nState = level.getBlockState(neighbor);
+            if (isPumpBlock(nState)) {
+                if (!isPumpPortFace(level, neighbor, nState, face.getOpposite())) continue;
                 d.pumps.add(neighbor.immutable());
                 conns.add(neighbor.immutable());
                 frontier.add(neighbor.immutable());
@@ -302,6 +362,26 @@ public final class GraphBuilder {
             }
         }
         d.connections.put(cur, conns);
+    }
+
+    private static boolean isPumpBlock(BlockState state) {
+        return state.getBlock() instanceof PumpBlock || CreateFluidCompat.isCentrifugalPump(state);
+    }
+
+    private static List<Direction> pumpPortFaces(Level level, BlockPos pos, BlockState state) {
+        if (state.getBlock() instanceof PumpBlock) {
+            Direction facing = state.getValue(PumpBlock.FACING);
+            return List.of(facing, facing.getOpposite());
+        }
+        if (CreateFluidCompat.isCentrifugalPump(state)) {
+            CreateFluidCompat.PumpPorts ports = CreateFluidCompat.getPumpPorts(level, pos, state);
+            if (ports != null) return List.of(ports.push(), ports.pull());
+        }
+        return List.of();
+    }
+
+    private static boolean isPumpPortFace(Level level, BlockPos pos, BlockState state, Direction face) {
+        return pumpPortFaces(level, pos, state).contains(face);
     }
 
     /**
