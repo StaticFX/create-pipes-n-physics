@@ -19,8 +19,10 @@ import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.inventory.InventoryMenu;
+import net.neoforged.neoforge.client.NeoForgeRenderTypes;
 import net.neoforged.neoforge.client.extensions.common.IClientFluidTypeExtensions;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
@@ -205,7 +207,8 @@ public class FluidTankRendererMixin {
 
         Matrix4f mat = ms.last().pose();
 
-        VertexConsumer qvc = buffer.getBuffer(RenderType.translucent());
+        // Fabulous! uses shader transparency; block-layer translucency is invisible there.
+        VertexConsumer qvc = buffer.getBuffer(pipesnphysics$fluidRenderType());
 
         boolean hideTexture = PipesNPhysicsConfig.FLUID_HIDE_TEXTURE.get();
         if (!hideTexture) {
@@ -868,6 +871,19 @@ public class FluidTankRendererMixin {
                 Mth.clamp(p[1], mins[1], maxs[1]),
                 Mth.clamp(p[2], mins[2], maxs[2])
         };
+    }
+
+    /**
+     * Block-atlas fluid quads use the chunk translucent layer in Fast/Fancy and the
+     * entity translucent layer in Fabulous! (shader transparency).
+     */
+    @Unique
+    private static RenderType pipesnphysics$fluidRenderType() {
+        ResourceLocation atlas = InventoryMenu.BLOCK_ATLAS;
+        if (Minecraft.useShaderTransparency()) {
+            return NeoForgeRenderTypes.getItemLayeredTranslucent(atlas);
+        }
+        return RenderType.translucent();
     }
 
     /** Emits a single-sided quad (4 vertices). Winding is caller's responsibility. */
