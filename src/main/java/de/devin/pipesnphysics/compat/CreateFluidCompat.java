@@ -25,7 +25,7 @@ public final class CreateFluidCompat {
             Class.forName("com.adonis.fluid.block.CentrifugalPump.CentrifugalPumpBlock", false,
                     CreateFluidCompat.class.getClassLoader());
             provider = new ReflectiveProvider();
-        } catch (ReflectiveOperationException e) {
+        } catch (ReflectiveOperationException | LinkageError e) {
             provider = NoOpProvider.INSTANCE;
         }
         PROVIDER = provider;

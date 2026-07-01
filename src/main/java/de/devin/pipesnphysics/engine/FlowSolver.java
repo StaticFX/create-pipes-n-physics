@@ -207,7 +207,7 @@ public final class FlowSolver {
                     ? CreateFluidCompat.PERFORMANCE_MULTIPLIER : 1.0;
             double head = Math.abs(speed) * headPerRpm * mult;
             pumps.put(pump.index(), new PumpState(isPumpRunning(level, pump), head, pump.pumpFacing(),
-                    flowPerRpm * mult / headPerRpm));
+                    flowPerRpm / headPerRpm));
         }
         return pumps;
     }
