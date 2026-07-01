@@ -4,6 +4,7 @@ import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.PipeConnection;
 import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
+import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.Edge;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.Graph;
@@ -14,6 +15,7 @@ import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
+import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.fluids.FluidStack;
 
 import java.util.ArrayList;
@@ -56,7 +58,73 @@ public final class CreatePipeRendering {
     /** Waterline deadband: a cell at the surface stays full instead of flickering. */
     private static final double SUBMERSION_EPS = 0.05;
 
+    /**
+     * In-pipe LEVEL render (experimental spike, {@code EXPERIMENTAL_PIPE_LEVEL_RENDER}). When on, a
+     * wet cell's solved WATERLINE (and, when flowing, the FLOW DIRECTION) is stamped onto the pipe's
+     * {@code FluidTransportBehaviour} as a dedicated, client-synced-but-not-saved {@link PipeLevelData}
+     * int: {@code 0} = not rendered; else {@code (flowDir+1)·}{@link #DIR_STRIDE}{@code + frac·}{@link
+     * #LEVEL_SCALE}{@code + 1}, where flowDir is the downstream {@code Direction.get3DDataValue} (0..5)
+     * or -1 when resting. {@code GlassPipeVisualMixin}/the BER mixin skip a cell whose behaviour holds
+     * level data (so Create draws nothing) and {@code client.PipeLevelRenderer} draws the partial fill
+     * instead, scrolling the flowing texture along the encoded direction. (Earlier this rode the flow's
+     * FluidStack amount, which risked stock Create reading it as a real volume — see {@link PipeLevelData}.)
+     */
+    private static final int LEVEL_SCALE = 1_000;
+    private static final int DIR_STRIDE = 2_000; // > LEVEL_SCALE, so the fraction never overflows the direction band
+
+    /** Create's {@code FluidTankRenderer} cap + puddle insets — used to match the pipe waterline to the tank's RENDERED surface. */
+    private static final double TANK_CAP = 1 / 4d;
+    private static final double TANK_PUDDLE = 1 / 16d;
+
     private CreatePipeRendering() {}
+
+    /**
+     * Map a node's hydraulic head to the surface Create actually RENDERS for a fluid tank there, so
+     * the pipe waterline lines up with the tank's visible fluid. Create's {@code FluidTankRenderer}
+     * insets the fluid by a top cap and a bottom puddle, so a tank's rendered surface is
+     * {@code controllerBottom + (cap+puddle) + fill·(height − 2·cap − puddle)} — NOT the true head
+     * ({@code controllerBottom + fill·height}); the two diverge most for a 1-block tank. Returns the
+     * head unchanged for anything that is not a fluid tank (a pump, open end, basin, machine).
+     */
+    public static double displaySurface(Level level, BlockPos pos, double head) {
+        if (!(level.getBlockEntity(pos) instanceof FluidTankBlockEntity tank)) return head;
+        FluidTankBlockEntity controller = tank.getControllerBE();
+        if (controller == null) return head;
+        int height = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
+        double controllerBottom = SableCompat.getWorldY(level, controller.getBlockPos()) - 0.5;
+        double fill = Math.clamp((head - controllerBottom) / height, 0.0, 1.0);
+        return controllerBottom + (TANK_CAP + TANK_PUDDLE) + fill * (height - 2 * TANK_CAP - TANK_PUDDLE);
+    }
+
+    /**
+     * Encode a 0..1 cell-fill fraction + flow direction as a {@link PipeLevelData} int (always &gt;= 1,
+     * so 0 stays reserved for "not rendered"). {@code flowDir} is the downstream {@code
+     * Direction.get3DDataValue} (0..5) for a flowing cell, or -1 for a resting cell (still fill).
+     */
+    public static int encodeLevel(double fraction, int flowDir) {
+        int f = (int) Math.round(Math.clamp(fraction, 0.0, 1.0) * LEVEL_SCALE);
+        return (flowDir + 1) * DIR_STRIDE + f + 1;
+    }
+
+    /** The 0..1 cell-fill fraction encoded in a {@link PipeLevelData} value. */
+    public static float levelFraction(int data) {
+        return Math.clamp(((data - 1) % DIR_STRIDE) / (float) LEVEL_SCALE, 0f, 1f);
+    }
+
+    /** The downstream {@code Direction.get3DDataValue} of a FLOWING cell, or -1 if resting. */
+    public static int levelFlowDir(int data) {
+        return (data - 1) / DIR_STRIDE - 1;
+    }
+
+    /**
+     * Whether Create's own pipe renderers should SKIP drawing this cell because the level renderer owns
+     * it (flag on + the pipe behaviour holds level data). Shared by both pipe-render mixins.
+     */
+    public static boolean hidesFromCreate(FluidTransportBehaviour pipe) {
+        return pipe instanceof PipeLevelData data
+                && data.pipesnphysics$getLevelData() != 0
+                && PipesNPhysicsConfig.EXPERIMENTAL_PIPE_LEVEL_RENDER.get();
+    }
 
     /**
      * Reflect one solve's per-edge fluid into Create's pipe Flow objects. Returns
@@ -65,7 +133,31 @@ public final class CreatePipeRendering {
      * freezing the instant flow stops.
      */
     public static boolean apply(Level level, Graph graph, Solution solution) {
+        return apply(level, graph, solution, levelRenderEnabled());
+    }
+
+    /**
+     * Whether the in-pipe LEVEL render spike is on. The toggle is a CLIENT config (a single global
+     * file, trivially flippable), but the waterline is encoded here on the server side; in
+     * singleplayer the integrated server shares the JVM with the client and reads it directly. Guarded
+     * on a client being present so a dedicated server never touches the unloaded client spec — the
+     * spike is singleplayer-only for now.
+     */
+    public static boolean levelRenderEnabled() {
+        return FMLEnvironment.dist.isClient() && PipesNPhysicsConfig.EXPERIMENTAL_PIPE_LEVEL_RENDER.get();
+    }
+
+    /**
+     * As {@link #apply(Level, Graph, Solution)} but with the in-pipe level-render flag passed
+     * explicitly, so a GameTest can exercise the waterline encoding without mutating live config.
+     */
+    public static boolean apply(Level level, Graph graph, Solution solution, boolean levelRender) {
         Set<BlockPos> filled = new HashSet<>();
+        // Standing fluid the travelling front hasn't reached yet: kept visible but rendered STILL (no
+        // scroll) until the front arrives and it joins the flow. Only the level renderer reads it, so
+        // it stays an immutable empty when the flag is off — the default, and always on a dedicated
+        // server — and is only mutated on the levelRender-gated paths below.
+        Set<BlockPos> standing = levelRender ? new HashSet<>() : Set.of();
         boolean draining = false;
 
         for (Edge edge : graph.edges()) {
@@ -86,6 +178,12 @@ public final class CreatePipeRendering {
             if (!flowing.isEmpty() && flow.direction() != EdgeFlow.Direction.NONE) {
                 chargeEdge(level, graph, edge, flowing,
                         flow.direction() == EdgeFlow.Direction.A_TO_B, flow.mbPerTick(), filled);
+                // When a run starts flowing, the travelling front charges from the upstream end — but
+                // STANDING fluid already sits at the lower (downstream) end. Preserve those settled
+                // cells so the sweep doesn't clear them ahead of the front (which despawns the fluid
+                // and makes the run visibly re-crawl). Only reservoir-supported cells are kept, so a
+                // genuinely empty run still fills as a clean front. Level-render only.
+                if (levelRender) preserveStandingFluid(level, graph, edge, solution, filled, standing);
                 continue;
             }
 
@@ -104,6 +202,17 @@ public final class CreatePipeRendering {
             FluidStack resting = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
             Double headA = solution.nodeHeads().get(edge.a());
             Double headB = solution.nodeHeads().get(edge.b());
+            // A gas head is a pressure value, not an elevation, so the liquid tank-surface anchor and
+            // the min-flatten below are meaningless for it (restEdge branches on gas itself). Skip
+            // both for gas, matching stampWaterlines/preserveStandingFluid.
+            boolean gas = !resting.isEmpty() && resting.getFluid().getFluidType().isLighterThanAir();
+            // With the level renderer on, anchor a tank node's head to the surface Create RENDERS
+            // (its cap/puddle inset) so the seeded resting cells reach the tank's VISIBLE fluid, not
+            // the lower true head. Off → raw heads, so the binary render is byte-identical to stock.
+            if (levelRender && !gas) {
+                if (headA != null) headA = displaySurface(level, graph.node(edge.a()).pos(), headA);
+                if (headB != null) headB = displaySurface(level, graph.node(edge.b()).pos(), headB);
+            }
             // A closed-gate endpoint (a shut valve) is a wall with no head of its own. A SETTLING
             // run touching it takes the opposite endpoint's head so it settles to that reservoir —
             // but ONLY if the opposite end is a real reservoir (a HANDLER). An OPEN END is air / a
@@ -114,6 +223,15 @@ public final class CreatePipeRendering {
                 headA = headB;
             } else if (graph.node(edge.b()).isClosedGate() && graph.node(edge.a()).isHandler() && headA != null) {
                 headB = headA;
+            }
+            // LEVEL render: a RESTING run is flat at the settled water level (the LOWER surface), so a
+            // higher stranded/empty endpoint — whose head is just its floor — can't pull a phantom
+            // waterline up the run toward it. (Interpolating between the two node heads invents water
+            // up a riser to an empty tank.) Flowing runs keep their gradient (handled in chargeEdge).
+            if (levelRender && !gas && headA != null && headB != null) {
+                double waterline = Math.min(headA, headB);
+                headA = waterline;
+                headB = waterline;
             }
             if (!resting.isEmpty() && headA != null && headB != null) {
                 draining |= restEdge(level, graph, edge, resting, headA, headB, filled,
@@ -144,10 +262,189 @@ public final class CreatePipeRendering {
             if (node.isClosedGate()) fillGateCell(level, graph, node, solution, filled);
         }
 
+        // LEVEL render (spike): stamp every wet cell's solved waterline onto its pipe behaviour (see
+        // PipeLevelData), so the custom renderer can draw a partial fill. One pass over all wet cells —
+        // resting, FLOWING, held, backed-up alike — so the waterline shows whether or not fluid moves.
+        Set<BlockPos> levelCells = levelRender ? new HashSet<>() : Set.of();
+        if (levelRender) stampWaterlines(level, graph, solution, standing, levelCells);
+
         for (BlockPos cell : graph.coverage()) {
-            if (!filled.contains(cell)) clearCell(level, cell);
+            // Sweep each covered cell in ONE pipe lookup: drop a flow orphaned by an edit (any cell we
+            // did not fill), AND clear a stale render field on a cell we did not stamp this tick
+            // (drained, gas, or edited) so no stale waterline lingers and Create resumes drawing it.
+            boolean dropFlow = !filled.contains(cell);
+            boolean resetLevel = levelRender && !levelCells.contains(cell);
+            if (dropFlow || resetLevel) sweepCell(level, cell, dropFlow, resetLevel);
         }
         return draining;
+    }
+
+    /** Drop a covered cell's orphaned flow and/or stale {@link PipeLevelData}, resolving the pipe once. */
+    private static void sweepCell(Level level, BlockPos cell, boolean dropFlow, boolean resetLevel) {
+        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+        if (pipe == null) return;
+        boolean changed = false;
+        if (dropFlow) {
+            for (Direction dir : Direction.values()) changed |= clearFlow(pipe.getConnection(dir));
+        }
+        if (resetLevel && pipe instanceof PipeLevelData data && data.pipesnphysics$getLevelData() != 0) {
+            data.pipesnphysics$setLevelData(0);
+            changed = true;
+        }
+        if (changed) pipe.blockEntity.notifyUpdate();
+    }
+
+    /**
+     * Keep the SETTLED standing fluid of a just-started flow from being swept before the travelling
+     * front reaches it. Preserves only cells submerged below the run's lower (min) surface — i.e.
+     * reservoir-supported standing fluid — so a genuinely empty run still fills as a clean front and
+     * transient leftover above the surface is still swept. Mirrors the apply/stampWaterlines surface
+     * mapping (tank-render anchor + flat min). Gas is skipped (its waterline semantics differ).
+     */
+    private static void preserveStandingFluid(Level level, Graph graph, Edge edge, Solution solution,
+                                              Set<BlockPos> filled, Set<BlockPos> standing) {
+        Double rawA = solution.nodeHeads().get(edge.a());
+        Double rawB = solution.nodeHeads().get(edge.b());
+        if (rawA == null || rawB == null) return;
+        FluidStack rep = solution.edgeFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+        if (!rep.isEmpty() && rep.getFluid().getFluidType().isLighterThanAir()) return;
+        double waterline = Math.min(displaySurface(level, graph.node(edge.a()).pos(), rawA),
+                displaySurface(level, graph.node(edge.b()).pos(), rawB));
+        List<BlockPos> pipes = edge.pipes();
+        for (int i = 0; i < pipes.size(); i++) {
+            BlockPos cell = pipes.get(i);
+            // The front already reached this cell (chargeEdge added it) → it's flowing, leave it.
+            if (filled.contains(cell)) continue;
+            if (!restingCellSubmerged(level, graph, edge, i, waterline, waterline, false)) continue;
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+            if (pipe != null && hasFluid(pipe)) {
+                filled.add(cell);
+                standing.add(cell); // keep it, but render it STILL until the front arrives
+            }
+        }
+    }
+
+    /**
+     * Stamp each wet pipe cell's solved waterline onto its behaviour ({@link PipeLevelData}, encoded by
+     * {@link #encodeLevel}), so {@code client.PipeLevelRenderer} draws the partial fill and the
+     * pipe-render mixins hide Create's binary fill for it. Runs for every edge with display heads, on
+     * whatever cells currently carry fluid — flowing cells included — so the level shows whether or not
+     * fluid moves. Every stamped cell is added to {@code levelCells} so the caller can reset the field
+     * on cells it did NOT stamp. Gas has no waterline (it fills by the mirror test), so a gas edge is
+     * left to Create.
+     */
+    private static void stampWaterlines(Level level, Graph graph, Solution solution,
+                                        Set<BlockPos> standing, Set<BlockPos> levelCells) {
+        for (Edge edge : graph.edges()) {
+            // A SOURCE_DRY stall is phantom flow apply skips entirely (its cells are swept, not
+            // charged), so it must not be stamped either — the classify below would otherwise read it
+            // as backed-up and stamp a full waterline on a run that renders empty by design.
+            if (solution.stalledEdges().contains(edge.index())
+                    && solution.edgeReasons().get(edge.index()) == Solution.Reason.SOURCE_DRY) {
+                continue;
+            }
+            Double rawA = solution.nodeHeads().get(edge.a());
+            Double rawB = solution.nodeHeads().get(edge.b());
+            // A CLOSED_GATE node carries no nodeHeads entry (null); take the opposite reservoir's head
+            // BEFORE the null bail so a shut-valve↔tank resting edge — which apply/restEdge DO fill —
+            // is stamped, not left unmarked (which would leave that one cell rendered by Create).
+            if (graph.node(edge.a()).isClosedGate() && graph.node(edge.b()).isHandler() && rawB != null) rawA = rawB;
+            else if (graph.node(edge.b()).isClosedGate() && graph.node(edge.a()).isHandler() && rawA != null) rawB = rawA;
+            if (rawA == null || rawB == null) continue;
+            // Anchor tank nodes to Create's RENDERED surface (cap/puddle inset), matching apply's
+            // resting seeding, so the encoded waterline meets the tank's visible fluid.
+            double headA = displaySurface(level, graph.node(edge.a()).pos(), rawA);
+            double headB = displaySurface(level, graph.node(edge.b()).pos(), rawB);
+
+            // Match the head flattening restEdge / apply use: a shut gate or an open end has no
+            // surface of its own, so the cell reads the opposite reservoir's head.
+            if (graph.node(edge.a()).isClosedGate() && graph.node(edge.b()).isHandler()) headA = headB;
+            else if (graph.node(edge.b()).isClosedGate() && graph.node(edge.a()).isHandler()) headB = headA;
+            // The idle min uses the DISPLAY surfaces BEFORE the open-end flatten, matching apply (which
+            // mins the display heads first, then lets restEdge handle the open end): a run spilled to a
+            // low open mouth then rests at the MOUTH, not pulled up to the reservoir surface. The
+            // open-end flatten below feeds only the MOVING/backed-up gradient.
+            double restA = headA;
+            double restB = headB;
+            boolean aOpen = graph.node(edge.a()).isOpenEnd();
+            boolean bOpen = graph.node(edge.b()).isOpenEnd();
+            if (aOpen && !bOpen) headA = headB;
+            else if (bOpen && !aOpen) headB = headA;
+
+            FluidStack rep = solution.edgeFluids().getOrDefault(edge.index(),
+                    solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY));
+            if (!rep.isEmpty() && rep.getFluid().getFluidType().isLighterThanAir()) continue;
+            int index = edge.index();
+            EdgeFlow.Direction dir = solution.edgeFlows().get(index).direction();
+            boolean flowFromA = dir == EdgeFlow.Direction.A_TO_B;
+            // An edge MOVES fluid (gets the scrolling flow marker + head gradient) only if it actually
+            // transfers — a pressurized-but-blocked run (stalled SINK_FULL, blocked valve/crest, a
+            // pump too weak / dead-heading a gate) carries a solved DIRECTION but no real flow, so it
+            // must render at REST (flat min waterline, no scroll). Otherwise a backed-up run scrolls
+            // with "no flow but the fluid is moving".
+            // Three no-/with-flow states render differently:
+            //   BACKED-UP — pressurized but blocked (stalled SINK_FULL, a pump too weak / dead-heading
+            //               a gate): the fluid is trapped FULL where it advanced, so render it full
+            //               with NO scroll (it carries a direction but moves nothing).
+            //   MOVING    — genuinely flowing: keep the head gradient + scrolling flow marker.
+            //   IDLE      — settled (incl. a shut valve / broken crest, which drain to a level): flat
+            //               at the LOWER surface, so a higher stranded/empty endpoint can't pull a
+            //               phantom waterline up the run (matches apply). SOURCE_DRY was skipped above.
+            boolean backedUp = solution.stalledEdges().contains(index)
+                    || solution.noHeadEdges().contains(index)
+                    || solution.heldEdges().contains(index);
+            boolean moving = dir != EdgeFlow.Direction.NONE && !backedUp;
+            boolean idle = !moving && !backedUp;
+            if (idle) {
+                double waterline = Math.min(restA, restB);
+                headA = waterline;
+                headB = waterline;
+            }
+
+            List<BlockPos> pipes = edge.pipes();
+            for (int i = 0; i < pipes.size(); i++) {
+                BlockPos cell = pipes.get(i);
+                FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+                if (pipe == null) continue;
+                double frac = (i + 1.0) / (edge.length() + 1);
+                // The downstream Direction the fluid moves toward (for the scrolling texture), or -1
+                // when the run is at rest / backed up. pipes() is ordered a→b, so downstream is the
+                // next cell toward b when flow runs A→B, else toward a.
+                // STANDING fluid the front hasn't reached yet renders STILL (no scroll) until the
+                // front arrives and the cell leaves `standing`, even on a moving edge.
+                int flowDir = -1;
+                if (moving && !standing.contains(cell)) {
+                    BlockPos downstream = flowFromA
+                            ? (i < pipes.size() - 1 ? pipes.get(i + 1) : graph.node(edge.b()).pos())
+                            : (i > 0 ? pipes.get(i - 1) : graph.node(edge.a()).pos());
+                    Direction d = direction(cell, downstream);
+                    if (d != null) flowDir = d.get3DDataValue();
+                }
+                // BACKED-UP cells are full where the fluid reached. IDLE settles to the interpolated
+                // (flat-min) surface and reads DRY above it. A MOVING cell whose interpolated surface
+                // sits BELOW it is a pressurized/climbing pipe (pump riser, primed siphon crest) that
+                // is carrying flow, so it is FULL — not invisible; a moving cell with a free surface
+                // inside it still shows a partial waterline.
+                double interp = headA + (headB - headA) * frac - (SableCompat.getWorldY(level, cell) - 0.5);
+                double cellFrac = backedUp ? 1.0
+                        : moving && interp <= 0 ? 1.0
+                        : interp;
+                // Only a cell whose waterline reaches it (cellFrac > 0) is stamped. A cell ABOVE the
+                // waterline (cellFrac <= 0 — only IDLE runs reach here; backed-up/climbing cells floor
+                // to 1.0) is left UNSTAMPED so Create keeps drawing it: that is the stranded fluid of a
+                // receding hump, which Create drains cell-by-cell (drainDeadEdge). Stamping it hides
+                // Create yet the renderer draws nothing below its own cell, so the hump would blank
+                // instantly instead of receding. Its Flow carries the fluid type; the field the level.
+                if (cellFrac > 0 && hasFluid(pipe) && pipe instanceof PipeLevelData holder) {
+                    levelCells.add(cell);
+                    int data = encodeLevel(cellFrac, flowDir);
+                    if (holder.pipesnphysics$getLevelData() != data) {
+                        holder.pipesnphysics$setLevelData(data);
+                        pipe.blockEntity.notifyUpdate();
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -590,16 +887,6 @@ public final class CreatePipeRendering {
         if (!(conn instanceof PipeConnectionAccessor accessor)) return false;
         Optional<PipeConnection.Flow> flow = accessor.pipesnphysics$getFlow();
         return flow.isPresent() && flow.get().complete;
-    }
-
-    private static void clearCell(Level level, BlockPos cell) {
-        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
-        if (pipe == null) return;
-        boolean changed = false;
-        for (Direction dir : Direction.values()) {
-            changed |= clearFlow(pipe.getConnection(dir));
-        }
-        if (changed) pipe.blockEntity.notifyUpdate();
     }
 
     private static boolean clearFlow(PipeConnection conn) {

@@ -36,6 +36,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.IntValue FLUID_SURFACE_RESOLUTION;
     public static final ModConfigSpec.BooleanValue FLUID_DEBUG_RENDER;
     public static final ModConfigSpec.BooleanValue FLUID_HIDE_TEXTURE;
+    public static final ModConfigSpec.BooleanValue EXPERIMENTAL_PIPE_LEVEL_RENDER;
 
     static {
         ModConfigSpec.Builder server = new ModConfigSpec.Builder();
@@ -141,6 +142,15 @@ public class PipesNPhysicsConfig {
         FLUID_HIDE_TEXTURE = client
                 .comment("Hide fluid textures, showing only debug wireframe.")
                 .define("fluidHideTexture", false);
+        EXPERIMENTAL_PIPE_LEVEL_RENDER = client
+                .comment("EXPERIMENTAL (spike): draw fluid inside pipes at its actual waterline (a partial",
+                        "fill at the solved surface) instead of Create's binary full-or-empty fill. Resting",
+                        "fluid in straight glass pipes only. The per-cell waterline is computed server-side",
+                        "onto the synced pipe flow; in singleplayer the integrated server reads this client",
+                        "flag directly, so it works without a per-world server-config edit. (Spike: the",
+                        "server-side encode is gated on the CLIENT being present, so it is singleplayer-only",
+                        "for now.) When false, pipes render exactly as stock Create.")
+                .define("experimentalPipeLevelRender", false);
         client.pop();
         CLIENT_SPEC = client.build();
     }
