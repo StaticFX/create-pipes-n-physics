@@ -224,6 +224,7 @@ public final class GraphBuilder {
                 BlockState nState = level.getBlockState(neighbor);
 
                 if (isPumpBlock(nState)) {
+                    if (!isPumpPortFace(level, neighbor, nState, face.getOpposite())) continue;
                     d.pumps.add(neighbor.immutable());
                     conns.add(neighbor.immutable());
                     frontier.add(neighbor.immutable());
@@ -290,13 +291,15 @@ public final class GraphBuilder {
      */
     private static void discoverPump(Level level, BlockPos cur, Discovery d, Queue<BlockPos> frontier) {
         d.pumps.add(cur);
+        BlockState curState = level.getBlockState(cur);
         List<BlockPos> conns = new ArrayList<>();
-        for (Direction face : Direction.values()) {
+        for (Direction face : pumpPortFaces(level, cur, curState)) {
             BlockPos neighbor = cur.relative(face);
             if (!level.isLoaded(neighbor)) continue;
             BlockState nState = level.getBlockState(neighbor);
 
             if (isPumpBlock(nState)) {
+                if (!isPumpPortFace(level, neighbor, nState, face.getOpposite())) continue;
                 d.pumps.add(neighbor.immutable());
                 conns.add(neighbor.immutable());
                 frontier.add(neighbor.immutable());
@@ -339,7 +342,9 @@ public final class GraphBuilder {
             BlockPos neighbor = cur.relative(face);
             if (!level.isLoaded(neighbor)) continue;
 
-            if (isPumpBlock(level.getBlockState(neighbor))) {
+            BlockState nState = level.getBlockState(neighbor);
+            if (isPumpBlock(nState)) {
+                if (!isPumpPortFace(level, neighbor, nState, face.getOpposite())) continue;
                 d.pumps.add(neighbor.immutable());
                 conns.add(neighbor.immutable());
                 frontier.add(neighbor.immutable());
@@ -361,6 +366,22 @@ public final class GraphBuilder {
 
     private static boolean isPumpBlock(BlockState state) {
         return state.getBlock() instanceof PumpBlock || CreateFluidCompat.isCentrifugalPump(state);
+    }
+
+    private static List<Direction> pumpPortFaces(Level level, BlockPos pos, BlockState state) {
+        if (state.getBlock() instanceof PumpBlock) {
+            Direction facing = state.getValue(PumpBlock.FACING);
+            return List.of(facing, facing.getOpposite());
+        }
+        if (CreateFluidCompat.isCentrifugalPump(state)) {
+            CreateFluidCompat.PumpPorts ports = CreateFluidCompat.getPumpPorts(level, pos, state);
+            if (ports != null) return List.of(ports.push(), ports.pull());
+        }
+        return List.of();
+    }
+
+    private static boolean isPumpPortFace(Level level, BlockPos pos, BlockState state, Direction face) {
+        return pumpPortFaces(level, pos, state).contains(face);
     }
 
     /**
