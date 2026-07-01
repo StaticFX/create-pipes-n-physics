@@ -13,6 +13,7 @@
     "OpenEndedPipeMixin",
     "OpenEndedPipeAccessor",
     "PipeConnectionAccessor",
+    "FluidTransportBehaviourMixin",
     "PipeGoggleInfoMixin"
   ],
   "client": [

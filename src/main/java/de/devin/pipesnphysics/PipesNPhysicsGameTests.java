@@ -14,6 +14,7 @@ import com.simibubi.create.foundation.blockEntity.behaviour.fluid.SmartFluidTank
 import com.simibubi.create.foundation.blockEntity.behaviour.scrollValue.ScrollValueBehaviour;
 import de.devin.pipesnphysics.client.PipeStatusText;
 import de.devin.pipesnphysics.compat.CreatePipeRendering;
+import de.devin.pipesnphysics.compat.PipeLevelData;
 import de.devin.pipesnphysics.engine.Edge;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
@@ -1929,6 +1930,146 @@ public class PipesNPhysicsGameTests {
             }
             helper.succeed();
         });
+    }
+
+    /**
+     * Server-side data path for the in-pipe LEVEL render spike ({@code EXPERIMENTAL_PIPE_LEVEL_RENDER}):
+     * a RESTING run fed exact heads must stamp each SUBMERGED cell's flow with a waterline marker whose
+     * decoded 0..1 fraction equals the head interpolated at that cell (clamped to the cell), and must
+     * leave UNSUBMERGED cells unmarked. The sloped head produces a gradient of partial fills, so a wrong
+     * interpolation, a missed clamp, or a stamped wrong cell is caught — not just an all-full pass. Uses
+     * the explicit-flag {@code apply} overload so no live config is mutated, and the synthetic-solution
+     * helper so the heads are exact (no dependence on tank geometry).
+     */
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void pipeLevelRenderEncodesSolvedWaterline(GameTestHelper helper) {
+        helper.runAfterDelay(2, () -> {
+            Level level = helper.getLevel();
+            BlockPos seed = null;
+            for (int x = 0; x < 16 && seed == null; x++)
+                for (int y = 0; y < 6 && seed == null; y++)
+                    for (int z = 0; z < 6 && seed == null; z++) {
+                        BlockPos rel = new BlockPos(x, y, z);
+                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_PIPE.get())) seed = rel;
+                    }
+            if (seed == null) { helper.fail("no pipe in template"); return; }
+
+            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
+            Edge edge = null;
+            for (Edge e : graph.edges()) {
+                if (edge == null || e.pipes().size() > edge.pipes().size()) edge = e;
+            }
+            if (edge == null || edge.pipes().isEmpty()) { helper.fail("no pipe run in graph" + dump(helper, seed)); return; }
+
+            // Feed UNEQUAL heads (a high stranded/empty end + a lower water surface): a RESTING run is
+            // flat at the LOWER level, so a higher endpoint must NOT pull a phantom waterline up the
+            // run (the empty-tank-above-a-full-tank bug). The lower head is partial up the run.
+            List<BlockPos> pipes = edge.pipes();
+            double baseY = pipes.get(0).getY();
+            for (BlockPos c : pipes) baseY = Math.min(baseY, c.getY());
+            double headA = baseY + 4.0;   // a stranded/empty endpoint, well above the water
+            double headB = baseY + 0.7;   // the actual water surface
+            Solution resting = pipesnphysics$renderSolution(graph, edge.index(),
+                    EdgeFlow.Direction.NONE, headA, headB, false);
+            CreatePipeRendering.apply(level, graph, resting, true);
+
+            // The renderer anchors tank nodes to Create's RENDERED surface, then flattens a resting run
+            // to the LOWER (min) surface — expected values mirror that (displaySurface is a no-op for
+            // non-tank ends — pumps, junctions, open ends).
+            double dispA = CreatePipeRendering.displaySurface(level, graph.node(edge.a()).pos(), headA);
+            double dispB = CreatePipeRendering.displaySurface(level, graph.node(edge.b()).pos(), headB);
+            double waterline = Math.min(dispA, dispB);
+
+            int marked = 0;
+            boolean sawPartial = false;
+            for (int i = 0; i < pipes.size(); i++) {
+                BlockPos cell = pipes.get(i);
+                FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+                if (pipe == null) continue;
+                Integer data = pipesnphysics$levelData(pipe);
+                boolean submerged = CreatePipeRendering.restingCellSubmerged(level, graph, edge, i, waterline, waterline, false);
+                if (!submerged) {
+                    if (data != null) {
+                        helper.fail("cell " + cell.toShortString() + " is above the waterline yet carries level data");
+                        return;
+                    }
+                    continue;
+                }
+                if (data == null) {
+                    helper.fail("submerged cell " + cell.toShortString() + " carries no level data" + dump(helper, seed));
+                    return;
+                }
+                marked++;
+                double expected = Math.clamp(waterline - cell.getY(), 0.0, 1.0); // cell bottom == blockY on the main level
+                float decoded = CreatePipeRendering.levelFraction(data);
+                if (Math.abs(decoded - expected) > 0.01) {
+                    helper.fail("cell " + cell.toShortString() + " decoded waterline " + decoded
+                            + " but the solved head gives " + expected);
+                    return;
+                }
+                if (decoded > 0.02 && decoded < 0.98) sawPartial = true;
+            }
+            if (marked == 0) { helper.fail("no submerged cell received a level marker" + dump(helper, seed)); return; }
+            if (!sawPartial) { helper.fail("no PARTIAL waterline was encoded (all cells read full)"); return; }
+            helper.succeed();
+        });
+    }
+
+    /** The level-render field on a pipe (waterline + direction packed by {@code encodeLevel}), or null if unset. */
+    private static Integer pipesnphysics$levelData(FluidTransportBehaviour pipe) {
+        return pipe instanceof PipeLevelData d && d.pipesnphysics$getLevelData() != 0
+                ? d.pipesnphysics$getLevelData() : null;
+    }
+
+    /**
+     * The level-render metadata (waterline + flow direction) is DEDICATED render data that must reach
+     * the client but NEVER the world SAVE — it is re-derived from the solve every tick, and persisting
+     * it is exactly the trap the amount-hack fell into. It lives in memory (and on the client packet),
+     * but the disk-save path ({@code clientPacket=false}) omits it. Stamps a cell, confirms the field
+     * is live in memory, then saves the BE (the on-disk path) and asserts the "PnpLevel" key is absent.
+     */
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void levelDataNeverPersistsToSave(GameTestHelper helper) {
+        fill(helper, new BlockPos(0, 1, 1), 8000);
+        helper.runAfterDelay(10, () -> {
+            Level level = helper.getLevel();
+            Graph graph = GraphBuilder.build(level, helper.absolutePos(new BlockPos(1, 1, 1)));
+            Solution sol = FlowSolver.solve(level, graph);
+            CreatePipeRendering.apply(level, graph, sol, true); // stamp the render field
+
+            BlockPos marked = null;
+            for (Edge e : graph.edges()) {
+                for (BlockPos c : e.pipes()) {
+                    FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, c);
+                    if (pipe != null && pipesnphysics$levelData(pipe) != null) { marked = c; break; }
+                }
+                if (marked != null) break;
+            }
+            if (marked == null) { helper.fail("no level-rendered pipe cell to test" + dump(helper)); return; }
+
+            var be = level.getBlockEntity(marked);
+            if (be == null) { helper.fail("no BE at level-rendered cell"); return; }
+
+            // The DISK path (saveWithoutMetadata → saveAdditional → write(clientPacket=false)) must
+            // omit the render field entirely — the mixin only writes it on the client packet.
+            CompoundTag saved = be.saveWithoutMetadata(level.registryAccess());
+            if (pipesnphysics$containsKey(saved, "PnpLevel")) {
+                helper.fail("level-render field (PnpLevel) was written to the world save");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /** Whether a serialized-BE NBT tree contains {@code key} anywhere. */
+    private static boolean pipesnphysics$containsKey(net.minecraft.nbt.Tag tag, String key) {
+        if (tag instanceof CompoundTag c) {
+            if (c.contains(key)) return true;
+            for (String k : c.getAllKeys()) if (pipesnphysics$containsKey(c.get(k), key)) return true;
+        } else if (tag instanceof net.minecraft.nbt.CollectionTag<?> list) {
+            for (net.minecraft.nbt.Tag t : list) if (pipesnphysics$containsKey(t, key)) return true;
+        }
+        return false;
     }
 
     /**
