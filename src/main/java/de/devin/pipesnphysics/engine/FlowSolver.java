@@ -69,13 +69,16 @@ public final class FlowSolver {
         if (groupSamples.isEmpty()) return Solution.idle(graph);
 
         Map<Integer, PumpState> pumps = collectPumps(level, graph);
+        // Per-edge data that does NOT depend on the fluid (the valve throttle and the crest geometry):
+        // resolve it ONCE here rather than re-scanning every pipe cell's BE / world-Y on every fluid pass.
+        Map<Integer, EdgeStatics> edgeStatics = computeEdgeStatics(level, graph);
 
         GroupResults results = new GroupResults(graph.edges().size());
         Set<BlockPos> claimedEmpties = new HashSet<>();
         boolean active = false;
 
         for (FluidStack sample : groupSamples) {
-            active |= solveGroup(level, graph, columns, pumps, sample, claimedEmpties, results);
+            active |= solveGroup(level, graph, columns, pumps, edgeStatics, sample, claimedEmpties, results);
         }
 
         Set<Integer> stalled = new HashSet<>(results.stalledEdges);
@@ -235,7 +238,8 @@ public final class FlowSolver {
                               int pumpNode, double pumpHead, double pumpInternalG) {}
 
     private static boolean solveGroup(Level level, Graph graph, Columns columns,
-                                      Map<Integer, PumpState> pumps, FluidStack sample,
+                                      Map<Integer, PumpState> pumps,
+                                      Map<Integer, EdgeStatics> edgeStatics, FluidStack sample,
                                       Set<BlockPos> claimedEmpties, GroupResults results) {
         FluidType type = sample.getFluid().getFluidType();
         boolean gas = type.isLighterThanAir();
@@ -290,8 +294,8 @@ public final class FlowSolver {
         List<BranchSpec> branches = new ArrayList<>();
         List<BranchMeta> meta = new ArrayList<>();
         for (Edge edge : graph.edges()) {
-            assembleBranch(level, graph, columns, pumps, edge, solverIndex, gateEdgeIndex, sample,
-                    gas, conductancePerTile, branches, meta, results);
+            assembleBranch(level, graph, columns, pumps, edgeStatics.get(edge.index()), edge,
+                    solverIndex, gateEdgeIndex, sample, gas, conductancePerTile, branches, meta, results);
         }
         if (branches.isEmpty()) return false;
 
@@ -470,7 +474,7 @@ public final class FlowSolver {
     // ------------------------------------------------------------------ branch assembly
 
     private static void assembleBranch(Level level, Graph graph, Columns columns,
-                                       Map<Integer, PumpState> pumps, Edge edge,
+                                       Map<Integer, PumpState> pumps, EdgeStatics statics, Edge edge,
                                        int[] solverIndex, Map<Long, Integer> gateEdgeIndex,
                                        FluidStack sample,
                                        boolean gas,
@@ -490,8 +494,9 @@ public final class FlowSolver {
         // A valve the shaft has opened still caps the run by the angle the player dialed
         // in; 0 degrees shuts it as hard as the shaft would. The factor is applied to the
         // FINAL conductance below (after the pump-internal cap), not here — a pump's tiny
-        // internal conductance otherwise masks the throttle on every pumped run.
-        double throttle = runThrottle(level, edge);
+        // internal conductance otherwise masks the throttle on every pumped run. Fluid-independent,
+        // so it (and the crest below) is precomputed once per edge (see computeEdgeStatics).
+        double throttle = statics.throttle();
         if (throttle <= 0) {
             blockedEdges.add(edge.index());
             results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.VALVE);
@@ -582,13 +587,8 @@ public final class FlowSolver {
             // waterline) is "no supply", not a fault.
             if (allowedSign == Integer.MIN_VALUE) return;
 
-            for (int i = 0; i < edge.pipes().size(); i++) {
-                double cellY = SableCompat.getWorldY(level, edge.pipes().get(i));
-                if (Double.isNaN(crestHeight) || cellY > crestHeight) {
-                    crestHeight = cellY;
-                    crestPos = (i + 1.0) / (edge.length() + 1);
-                }
-            }
+            crestHeight = statics.crestHeight();
+            crestPos = statics.crestPos();
         }
 
         // Throttle the FINAL conductance, so it scales whether the pipe run or the pump
@@ -649,6 +649,27 @@ public final class FlowSolver {
             previous = cell;
         }
         return true;
+    }
+
+    /** Per-edge data that does not depend on the pass fluid: the valve throttle and the crest geometry. */
+    private record EdgeStatics(double throttle, double crestHeight, double crestPos) {}
+
+    /** Resolve every edge's fluid-independent {@link EdgeStatics} once, before the per-fluid passes. */
+    private static Map<Integer, EdgeStatics> computeEdgeStatics(Level level, Graph graph) {
+        Map<Integer, EdgeStatics> statics = new HashMap<>(graph.edges().size() * 2);
+        for (Edge edge : graph.edges()) {
+            double crestHeight = Double.NaN;
+            double crestPos = 0;
+            for (int i = 0; i < edge.pipes().size(); i++) {
+                double cellY = SableCompat.getWorldY(level, edge.pipes().get(i));
+                if (Double.isNaN(crestHeight) || cellY > crestHeight) {
+                    crestHeight = cellY;
+                    crestPos = (i + 1.0) / (edge.length() + 1);
+                }
+            }
+            statics.put(edge.index(), new EdgeStatics(runThrottle(level, edge), crestHeight, crestPos));
+        }
+        return statics;
     }
 
     /**
