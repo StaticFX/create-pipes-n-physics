@@ -46,10 +46,10 @@ public final class BoundaryColumn {
     private static final int OPEN_END_CAPACITY_MB = 4_000_000;
 
     /**
-     * Capacity stand-in for a hose pulley drawing from a fluid body: large enough that
-     * its head holds steady within a tick (the pulley lifts water to its own level under
-     * kinetic power, so it reads as a brimming reservoir at the pulley), while the actual
-     * per-tick volume is still clamped by what Create's drainer will hand over.
+     * Capacity stand-in for a hose pulley drawing from a fluid body through its hose:
+     * large enough that the modeled one-way source at the hose-tip elevation ({@link
+     * #hoseTip} + {@link SableCompat#getWorldY}) holds steady within a tick, while the
+     * actual per-tick volume is still clamped by what Create's drainer will hand over.
      */
     private static final int PULLEY_SOURCE_CAPACITY_MB = 4_000_000;
 
