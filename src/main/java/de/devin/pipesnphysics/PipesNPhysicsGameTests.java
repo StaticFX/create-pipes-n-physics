@@ -56,6 +56,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -2270,6 +2271,75 @@ public class PipesNPhysicsGameTests {
             }
             helper.succeed();
         });
+    }
+
+    /**
+     * The delivery gate tracks the WHOLE travelling front, not just the sink-adjacent cell. A run
+     * fully charged (every cell complete) delivers at once; but if a DRY gap opens at the SOURCE end
+     * while the sink-side cells stay complete — a freshly-restarted flow whose standing downstream
+     * fluid {@code preserveStandingFluid} keeps — delivery must be HELD until the front re-crawls the
+     * gap. The old gate keyed off only the terminal cell and released early, so the sink filled while
+     * the visible front was still crawling: the in-pipe-level-render decoupling this fixes.
+     */
+    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void deliveryGatedUntilWholeFrontContiguous(GameTestHelper helper) {
+        helper.runAfterDelay(5, () -> {
+            var level = helper.getLevel();
+            BlockPos seed = null;
+            for (int x = 0; x < 16 && seed == null; x++)
+                for (int y = 0; y < 5 && seed == null; y++)
+                    for (int z = 0; z < 4 && seed == null; z++) {
+                        BlockPos rel = new BlockPos(x, y, z);
+                        if (helper.getBlockState(rel).is(AllBlocks.FLUID_PIPE.get())) seed = rel;
+                    }
+            if (seed == null) { helper.fail("no pipe in template"); return; }
+
+            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
+            Edge edge = null;
+            for (Edge e : graph.edges())
+                if (!e.pipes().isEmpty() && (edge == null || e.pipes().size() > edge.pipes().size())) edge = e;
+            if (edge == null || edge.pipes().size() < 3) { helper.fail("no multi-cell pipe run"); return; }
+            int cells = edge.pipes().size();
+
+            Solution flowing = pipesnphysics$renderSolution(
+                    graph, edge.index(), EdgeFlow.Direction.A_TO_B, 0, 0, true);
+            Solution.Transfer toSink = new Solution.Transfer(
+                    graph.node(edge.a()).pos(), graph.node(edge.b()).pos(), new FluidStack(Fluids.WATER, 200));
+
+            // Charge the run until the front reaches the sink (delivery released). That guarantees
+            // every cell's toward-sink connection is complete — a fully-primed continuous column.
+            for (int i = 0; i < 60 * cells + 200
+                    && !CreatePipeRendering.deliveryReady(level, graph, flowing, toSink); i++) {
+                CreatePipeRendering.apply(level, graph, flowing);
+                pipesnphysics$tickEdgePipes(level, edge);
+            }
+            if (!CreatePipeRendering.deliveryReady(level, graph, flowing, toSink)) {
+                helper.fail("delivery never released after the front had time to reach the sink"); return;
+            }
+            if (pipesnphysics$countChargedEdgeCells(level, edge) < cells) {
+                helper.fail("front reached sink but not every cell holds fluid"); return;
+            }
+
+            // Open a DRY gap at the source end (node a, the A->B upstream): the sink-side cells stay
+            // complete. Delivery must now be held — the front is no longer contiguous to the sink.
+            pipesnphysics$clearCellFlows(level, edge.pipes().get(0));
+            if (CreatePipeRendering.deliveryReady(level, graph, flowing, toSink)) {
+                helper.fail("delivery released with a DRY source-side gap — gate ignored the whole front");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /** Clear every Create Flow on one pipe cell (open a dry gap the travelling front must refill). */
+    private static void pipesnphysics$clearCellFlows(Level level, BlockPos cell) {
+        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+        if (pipe == null) return;
+        for (Direction dir : Direction.values()) {
+            if (pipe.getConnection(dir) instanceof PipeConnectionAccessor accessor) {
+                accessor.pipesnphysics$setFlow(Optional.empty());
+            }
+        }
     }
 
     /**

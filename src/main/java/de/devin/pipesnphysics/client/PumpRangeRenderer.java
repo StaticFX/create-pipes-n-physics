@@ -12,7 +12,6 @@ import de.devin.pipesnphysics.engine.net.PumpRangePayload;
 import net.createmod.catnip.animation.AnimationTickHolder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
-import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.client.resources.model.BakedModel;
@@ -52,7 +51,9 @@ public final class PumpRangeRenderer {
 
     @SubscribeEvent
     public static void onRenderLevel(RenderLevelStageEvent event) {
-        if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) return;
+        // AFTER_PARTICLES (not AFTER_TRANSLUCENT_BLOCKS) so the arrows draw AFTER the in-pipe fluid and
+        // sit on top of it as an overlay instead of being hidden behind it.
+        if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_PARTICLES) return;
 
         Minecraft mc = Minecraft.getInstance();
         if (mc.player == null || mc.level == null) return;
@@ -84,7 +85,8 @@ public final class PumpRangeRenderer {
         float time = (AnimationTickHolder.getTicks() + AnimationTickHolder.getPartialTicks()) / 20f;
         float slide = (time * PER_SEGMENT_SPEED) % 1.0f;
 
-        VertexConsumer consumer = OWN_BUFFER.getBuffer(RenderType.translucent());
+        // A no-depth-WRITE type so the arrows don't reject the in-pipe fluid drawn on the same stage.
+        VertexConsumer consumer = OWN_BUFFER.getBuffer(PnpRenderTypes.ARROWS);
         for (PumpRangePayload.RangePath path : paths) {
             List<Long> points = path.points();
             if (points.size() < 2) continue;

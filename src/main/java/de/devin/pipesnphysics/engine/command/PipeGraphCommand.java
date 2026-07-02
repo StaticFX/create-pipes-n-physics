@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.engine.command;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
+import com.simibubi.create.content.fluids.hosePulley.HosePulleyBlockEntity;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.engine.BoundaryColumn;
 import de.devin.pipesnphysics.engine.Edge;
@@ -23,6 +24,8 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.FluidType;
+import net.neoforged.neoforge.fluids.capability.IFluidHandler;
+import net.neoforged.neoforge.fluids.capability.IFluidHandler.FluidAction;
 import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.util.ArrayList;
@@ -78,18 +81,21 @@ public final class PipeGraphCommand {
             Double head = s.nodeHeads().get(n.index());
             Double ceiling = s.nodeCeilings().get(n.index());
             String block = blockName(level, n);
-            send(player, String.format("  §f%s §7%s §b%s §7y=§f%.1f%s%s%s",
+            send(player, String.format("  §f%s §7%s §b%s §7y=§f%.1f%s%s%s%s",
                     n.pos().toShortString(), n.kind(), block,
                     n.worldY(),
                     head != null ? String.format(" §7head=§f%.2f", head) : "",
                     ceiling != null ? String.format(" §7ceil=§b%.2f", ceiling) : " §8ceil=∅",
-                    n.pumpFacing() != null ? " §7face=§f" + n.pumpFacing() : ""));
+                    n.pumpFacing() != null ? " §7face=§f" + n.pumpFacing() : "",
+                    n.isPump() ? String.format(" §7rpm=§f%.0f", pumpSpeed(level, n)) : ""));
             BoundaryColumn column = columnOf(level, n);
             if (column != null && !column.contents().isEmpty() && column.contentMb() > 0) {
                 send(player, "      §7" + (n.isOpenEnd()
                         ? "draws §f" + column.contents().getHoverName().getString()
                         : fluidSummary(column)));
             }
+            String pulley = pulleyDiagnostic(level, n);
+            if (pulley != null) send(player, "      §c" + pulley);
         }
         sendFluidStats(player, level, g);
         send(player, "§e--- Edges ---");
@@ -201,6 +207,36 @@ public final class PipeGraphCommand {
     /** Localized name of the block at a node — the tank, basin, pump, cauldron, etc. */
     private static String blockName(ServerLevel level, Node n) {
         return level.getBlockState(n.pos()).getBlock().getName().getString();
+    }
+
+    /** A pump node's current rotation speed (RPM), 0 if it is not a kinetic block. */
+    private static float pumpSpeed(ServerLevel level, Node n) {
+        return level.getBlockEntity(n.pos()) instanceof KineticBlockEntity k ? k.getSpeed() : 0;
+    }
+
+    /**
+     * Why a hose pulley node is (or is not) supplying the network, or null when the node is not a
+     * pulley. A pulley only feeds the engine once its hose is wound down INTO a fluid body and the
+     * drainer has searched it — so this reports the missing precondition rather than leaving the
+     * player guessing why a plumbed pulley moves nothing (the "won't pull" report). When the pulley
+     * IS a source the normal fluid line already shows it, so this returns null.
+     */
+    private static String pulleyDiagnostic(ServerLevel level, Node n) {
+        if (!n.isHandler() || !(level.getBlockEntity(n.pos()) instanceof HosePulleyBlockEntity)) {
+            return null;
+        }
+        IFluidHandler cap = BoundaryColumn.findHandler(level, n.pos());
+        if (cap == null) return "pulley: no fluid capability";
+        FluidStack drainable = cap.getFluidInTank(0);
+        if (drainable.isEmpty()) {
+            return "pulley: NOT supplying — no drainable fluid at the hose end "
+                    + "(wind the hose DOWN into the fluid with rotation; a large/searching body needs a few ticks)";
+        }
+        if (cap.drain(drainable.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()) {
+            return "pulley: sees " + drainable.getHoverName().getString()
+                    + " but can't draw yet (still lowering / settling)";
+        }
+        return null; // it IS a source — the fluid line above reports it
     }
 
     /**
