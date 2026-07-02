@@ -324,38 +324,25 @@ public final class NetworkSolver {
                                                        List<BranchSpec> branches,
                                                        boolean[] active) {
         int n = nodes.size();
-        int[] parent = new int[n];
-        for (int i = 0; i < n; i++) parent[i] = i;
+        UnionFind uf = new UnionFind(n);
 
         for (int e = 0; e < branches.size(); e++) {
             if (!active[e]) continue;
             BranchSpec br = branches.get(e);
-            union(parent, br.a(), br.b());
+            uf.union(br.a(), br.b());
         }
 
         double[] componentCapacitance = new double[n];
         for (int i = 0; i < n; i++) {
-            componentCapacitance[find(parent, i)] += nodes.get(i).capacitance();
+            componentCapacitance[uf.find(i)] += nodes.get(i).capacitance();
         }
 
         for (int e = 0; e < branches.size(); e++) {
             if (!active[e]) continue;
-            if (componentCapacitance[find(parent, branches.get(e).a())] <= 0) {
+            if (componentCapacitance[uf.find(branches.get(e).a())] <= 0) {
                 active[e] = false;
             }
         }
-    }
-
-    private static int find(int[] parent, int i) {
-        while (parent[i] != i) {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        return i;
-    }
-
-    private static void union(int[] parent, int a, int b) {
-        parent[find(parent, a)] = find(parent, b);
     }
 
     /**

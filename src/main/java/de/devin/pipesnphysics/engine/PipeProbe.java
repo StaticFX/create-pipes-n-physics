@@ -97,7 +97,7 @@ public final class PipeProbe {
             BlockPos next = towardB
                     ? (cell + 1 < edge.pipes().size() ? edge.pipes().get(cell + 1) : graph.node(edge.b()).pos())
                     : (cell > 0 ? edge.pipes().get(cell - 1) : graph.node(edge.a()).pos());
-            direction = directionBetween(pos, next);
+            direction = PipeGeometry.between(pos, next);
         }
 
         float pressure = 0;
@@ -263,7 +263,7 @@ public final class PipeProbe {
     private static boolean pushSideConnected(Graph graph, Node pump) {
         BlockPos pushBlock = pump.pos().relative(pump.pumpFacing());
         for (Edge edge : graph.edgesOf(pump.index())) {
-            if (FlowSolver.adjacentCell(graph, edge, pump.index()).equals(pushBlock)) return true;
+            if (PipeGeometry.adjacentCell(graph, edge, pump.index()).equals(pushBlock)) return true;
         }
         return false;
     }
@@ -409,10 +409,5 @@ public final class PipeProbe {
         if (solution.noHeadEdges().contains(edgeIndex)) return PipeStatusPayload.STATUS_NO_HEAD;
         if (solution.blockedEdges().contains(edgeIndex)) return PipeStatusPayload.STATUS_BLOCKED;
         return PipeStatusPayload.STATUS_NO_FLOW;
-    }
-
-    private static Direction directionBetween(BlockPos from, BlockPos to) {
-        return Direction.fromDelta(
-                to.getX() - from.getX(), to.getY() - from.getY(), to.getZ() - from.getZ());
     }
 }

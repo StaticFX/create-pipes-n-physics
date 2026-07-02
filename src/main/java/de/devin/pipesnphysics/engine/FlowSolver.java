@@ -6,6 +6,7 @@ import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.solve.Apportion;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver;
+import de.devin.pipesnphysics.engine.solve.UnionFind;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver.BranchSpec;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver.NodeSpec;
 import net.minecraft.core.BlockPos;
@@ -521,7 +522,7 @@ public final class FlowSolver {
             }
 
             Node pumpNode = graph.node(nodeIndex);
-            BlockPos toward = adjacentCell(graph, edge, nodeIndex);
+            BlockPos toward = PipeGeometry.adjacentCell(graph, edge, nodeIndex);
             int outSign = side == 0 ? +1 : -1;
 
             if (toward.equals(pumpNode.pos().relative(pump.pushSide()))) {
@@ -570,14 +571,14 @@ public final class FlowSolver {
 
         if (!gas) {
             if (columnA != null) {
-                BlockPos opening = adjacentCell(graph, edge, edge.a());
+                BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.a());
                 lipA = SableCompat.getWorldY(level, opening) - 0.5;
                 if (!canDrawFrom(level, graph.node(edge.a()), columnA, opening, lipA)) {
                     allowedSign = combineSign(allowedSign, -1);
                 }
             }
             if (columnB != null) {
-                BlockPos opening = adjacentCell(graph, edge, edge.b());
+                BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.b());
                 lipB = SableCompat.getWorldY(level, opening) - 0.5;
                 if (!canDrawFrom(level, graph.node(edge.b()), columnB, opening, lipB)) {
                     allowedSign = combineSign(allowedSign, +1);
@@ -641,8 +642,8 @@ public final class FlowSolver {
             var behaviour = FluidPropagator.getPipe(level, cell);
             if (behaviour != null) {
                 var state = level.getBlockState(cell);
-                Direction fromPrevious = directionBetween(cell, previous);
-                Direction fromNext = directionBetween(cell, next);
+                Direction fromPrevious = PipeGeometry.between(cell, previous);
+                Direction fromNext = PipeGeometry.between(cell, next);
                 if (fromPrevious != null && !behaviour.canPullFluidFrom(sample, state, fromPrevious)) return false;
                 if (fromNext != null && !behaviour.canPullFluidFrom(sample, state, fromNext)) return false;
             }
@@ -689,10 +690,6 @@ public final class FlowSolver {
         return factor;
     }
 
-    private static Direction directionBetween(BlockPos from, BlockPos to) {
-        return Direction.fromDelta(
-                to.getX() - from.getX(), to.getY() - from.getY(), to.getZ() - from.getZ());
-    }
 
     /**
      * Fluid can only leave a column through an opening its surface reaches. Open
@@ -711,14 +708,6 @@ public final class FlowSolver {
     private static int combineSign(int current, int wanted) {
         if (current == Integer.MIN_VALUE || current == -wanted) return Integer.MIN_VALUE;
         return wanted;
-    }
-
-    /** The cell (pipe or opposite node) an edge touches at the given node — its first step out. */
-    static BlockPos adjacentCell(Graph graph, Edge edge, int nodeIndex) {
-        if (edge.pipes().isEmpty()) return graph.node(edge.other(nodeIndex)).pos();
-        return nodeIndex == edge.a()
-                ? edge.pipes().get(0)
-                : edge.pipes().get(edge.pipes().size() - 1);
     }
 
     // ------------------------------------------------------------------ transfer planning
@@ -851,26 +840,11 @@ public final class FlowSolver {
      * absent, so the halves they used to join fall into separate components.
      */
     private static int[] islands(List<BranchSpec> branches, NetworkSolver.Result result) {
-        int n = result.heads().length;
-        int[] parent = new int[n];
-        for (int i = 0; i < n; i++) parent[i] = i;
+        UnionFind uf = new UnionFind(result.heads().length);
         for (int b = 0; b < branches.size(); b++) {
-            if (result.active()[b]) union(parent, branches.get(b).a(), branches.get(b).b());
+            if (result.active()[b]) uf.union(branches.get(b).a(), branches.get(b).b());
         }
-        for (int i = 0; i < n; i++) parent[i] = find(parent, i);
-        return parent;
-    }
-
-    private static int find(int[] parent, int i) {
-        while (parent[i] != i) {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        return i;
-    }
-
-    private static void union(int[] parent, int a, int b) {
-        parent[find(parent, a)] = find(parent, b);
+        return uf.roots();
     }
 
     /** What the handler will really give up this tick, probed without mutating it. */

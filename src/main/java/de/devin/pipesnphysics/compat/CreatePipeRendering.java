@@ -9,6 +9,7 @@ import de.devin.pipesnphysics.engine.Edge;
 import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.Graph;
 import de.devin.pipesnphysics.engine.Node;
+import de.devin.pipesnphysics.engine.PipeGeometry;
 import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
@@ -426,7 +427,7 @@ public final class CreatePipeRendering {
                     BlockPos downstream = flowFromA
                             ? (i < pipes.size() - 1 ? pipes.get(i + 1) : graph.node(edge.b()).pos())
                             : (i > 0 ? pipes.get(i - 1) : graph.node(edge.a()).pos());
-                    Direction d = direction(cell, downstream);
+                    Direction d = PipeGeometry.between(cell, downstream);
                     if (d != null) flowDir = d.get3DDataValue();
                 }
                 // BACKED-UP cells are full where the fluid reached. IDLE settles to the interpolated
@@ -539,7 +540,7 @@ public final class CreatePipeRendering {
             FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
             if (pipe == null) continue;                         // can't track — don't stall on it
             BlockPos down = j == order.size() - 1 ? sinkPos : order.get(j + 1);
-            Direction toward = direction(cell, down);
+            Direction toward = PipeGeometry.between(cell, down);
             if (toward == null) continue;
             PipeConnection conn = pipe.getConnection(toward);
             if (conn == null) continue;                         // no interface that way — skip
@@ -574,8 +575,8 @@ public final class CreatePipeRendering {
 
             BlockPos up = j == 0 ? upstream : order.get(j - 1);
             BlockPos down = j == order.size() - 1 ? downstream : order.get(j + 1);
-            Direction inDir = direction(cell, up);
-            Direction outDir = direction(cell, down);
+            Direction inDir = PipeGeometry.between(cell, up);
+            Direction outDir = PipeGeometry.between(cell, down);
             if (inDir == null || outDir == null) break;
 
             PipeConnection inC = pipe.getConnection(inDir);
@@ -648,8 +649,8 @@ public final class CreatePipeRendering {
 
             BlockPos aSide = i == 0 ? aEnd : pipes.get(i - 1);
             BlockPos bSide = i == pipes.size() - 1 ? bEnd : pipes.get(i + 1);
-            Direction towardA = direction(cell, aSide);
-            Direction towardB = direction(cell, bSide);
+            Direction towardA = PipeGeometry.between(cell, aSide);
+            Direction towardB = PipeGeometry.between(cell, bSide);
             if (towardA == null || towardB == null) continue;
 
             // Orient the resting fill the same way the live flow would: fluid enters from
@@ -749,12 +750,12 @@ public final class CreatePipeRendering {
             // the valve: a held feed, or a settled neighbour cell the edge pass kept (in `filled`).
             // A dry side — a shut valve facing an open end / an empty run — stays empty, so the
             // valve never paints phantom water on a sourceless side.
-            BlockPos adj = adjacentCell(graph, edge, gate.index());
+            BlockPos adj = PipeGeometry.adjacentCell(graph, edge, gate.index());
             boolean wet = solution.heldEdges().contains(edge.index()) || filled.contains(adj);
             if (!wet) continue;
             FluidStack fluid = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
             if (fluid.isEmpty()) continue;
-            Direction dir = direction(gate.pos(), adj);
+            Direction dir = PipeGeometry.between(gate.pos(), adj);
             if (dir == null) continue;
             changed |= seedComplete(pipe.getConnection(dir), true, fluid);
             anyWet = true;
@@ -763,12 +764,6 @@ public final class CreatePipeRendering {
         if (anyWet) filled.add(gate.pos());
     }
 
-    /** The cell on {@code edge} nearest {@code nodeIndex} (its first/last pipe, or the far node if no pipes). */
-    private static BlockPos adjacentCell(Graph graph, Edge edge, int nodeIndex) {
-        List<BlockPos> pipes = edge.pipes();
-        if (pipes.isEmpty()) return graph.node(edge.other(nodeIndex)).pos();
-        return edge.a() == nodeIndex ? pipes.get(0) : pipes.get(pipes.size() - 1);
-    }
 
     /**
      * The resting fill orientation a PUMP endpoint forces on a tied run, or null if neither end is a
@@ -791,7 +786,7 @@ public final class CreatePipeRendering {
     private static Boolean pumpSideInbound(Graph graph, Edge edge, int nodeIndex, boolean nodeIsA) {
         Node node = graph.node(nodeIndex);
         if (!node.isPump() || node.pumpFacing() == null) return null;
-        Direction towardEdge = direction(node.pos(), adjacentCell(graph, edge, nodeIndex));
+        Direction towardEdge = PipeGeometry.between(node.pos(), PipeGeometry.adjacentCell(graph, edge, nodeIndex));
         if (towardEdge == null) return null;
         boolean pumpRimInbound = towardEdge == node.pumpFacing(); // push side: fluid leaves the pump
         return nodeIsA == pumpRimInbound;
@@ -960,8 +955,4 @@ public final class CreatePipeRendering {
                 Math.abs(mbPerTick) * FILL_PRESSURE_PER_MBPT, MIN_FILL_PRESSURE, MAX_FILL_PRESSURE);
     }
 
-    private static Direction direction(BlockPos from, BlockPos to) {
-        return Direction.fromDelta(
-                to.getX() - from.getX(), to.getY() - from.getY(), to.getZ() - from.getZ());
-    }
 }

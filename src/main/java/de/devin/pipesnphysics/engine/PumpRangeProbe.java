@@ -5,7 +5,6 @@ import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.net.PumpRangePayload;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 
 import java.util.ArrayList;
@@ -52,7 +51,7 @@ public final class PumpRangeProbe {
         Walker walker = new Walker(level, graph,
                 supplyHead + pumpHead, supplyHead - suction, suction);
         for (Edge edge : graph.edgesOf(pump.index())) {
-            BlockPos toward = adjacentCell(graph, edge, pump.index());
+            BlockPos toward = PipeGeometry.adjacentCell(graph, edge, pump.index());
             boolean push = toward.equals(pumpPos.relative(pump.pumpFacing()));
             boolean pull = toward.equals(pumpPos.relative(pump.pumpFacing().getOpposite()));
             if (!push && !pull) continue;
@@ -137,10 +136,4 @@ public final class PumpRangeProbe {
         }
     }
 
-    private static BlockPos adjacentCell(Graph graph, Edge edge, int nodeIndex) {
-        if (edge.pipes().isEmpty()) return graph.node(edge.other(nodeIndex)).pos();
-        return nodeIndex == edge.a()
-                ? edge.pipes().get(0)
-                : edge.pipes().get(edge.pipes().size() - 1);
-    }
 }
