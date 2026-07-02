@@ -10,6 +10,7 @@ import de.devin.pipesnphysics.engine.EdgeFlow;
 import de.devin.pipesnphysics.engine.Graph;
 import de.devin.pipesnphysics.engine.Node;
 import de.devin.pipesnphysics.engine.PipeGeometry;
+import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
@@ -183,8 +184,13 @@ public final class CreatePipeRendering {
             EdgeFlow flow = solution.edgeFlows().get(edge.index());
             FluidStack flowing = solution.edgeFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
             if (!flowing.isEmpty() && flow.direction() != EdgeFlow.Direction.NONE) {
+                // Fill/scroll speed tracks the ACTUAL fluid moved across the edge (the goggle rate),
+                // NOT the solver's hydraulic flow: a full pass-through tank throttles the throughput
+                // below the solved edge flow, so the inflow edge's fast solved rate must not scroll
+                // faster than what actually crosses it (the visual would outrun the delivered fluid).
+                int movedPerTick = PipeProbe.actualEdgeFlow(graph, solution, edge);
                 chargeEdge(level, graph, edge, flowing,
-                        flow.direction() == EdgeFlow.Direction.A_TO_B, flow.mbPerTick(), filled);
+                        flow.direction() == EdgeFlow.Direction.A_TO_B, movedPerTick, filled);
                 // When a run starts flowing, the travelling front charges from the upstream end — but
                 // STANDING fluid already sits at the lower (downstream) end. Preserve those settled
                 // cells so the sweep doesn't clear them ahead of the front (which despawns the fluid
