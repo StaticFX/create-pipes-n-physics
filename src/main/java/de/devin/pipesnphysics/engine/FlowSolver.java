@@ -4,6 +4,7 @@ import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.engine.solve.Apportion;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver.BranchSpec;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver.NodeSpec;
@@ -21,6 +22,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -761,24 +763,64 @@ public final class FlowSolver {
             }
         }
 
+        // Apportion within each hydraulic island by PROPORTIONAL share, not first-come-first-served.
+        // When a source's clamped give cannot satisfy all its island's sinks, the old greedy pairing
+        // let the first-discovered sink take everything and starved the rest EVERY tick — delivery
+        // tracked invisible graph-discovery order ("one machine on the manifold never gets fluid
+        // unless I pause the other"). Give each sink a fraction of the shortfall proportional to its
+        // take (largest-remainder rounding keeps integer mB and conservation), then realise it with a
+        // northwest-corner fill. The island grouping is unchanged (no fluid crosses a barrier).
         int planned = 0;
-        for (int s = 0; s < sources.size(); s++) {
-            int give = giving.get(s);
-            for (int t = 0; t < sinks.size() && give > 0; t++) {
-                if (!sourceIsland.get(s).equals(sinkIsland.get(t))) continue;
-                int take = taking.get(t);
-                if (take <= 0) continue;
-                int amount = Math.min(give, take);
-                transfers.add(new Solution.Transfer(
-                        sources.get(s).accessPos(), sinks.get(t).accessPos(),
-                        sample.copyWithAmount(amount)));
-                if (sinks.get(t).isEmpty()) claimedEmpties.add(sinks.get(t).identity());
-                give -= amount;
-                taking.set(t, take - amount);
-                planned += amount;
+        for (int id : new LinkedHashSet<>(sourceIsland)) {
+            List<Integer> srcIdx = indicesInIsland(sourceIsland, id);
+            List<Integer> snkIdx = indicesInIsland(sinkIsland, id);
+            if (snkIdx.isEmpty()) continue;
+
+            int give = sumAt(giving, srcIdx);
+            int take = sumAt(taking, snkIdx);
+            int move = Math.min(give, take);
+            if (move <= 0) continue;
+
+            int[] srcShare = Apportion.largestRemainder(move, weightsAt(giving, srcIdx));
+            int[] snkShare = Apportion.largestRemainder(move, weightsAt(taking, snkIdx));
+
+            int j = 0;
+            for (int i = 0; i < srcIdx.size(); i++) {
+                BoundaryColumn source = sources.get(srcIdx.get(i));
+                while (srcShare[i] > 0 && j < snkIdx.size()) {
+                    if (snkShare[j] <= 0) { j++; continue; }
+                    BoundaryColumn sink = sinks.get(snkIdx.get(j));
+                    int amount = Math.min(srcShare[i], snkShare[j]);
+                    transfers.add(new Solution.Transfer(
+                            source.accessPos(), sink.accessPos(), sample.copyWithAmount(amount)));
+                    if (sink.isEmpty()) claimedEmpties.add(sink.identity());
+                    srcShare[i] -= amount;
+                    snkShare[j] -= amount;
+                    planned += amount;
+                }
             }
         }
         return new TransferPlan(planned, !sources.isEmpty(), !sinks.isEmpty());
+    }
+
+    private static List<Integer> indicesInIsland(List<Integer> island, int id) {
+        List<Integer> out = new ArrayList<>();
+        for (int i = 0; i < island.size(); i++) {
+            if (island.get(i) == id) out.add(i);
+        }
+        return out;
+    }
+
+    private static int sumAt(List<Integer> values, List<Integer> indices) {
+        int sum = 0;
+        for (int i : indices) sum += values.get(i);
+        return sum;
+    }
+
+    private static int[] weightsAt(List<Integer> values, List<Integer> indices) {
+        int[] out = new int[indices.size()];
+        for (int i = 0; i < indices.size(); i++) out[i] = values.get(indices.get(i));
+        return out;
     }
 
     /**
