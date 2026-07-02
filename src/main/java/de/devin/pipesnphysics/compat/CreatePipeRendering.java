@@ -187,9 +187,11 @@ public final class CreatePipeRendering {
                 // When a run starts flowing, the travelling front charges from the upstream end — but
                 // STANDING fluid already sits at the lower (downstream) end. Preserve those settled
                 // cells so the sweep doesn't clear them ahead of the front (which despawns the fluid
-                // and makes the run visibly re-crawl). Only reservoir-supported cells are kept, so a
-                // genuinely empty run still fills as a clean front. Level-render only.
-                if (levelRender) preserveStandingFluid(level, graph, edge, solution, filled, standing);
+                // and makes the run visibly re-crawl, re-gating delivery). Only reservoir-supported
+                // cells are kept, so a genuinely empty run still fills as a clean front. This runs for
+                // BOTH renderers — the binary (default/server) renderer swept the settled column the
+                // tick flow started; only the STILL-render bookkeeping is level-render-gated.
+                preserveStandingFluid(level, graph, edge, solution, filled, standing, levelRender);
                 continue;
             }
 
@@ -308,7 +310,8 @@ public final class CreatePipeRendering {
      * mapping (tank-render anchor + flat min). Gas is skipped (its waterline semantics differ).
      */
     private static void preserveStandingFluid(Level level, Graph graph, Edge edge, Solution solution,
-                                              Set<BlockPos> filled, Set<BlockPos> standing) {
+                                              Set<BlockPos> filled, Set<BlockPos> standing,
+                                              boolean trackStanding) {
         Double rawA = solution.nodeHeads().get(edge.a());
         Double rawB = solution.nodeHeads().get(edge.b());
         if (rawA == null || rawB == null) return;
@@ -324,8 +327,8 @@ public final class CreatePipeRendering {
             if (!restingCellSubmerged(level, graph, edge, i, waterline, waterline, false)) continue;
             FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
             if (pipe != null && hasFluid(pipe)) {
-                filled.add(cell);
-                standing.add(cell); // keep it, but render it STILL until the front arrives
+                filled.add(cell); // keep it from the sweep — both renderers
+                if (trackStanding) standing.add(cell); // render it STILL until the front arrives (level render)
             }
         }
     }

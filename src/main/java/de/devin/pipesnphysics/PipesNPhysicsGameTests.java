@@ -2627,6 +2627,69 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
+     * When a settled run STARTS flowing, the travelling front charges from the dry upstream end — but
+     * the already-settled fluid downstream must NOT be swept before the front reaches it. That sweep
+     * despawns the standing column and re-crawls (re-gating delivery). The guard (preserveStandingFluid)
+     * was wired only into the experimental level renderer. This drives the DEFAULT binary renderer on a
+     * U (two tanks above a dipping run): the BOTTOM of the U rests full while the risers are dry, and a
+     * flow starting down a dry riser must leave the settled bottom cells charged across the first tick.
+     */
+    @GameTest(template = "gravity/simple_fluid_leveling", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void flowStartKeepsStandingSinkFluid(GameTestHelper helper) {
+        helper.runAfterDelay(2, () -> {
+            var level = helper.getLevel();
+            BlockPos seed = null;
+            for (int x = 0; x < 3 && seed == null; x++)
+                for (int y = 0; y < 4 && seed == null; y++)
+                    if (helper.getBlockState(new BlockPos(x, y, 0)).is(AllBlocks.FLUID_TANK.get()))
+                        seed = new BlockPos(x, y, 0);
+            if (seed == null) { helper.fail("no tank in template"); return; }
+
+            Graph graph = GraphBuilder.build(level, helper.absolutePos(seed));
+            Edge edge = null;
+            for (Edge e : graph.edges()) {
+                if (graph.node(e.a()).isHandler() && graph.node(e.b()).isHandler() && e.pipes().size() >= 3) {
+                    edge = e;
+                    break;
+                }
+            }
+            if (edge == null) { helper.fail("no tank-to-tank U edge in template"); return; }
+
+            // A flat waterline at the BOTTOM cells' level: it submerges the U floor (threshold = the
+            // cell's BOTTOM face) but leaves the risers one block up dry — the dry upstream the front
+            // stops short of. The tanks sit ABOVE the run, so their rendered surface (displaySurface,
+            // which preserveStandingFluid uses) clears the floor cells too — a genuine standing column.
+            int floorY = Integer.MAX_VALUE;
+            for (BlockPos c : edge.pipes()) floorY = Math.min(floorY, c.getY());
+            double waterline = floorY;
+
+            // Settle: the U floor fills to complete resting flows (restEdge seeds them full at once).
+            Solution resting = pipesnphysics$renderSolution(
+                    graph, edge.index(), EdgeFlow.Direction.NONE, waterline, waterline, false);
+            for (int i = 0; i < 20; i++) {
+                CreatePipeRendering.apply(level, graph, resting);
+                pipesnphysics$tickEdgePipes(level, edge);
+            }
+            int settled = pipesnphysics$countChargedEdgeCells(level, edge);
+            if (settled < 2) { helper.fail("U floor never settled full at rest (" + settled + ")"); return; }
+
+            // Flow starts down a dry riser (the front charges from node a's end), so the settled floor
+            // cells are downstream and un-reached this tick. One apply must not sweep them.
+            Solution flowing = pipesnphysics$renderSolution(
+                    graph, edge.index(), EdgeFlow.Direction.A_TO_B, waterline, waterline, true);
+            CreatePipeRendering.apply(level, graph, flowing);
+
+            int after = pipesnphysics$countChargedEdgeCells(level, edge);
+            if (after < settled) {
+                helper.fail("flow start swept the settled fluid (" + settled + " -> " + after
+                        + "): preserveStandingFluid is not run for the binary renderer");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * No-flow rendering depends on WHY there is no flow. A stall whose source is dry is
      * phantom flow — nothing can feed the pipe — so it must render EMPTY. A sink-full
      * stall has fluid genuinely backed up in the pipe and must keep rendering it. Drives
