@@ -1349,6 +1349,33 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
+     * Two pipe runs whose ONLY connection is a shared tank must build as ONE network — fluid flows
+     * run→tank→run through the reservoir. Splice a tank into the middle of a straight run: the far tank
+     * is then reachable only THROUGH it, and the graph seeded from the near end must still contain it.
+     * Before the fix a tank was a terminal node, so the two halves were independent networks (each
+     * solving the tank's fill blind to the other — a full pass-through tank then wrongly reported
+     * "destination full" on its inflow run, while the pipes visibly flowed).
+     */
+    @GameTest(template = "gravity/long_equalization", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void tankCouplesTwoRunsIntoOneNetwork(GameTestHelper helper) {
+        BlockPos midTank = new BlockPos(0, 1, 5); // spliced into the straight glass run
+        BlockPos seed = new BlockPos(0, 1, 1);    // a pipe near one end
+        BlockPos farTank = new BlockPos(0, 1, 9); // reachable only through the mid tank
+        helper.setBlock(midTank, AllBlocks.FLUID_TANK.get().defaultBlockState());
+        helper.runAfterDelay(4, () -> {
+            Graph graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(seed));
+            boolean reachesFar = graph.nodes().stream()
+                    .anyMatch(n -> n.pos().equals(helper.absolutePos(farTank)));
+            if (!reachesFar) {
+                helper.fail("a tank between two runs split the network — the far tank is unreachable "
+                        + "(the graph has " + graph.nodes().size() + " nodes)");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * The goggle "Head left" readout must exist on BOTH sides of a working pump —
      * including when the suction run contains a junction with a dead-end stub,
      * which makes the suction cells junction NODES rather than edge interiors.
