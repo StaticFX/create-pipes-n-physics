@@ -1239,6 +1239,39 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
+     * The solve must stay READ-ONLY at an open mouth. A foreign fluid's pass (here lava — it holds
+     * the larger volume, so it runs first) must never probe the mouth's Create handler: doing so runs
+     * OpenEndedPipe's spill-collision reaction, turning the mouth's water source into stone, straight
+     * out of a supposedly read-only solve. Fill the only tank with lava, face the mouth at a water
+     * source, and solve repeatedly — the water must survive every pass.
+     */
+    @GameTest(template = "suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void lavaPassDoesNotStoneifyIntakeMouthWaterSource(GameTestHelper helper) {
+        BlockPos mouth = new BlockPos(0, 3, 0); // the space the riser opens up into
+        BlockPos tank = new BlockPos(2, 1, 0);  // the network's only tank — hold LAVA (the larger pass)
+        BlockPos seed = new BlockPos(1, 1, 0);
+        // The template ships a CREATIVE tank (voids fills); swap in a real one so it truly holds lava.
+        helper.setBlock(tank, AllBlocks.FLUID_TANK.get().defaultBlockState());
+        helper.runAfterDelay(5, () -> {
+            fillFluid(helper, tank, Fluids.LAVA, 8000);
+            helper.setBlock(mouth, Blocks.WATER.defaultBlockState()); // a lone source at the mouth
+        });
+        // Force solves across the window; a lava pass probing the water-facing mouth must not mutate it.
+        for (int t = 9; t <= 45; t += 4) {
+            helper.runAfterDelay(t, () -> {
+                FlowSolver.solve(helper.getLevel(),
+                        GraphBuilder.build(helper.getLevel(), helper.absolutePos(seed)));
+                BlockState front = helper.getBlockState(mouth);
+                if (!front.is(Blocks.WATER) && !front.isAir()) {
+                    helper.fail("a foreign-fluid solve mutated the open mouth's water source into "
+                            + front.getBlock() + " (open-end fill(SIMULATE) is not read-only)");
+                }
+            });
+        }
+        helper.runAfterDelay(49, helper::succeed);
+    }
+
+    /**
      * The goggle "Head left" readout must exist on BOTH sides of a working pump —
      * including when the suction run contains a junction with a dead-end stub,
      * which makes the suction cells junction NODES rather than edge interiors.

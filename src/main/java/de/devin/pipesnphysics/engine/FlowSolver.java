@@ -394,6 +394,20 @@ public final class FlowSolver {
     private static boolean participates(Level level, BoundaryColumn column, FluidStack sample,
                                         Set<BlockPos> claimedEmpties) {
         IFluidHandler cap = column.handler(level);
+        // An open end is decided from engine state, NEVER by probing the capability with
+        // fill/drain(SIMULATE): those MUTATE the world — Create's OpenEndedPipe wipes a differing
+        // buffered fluid and runs the spill-collision reaction (a lake block turning to stone)
+        // BEFORE their own simulate guard, so a foreign fluid's pass corrupts the mouth. The handler
+        // is still resolved above for its side effects (it populates the open-end cache and drives
+        // manageSource, which apply() depends on) — that is normal per-tick management, not a probe.
+        // An intake mouth gives only its own fluid; an empty outlet accepts any unclaimed pass fluid.
+        if (column.isOpenEnd()) {
+            if (column.isInfiniteSource()) {
+                return FluidStack.isSameFluidSameComponents(column.contents(), sample);
+            }
+            if (claimedEmpties.contains(column.identity())) return false;
+            return true;
+        }
         if (cap == null) return false;
         if (!column.isEmpty()) {
             return !cap.drain(sample.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()
@@ -799,6 +813,11 @@ public final class FlowSolver {
     /** What the handler will really give up this tick, probed without mutating it. */
     private static int probeDrainable(Level level, BoundaryColumn column, FluidStack sample, int amount) {
         IFluidHandler cap = column.handler(level);
+        // Open ends are never probed through Create's handler (see participates): an intake mouth
+        // yields its own precomputed per-tick amount, a receive-only outlet gives nothing.
+        if (column.isOpenEnd()) {
+            return column.isInfiniteSource() ? Math.min(amount, column.contentMb()) : 0;
+        }
         return cap == null ? 0
                 : cap.drain(sample.copyWithAmount(amount), FluidAction.SIMULATE).getAmount();
     }
@@ -806,6 +825,11 @@ public final class FlowSolver {
     /** What the handler will really accept this tick, probed without mutating it. */
     private static int probeFillable(Level level, BoundaryColumn column, FluidStack sample, int amount) {
         IFluidHandler cap = column.handler(level);
+        // Open ends are never probed through Create's handler (see participates): an intake mouth
+        // takes nothing, a receive-only outlet always accepts the spill (accumulation is at apply).
+        if (column.isOpenEnd()) {
+            return column.isInfiniteSource() ? 0 : amount;
+        }
         return cap == null ? 0
                 : cap.fill(sample.copyWithAmount(amount), FluidAction.SIMULATE);
     }
