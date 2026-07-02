@@ -3,6 +3,7 @@ package de.devin.pipesnphysics.handler;
 import com.simibubi.create.content.fluids.FluidPropagator;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
+import de.devin.pipesnphysics.engine.OpenEndPipes;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
@@ -35,7 +36,12 @@ public final class NetworkEditHandler {
 
     @SubscribeEvent
     public static void onBreak(BlockEvent.BreakEvent event) {
-        if (event.getLevel() instanceof Level level) wakeAround(level, event.getPos());
+        if (event.getLevel() instanceof Level level && !level.isClientSide()) {
+            // Prune any open-end mouth whose pipe this was, so its buffer is not leaked and a rebuilt
+            // mouth starts clean (a no-op for a non-mouth break).
+            OpenEndPipes.onPipeRemoved(level, event.getPos());
+            wakeAround(level, event.getPos());
+        }
     }
 
     @SubscribeEvent

@@ -1272,6 +1272,46 @@ public class PipesNPhysicsGameTests {
     }
 
     /**
+     * An open-end mouth's cached OpenEndedPipe (which buffers partial spill/intake) must be pruned when
+     * its pipe is broken, so the buffer is not leaked and a rebuilt mouth starts clean. A break that is
+     * NOT the mouth's pipe must leave it alone. Regression for the cache only ever being cleared
+     * wholesale on server stop (conservation acceptance criterion).
+     */
+    @GameTest(template = "suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void breakingMouthPipePrunesOpenEndCache(GameTestHelper helper) {
+        BlockPos cauldronRel = new BlockPos(0, 3, 0); // the space the riser opens up into
+        BlockPos mouthPipeRel = new BlockPos(0, 2, 0); // the riser cell whose open face points into it
+        BlockPos seedRel = new BlockPos(1, 1, 0);
+        BlockPos tankRel = new BlockPos(2, 1, 0);
+        helper.runAfterDelay(3, () -> {
+            var level = helper.getLevel();
+            helper.setBlock(cauldronRel, Blocks.WATER_CAULDRON.defaultBlockState()
+                    .setValue(LayeredCauldronBlock.LEVEL, 3));
+            BlockPos space = helper.absolutePos(cauldronRel);
+
+            // A solve resolves — and so caches — the open-end mouth.
+            FlowSolver.solve(level, GraphBuilder.build(level, helper.absolutePos(seedRel)));
+            if (OpenEndPipes.existing(level, space) == null) {
+                helper.fail("open-end mouth was not cached after a solve");
+                return;
+            }
+            // A break that is not this mouth's pipe must not prune it.
+            OpenEndPipes.onPipeRemoved(level, helper.absolutePos(tankRel));
+            if (OpenEndPipes.existing(level, space) == null) {
+                helper.fail("a non-mouth break wrongly pruned the mouth cache");
+                return;
+            }
+            // Breaking the mouth pipe drops its (stale) cached buffer.
+            OpenEndPipes.onPipeRemoved(level, helper.absolutePos(mouthPipeRel));
+            if (OpenEndPipes.existing(level, space) != null) {
+                helper.fail("breaking the mouth pipe did not prune the cache");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * The goggle "Head left" readout must exist on BOTH sides of a working pump —
      * including when the suction run contains a junction with a dead-end stub,
      * which makes the suction cells junction NODES rather than edge interiors.
