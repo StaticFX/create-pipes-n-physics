@@ -8,6 +8,7 @@ import com.simibubi.create.content.fluids.pipes.valve.FluidValveBlock;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.content.kinetics.base.DirectionalAxisKineticBlock;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.content.processing.basin.BasinBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 import com.simibubi.create.foundation.blockEntity.behaviour.fluid.SmartFluidTankBehaviour;
@@ -26,6 +27,8 @@ import de.devin.pipesnphysics.engine.PipeProbe;
 import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.engine.ValveThrottle;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
+import de.devin.pipesnphysics.handler.NetworkEditHandler;
+import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import de.devin.pipesnphysics.mixin.PipeConnectionAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -1305,6 +1308,40 @@ public class PipesNPhysicsGameTests {
             OpenEndPipes.onPipeRemoved(level, helper.absolutePos(mouthPipeRel));
             if (OpenEndPipes.existing(level, space) != null) {
                 helper.fail("breaking the mouth pipe did not prune the cache");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * A multiblock tank's pipe connection can be far from an edited cell — outside findSeed's one-block
+     * ring — so a break/place on a far corner would never wake the settled network. Build a 3-tall tank
+     * whose base sits beside a pipe and edit its TOP cell (two blocks up); the wake must walk the whole
+     * tank footprint and mark the base pipe URGENT.
+     */
+    @GameTest(template = "suck_from_cauldron", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void tankEditFarFromPipeWakesNetwork(GameTestHelper helper) {
+        BlockPos bottomRel = new BlockPos(2, 1, 0);       // beside the pipe at (1,1,0)
+        BlockPos topRel = new BlockPos(2, 3, 0);          // two blocks up — out of findSeed's ring
+        BlockPos pipeRel = new BlockPos(1, 1, 0);
+        // The template ships a creative tank at the base slot; build a 3-tall REAL tank.
+        helper.setBlock(bottomRel, AllBlocks.FLUID_TANK.get().defaultBlockState());
+        helper.setBlock(new BlockPos(2, 2, 0), AllBlocks.FLUID_TANK.get().defaultBlockState());
+        helper.setBlock(topRel, AllBlocks.FLUID_TANK.get().defaultBlockState());
+
+        helper.runAfterDelay(5, () -> {
+            var level = helper.getLevel();
+            if (!(level.getBlockEntity(helper.absolutePos(bottomRel)) instanceof FluidTankBlockEntity tank)
+                    || tank.getControllerBE() == null
+                    || ((FluidTankAccessor) (Object) tank.getControllerBE()).pipesnphysics$getHeight() < 3) {
+                helper.fail("the 3-tall tank did not assemble into one controller");
+                return;
+            }
+            BlockPos pipe = helper.absolutePos(pipeRel);
+            NetworkEditHandler.wakeThroughTank(level, helper.absolutePos(topRel));
+            if (!EngineTickHandler.hasPendingUrgent(level, pipe)) {
+                helper.fail("editing a far multiblock-tank cell did not wake the pipe at its base");
                 return;
             }
             helper.succeed();

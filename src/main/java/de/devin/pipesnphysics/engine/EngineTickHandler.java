@@ -75,6 +75,12 @@ public final class EngineTickHandler {
         URGENT.computeIfAbsent(level.dimension(), k -> new HashSet<>()).add(pos.immutable());
     }
 
+    /** Whether pos is queued for an URGENT (wake) re-check this tick. Test/diagnostic hook. */
+    public static boolean hasPendingUrgent(Level level, BlockPos pos) {
+        Set<BlockPos> urgent = URGENT.get(level.dimension());
+        return urgent != null && urgent.contains(pos);
+    }
+
     /** Discard all pending work — called on server stop. */
     public static void clear() {
         DIRTY.clear();
