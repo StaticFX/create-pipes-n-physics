@@ -202,43 +202,39 @@ public final class BoundaryColumn {
     }
 
     /**
-     * The world fluid an open mouth may draw IN, or EMPTY to keep it a one-way spill
-     * outlet. Eligible bodies:
-     *   - residual already pulled into the pipe's buffer (a partly-delivered draw);
-     *   - a cauldron / honey block, which drains to a clean empty state;
-     *   - a self-regenerating fluid source (a lake), tested with Create's OWN refill check
-     *     ({@code getNewLiquid} on the drained-to-14 state equals the source — the exact
-     *     discriminator {@code OpenEndedPipe} uses) — always drinkable, on the main level
-     *     or projected onto a world lake from a Sable sub-level;
-     *   - ANY other source (a finite / hand-placed block) on the MAIN level, UNLESS the
-     *     network recently spilled or the block is {@link #contested} between two mouths.
-     *     Finite intake is off on Sable sub-levels (the projected coords break the contested
-     *     scan and the sub-level spill mixin preserves rather than consumes a source).
+     * The fluid an open mouth may draw IN, or EMPTY to keep it a one-way spill outlet. Checks the
+     * block the pipe faces on its OWN level FIRST — a main-level source, or one placed on a Sable
+     * sub-level (at its plot coords) — then, for a contraption mouth hovering over the host world, the
+     * PROJECTED world block (mirroring spill, which goes to the world). Residual already pulled into
+     * the pipe's buffer short-circuits both. Finite intake now works on sub-levels too: the drain
+     * (OpenEndedPipeMixin) consumes a finite source and leaves a lake, so it can no longer mint fluid.
      */
     private static FluidStack intakeFluid(Level level, BlockPos space, boolean networkSpilled) {
         if (!PipesNPhysicsConfig.ENABLE_OPEN_END_INTAKE.get()) return FluidStack.EMPTY;
         FluidStack residual = OpenEndPipes.bufferedIntake(level, space);
         if (!residual.isEmpty()) return residual;
+        FluidStack local = drinkableSource(level, space, networkSpilled);
+        if (!local.isEmpty()) return local;
         BlockPos out = worldOutputPos(level, space);
-        BlockState state = level.getBlockState(out);
-        FluidStack drainable = VanillaFluidTargets.drainBlock(level, out, state, true);
+        return out.equals(space) ? FluidStack.EMPTY : drinkableSource(level, out, networkSpilled);
+    }
+
+    /**
+     * The fluid drinkable from the block at {@code pos}, or EMPTY: a cauldron/honey block; a
+     * self-regenerating lake (Create's own {@code getNewLiquid}-on-drained-to-14 discriminator); or a
+     * finite/hand-placed source — the last one UNLESS the network recently spilled (its own spit) or the
+     * block is {@link #contested} between two mouths (a broken run's gap, which drinking teleports across).
+     */
+    private static FluidStack drinkableSource(Level level, BlockPos pos, boolean networkSpilled) {
+        BlockState state = level.getBlockState(pos);
+        FluidStack drainable = VanillaFluidTargets.drainBlock(level, pos, state, true);
         if (!drainable.isEmpty()) return drainable;
         FluidState fluidState = state.getFluidState();
         if (!fluidState.isSource()) return FluidStack.EMPTY;
-        if (survivesDrain(level, out, fluidState)) {
-            return new FluidStack(fluidState.getType(), 1000); // a lake — always drinkable
+        if (survivesDrain(level, pos, fluidState)) {
+            return new FluidStack(fluidState.getType(), 1000);
         }
-        // A finite/hand-placed source: pull it, UNLESS
-        //   - this network spilled recently (could be sucking its own spit back), or
-        //   - the block is wedged between two pipe mouths — a broken run's spill, drinking
-        //     which would teleport fluid across the gap, or
-        //   - the mouth is on a Sable sub-level (out != space): the projection breaks the
-        //     contested scan, and the sub-level spill mixin PRESERVES a drained source
-        //     rather than consuming it, so a finite block there would mint infinite fluid.
-        //     Lakes are handled above (survivesDrain reads the real world block), so a
-        //     contraption pipe dipped in a world lake still works.
-        boolean projected = !out.equals(space);
-        if (!projected && !networkSpilled && !contested(level, out)) {
+        if (!networkSpilled && !contested(level, pos)) {
             return new FluidStack(fluidState.getType(), 1000);
         }
         return FluidStack.EMPTY;
