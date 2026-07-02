@@ -45,6 +45,7 @@ public class SableCompat {
 
     public static void clearCaches() {
         PROVIDER.clearCaches();
+        if (SUBLEVELS_PRESENT) SableSubLevelDriver.clear();
     }
 
     public static boolean isSubLevelReady(Level level, BlockPos pos) {

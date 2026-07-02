@@ -24,6 +24,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_WORLD_PLACEMENT;
+    public static final ModConfigSpec.BooleanValue ENABLE_SUBLEVEL_CONNECTION_REFRESH;
     public static final ModConfigSpec.DoubleValue FLUID_MASS_PER_BUCKET;
 
     // Client
@@ -37,6 +38,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue FLUID_DEBUG_RENDER;
     public static final ModConfigSpec.BooleanValue FLUID_HIDE_TEXTURE;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_PIPE_LEVEL_RENDER;
+    public static final ModConfigSpec.DoubleValue EXPERIMENTAL_PIPE_LEVEL_FLOW_SPEED;
 
     static {
         ModConfigSpec.Builder server = new ModConfigSpec.Builder();
@@ -90,6 +92,13 @@ public class PipesNPhysicsConfig {
                 .comment("When an open-ended pipe on a Sable sub-level spills fluid,",
                         "place the fluid block in the real world at the projected position.")
                 .define("enableOpenEndWorldPlacement", true);
+        ENABLE_SUBLEVEL_CONNECTION_REFRESH = server
+                .comment("Recompute pipe connection state on Sable sub-levels. Sable assembles a",
+                        "contraption with raw setBlockState (no neighbour update), so a pipe's",
+                        "connection shape can stay stale and drop real edges — the network then",
+                        "solves 'no flow' until a manual pipe edit fixes it. This refreshes each",
+                        "sub-level pipe once so pumps/networks work without the manual poke.")
+                .define("enableSubLevelConnectionRefresh", true);
         server.pop();
 
         server.push("tankMass");
@@ -151,6 +160,11 @@ public class PipesNPhysicsConfig {
                         "server-side encode is gated on the CLIENT being present, so it is singleplayer-only",
                         "for now.) When false, pipes render exactly as stock Create.")
                 .define("experimentalPipeLevelRender", false);
+        EXPERIMENTAL_PIPE_LEVEL_FLOW_SPEED = client
+                .comment("Speed multiplier for the in-pipe fluid scroll animation (the level renderer above).",
+                        "1.0 = default; lower it to calm a fast flow, raise it to make it livelier. Only the",
+                        "animation speed changes, not the actual fluid transfer.")
+                .defineInRange("experimentalPipeLevelFlowSpeed", 1.0, 0.0, 10.0);
         client.pop();
         CLIENT_SPEC = client.build();
     }

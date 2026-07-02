@@ -1,14 +1,21 @@
 package de.devin.pipesnphysics.mixin;
 
 import com.simibubi.create.content.fluids.OpenEndedPipe;
+import com.simibubi.create.foundation.fluid.FluidHelper;
+import com.simibubi.create.infrastructure.config.AllConfigs;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import net.minecraft.core.BlockPos;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.material.FlowingFluid;
 import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.fluids.FluidStack;
 import org.spongepowered.asm.mixin.Mixin;
@@ -39,6 +46,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * Off a sub-level (or with the companion absent, or the feature disabled)
  * {@link #pipesnphysics$getWorldOutputPos} returns null and Create's stock behavior
  * (and Sable's redirects) run untouched.
+ *
+ * Because we take over the placement, we must also mirror Create's placement POLICY that
+ * lives past the {@code setBlock}: the {@code pipesPlaceFluidSourceBlocks} server config and
+ * the ultra-warm evaporation of water (a Nether open end must hiss, not leave a water block).
  */
 @Mixin(value = OpenEndedPipe.class, remap = false)
 public class OpenEndedPipeMixin {
@@ -62,7 +73,8 @@ public class OpenEndedPipeMixin {
 
         BlockState state = world.getBlockState(worldBlockPos);
         FluidState fluidState = state.getFluidState();
-        if (!state.canBeReplaced()) {
+        boolean waterlog = state.hasProperty(BlockStateProperties.WATERLOGGED);
+        if (!waterlog && !state.canBeReplaced()) {
             cir.setReturnValue(false);
             return;
         }
@@ -70,7 +82,36 @@ public class OpenEndedPipeMixin {
             cir.setReturnValue(false);
             return;
         }
+        if (waterlog && fluid.getFluid() != Fluids.WATER) {
+            cir.setReturnValue(false); // a waterloggable target only accepts water
+            return;
+        }
         if (simulate) {
+            cir.setReturnValue(true);
+            return;
+        }
+
+        // We cancelled Create's provideFluidToSpace to place at the projected world pos, so we
+        // must also honour the two placement POLICIES it applies past this point — otherwise a
+        // contraption open end mints blocks the base game would never allow. Both branches still
+        // ACCEPT the fluid (return true) so the source tank drains; only the world block differs.
+        if (!AllConfigs.server().fluids.pipesPlaceFluidSourceBlocks.get()) {
+            cir.setReturnValue(true); // server forbids source placement: consume, place nothing
+            return;
+        }
+        if (world.dimensionType().ultraWarm() && FluidHelper.isTag(fluid, FluidTags.WATER)) {
+            // Water evaporates in the Nether (and any ultra-warm dimension) — hiss, don't place.
+            world.playSound(null, worldBlockPos.getX(), worldBlockPos.getY(), worldBlockPos.getZ(),
+                    SoundEvents.FIRE_EXTINGUISH, SoundSource.BLOCKS, 0.5F,
+                    2.6F + (world.random.nextFloat() - world.random.nextFloat()) * 0.8F);
+            cir.setReturnValue(true);
+            return;
+        }
+        if (waterlog) {
+            // Waterlog the target instead of overwriting it, as Create does.
+            world.setBlock(worldBlockPos, state.setValue(BlockStateProperties.WATERLOGGED, true),
+                    Block.UPDATE_ALL);
+            world.scheduleTick(worldBlockPos, Fluids.WATER, 1);
             cir.setReturnValue(true);
             return;
         }

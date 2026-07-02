@@ -36,6 +36,9 @@ import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import net.neoforged.neoforge.client.extensions.common.IClientFluidTypeExtensions;
 import net.neoforged.neoforge.fluids.FluidStack;
 
+import java.util.HashMap;
+import java.util.Map;
+
 /**
  * SPIKE renderer for {@code EXPERIMENTAL_PIPE_LEVEL_RENDER}: draws resting fluid inside a straight
  * pipe at its actual WATERLINE — a partial fill at the solved surface — instead of Create's binary
@@ -53,10 +56,14 @@ public final class PipeLevelRenderer {
     /** Fluid-column half-width inside the pipe (matches Create's stream radius, {@code 3/16}). */
     private static final float PIPE_RADIUS = 3f / 16f;
 
-    /** Scroll speed (blocks/sec) per unit of flow pressure — Create's {@code flowPressure} is ∝ mB/t. */
+    /**
+     * Scroll speed (blocks/sec) per unit of flow pressure — Create's {@code flowPressure} is ∝ mB/t.
+     * {@link #MAX_SCROLL} bounds it so a brisk flow (e.g. a pump pulling from an infinite source) does
+     * not scroll frantically fast; the fill still SPEEDS UP with flow, it just stops climbing past the cap.
+     */
     private static final float SCROLL_PER_PRESSURE = 0.08f;
     private static final float MIN_SCROLL = 0.4f;
-    private static final float MAX_SCROLL = 8f;
+    private static final float MAX_SCROLL = 4f;
 
     /**
      * How many chunks out from the camera to scan for pipes. Bounded for the spike; the mixins hide
@@ -71,6 +78,26 @@ public final class PipeLevelRenderer {
     private static final MultiBufferSource.BufferSource OWN_BUFFER =
             MultiBufferSource.immediate(new ByteBufferBuilder(2048));
 
+    /** Ticks over which a just-emptied cell's waterline recedes to zero instead of popping. */
+    private static final float FADE_TICKS = 6f;
+
+    /**
+     * Last-rendered waterline per pipe cell, so a cell that loses its solved fill RECEDES to empty over
+     * {@link #FADE_TICKS} rather than vanishing in a frame (the "just despawns when empty" report). A
+     * live cell refreshes its entry every frame; once the solve stops stamping it, the entry drains and
+     * is dropped. Stale entries (a cell that left the scan radius) are pruned by {@code lastSeen}.
+     * Client-render bookkeeping only; keyed by cell, cleared when there is no level.
+     */
+    private static final Map<BlockPos, Fade> FADES = new HashMap<>();
+
+    /** Mutable per-cell fade record (see {@link #FADES}). */
+    private static final class Fade {
+        int data;
+        FluidStack fluid;
+        float fadeStart = -1f; // tick the recede began, -1 while the cell is still solved/full
+        float lastSeen;
+    }
+
     private PipeLevelRenderer() {}
 
     @SubscribeEvent
@@ -80,10 +107,14 @@ public final class PipeLevelRenderer {
 
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
-        if (level == null) return;
+        if (level == null) {
+            FADES.clear();
+            return;
+        }
 
         Vec3 camera = mc.gameRenderer.getMainCamera().getPosition();
         PoseStack poseStack = event.getPoseStack();
+        float now = AnimationTickHolder.getTicks() + AnimationTickHolder.getPartialTicks();
         boolean drewAny = false;
 
         int camChunkX = SectionPos.blockToSectionCoord(Mth.floor(camera.x));
@@ -96,36 +127,67 @@ public final class PipeLevelRenderer {
                 }
                 for (BlockEntity be : chunk.getBlockEntities().values()) {
                     if (be instanceof StraightPipeBlockEntity pipe) {
-                        drewAny |= renderCell(level, pipe, camera, poseStack);
+                        drewAny |= renderCell(level, pipe, camera, poseStack, now);
                     }
                 }
             }
         }
+
+        // Drop fade records for cells that left the scan radius (a fading cell keeps refreshing lastSeen
+        // until its recede finishes and removes it explicitly).
+        FADES.entrySet().removeIf(e -> now - e.getValue().lastSeen > FADE_TICKS + 4f);
 
         if (drewAny) OWN_BUFFER.endBatch();
     }
 
     /** Draw one pipe cell's waterline, returning whether anything was emitted. */
     private static boolean renderCell(ClientLevel level, StraightPipeBlockEntity be,
-                                      Vec3 camera, PoseStack poseStack) {
+                                      Vec3 camera, PoseStack poseStack, float now) {
         BlockState state = be.getBlockState();
         if (!state.hasProperty(AxisPipeBlock.AXIS)) return false;
 
         FluidTransportBehaviour pipe = be.getBehaviour(FluidTransportBehaviour.TYPE);
         if (!(pipe instanceof PipeLevelData holder)) return false;
-        int data = holder.pipesnphysics$getLevelData();
-        if (data == 0) return false; // not level-rendered
+        BlockPos cellPos = be.getBlockPos();
 
         // Level + direction come from the dedicated synced field; the fluid TYPE from any flow (which
         // Create still syncs — we only hid it from Create's own draw).
-        FluidStack fluid = anyFluid(pipe);
-        if (fluid == null) return false;
+        int data = holder.pipesnphysics$getLevelData();
+        FluidStack fluid = data != 0 ? anyFluid(pipe) : null;
 
-        float frac = CreatePipeRendering.levelFraction(data);
+        boolean fading = false;
+        float fadeScale = 1f;
+        if (data != 0 && fluid != null) {
+            // Live cell: remember it so a later drain can recede from this fill instead of popping.
+            Fade f = FADES.computeIfAbsent(cellPos.immutable(), k -> new Fade());
+            f.data = data;
+            f.fluid = fluid;
+            f.fadeStart = -1f;
+            f.lastSeen = now;
+        } else {
+            // No solved fill this frame: recede a just-emptied cell to zero over FADE_TICKS.
+            Fade f = FADES.get(cellPos);
+            if (f == null) return false;
+            if (f.fadeStart < 0f) f.fadeStart = now;
+            float elapsed = now - f.fadeStart;
+            if (elapsed >= FADE_TICKS) {
+                FADES.remove(cellPos);
+                return false;
+            }
+            fading = true;
+            fadeScale = 1f - elapsed / FADE_TICKS;
+            data = f.data;
+            fluid = f.fluid;
+            f.lastSeen = now;
+        }
+
+        float frac = CreatePipeRendering.levelFraction(data) * fadeScale;
         if (frac <= 0) return false;
 
+        // A draining (fading) cell renders STILL and recedes purely by frac — no scroll, no travelling
+        // front (its flow is gone). Only a live flowing cell keeps its direction/front.
         int dirIndex = CreatePipeRendering.levelFlowDir(data);
-        Direction flowDir = dirIndex < 0 ? null : Direction.from3DDataValue(dirIndex);
+        Direction flowDir = fading || dirIndex < 0 ? null : Direction.from3DDataValue(dirIndex);
 
         float lo = 0.5f - PIPE_RADIUS;
         float hi = 0.5f + PIPE_RADIUS;
@@ -153,8 +215,7 @@ public final class PipeLevelRenderer {
             }
         }
 
-        BlockPos pos = be.getBlockPos();
-        int light = LevelRenderer.getLightColor(level, pos);
+        int light = LevelRenderer.getLightColor(level, cellPos);
 
         // Advance the travelling front: clip the cell's fluid along the flow axis by how far it has
         // filled (the connection fill progress chargeEdge animates), from the inbound face. So a
@@ -172,7 +233,7 @@ public final class PipeLevelRenderer {
         }
 
         poseStack.pushPose();
-        poseStack.translate(pos.getX() - camera.x, pos.getY() - camera.y, pos.getZ() - camera.z);
+        poseStack.translate(cellPos.getX() - camera.x, cellPos.getY() - camera.y, cellPos.getZ() - camera.z);
         if (flowDir == null) {
             // Resting: the proven catnip box (still texture, non-directional).
             NeoForgeCatnipServices.FLUID_RENDERER.renderFluidBox(
@@ -216,8 +277,10 @@ public final class PipeLevelRenderer {
         int lightOut = (light & 0xF00000) | luminosity << 4;
         VertexConsumer builder = FluidRenderHelper.getFluidBuilder(OWN_BUFFER);
 
-        // Scroll speed tracks the flow: Create's flowPressure (∝ mB/t) drives blocks/sec.
-        float speed = Math.clamp(pressure * SCROLL_PER_PRESSURE, MIN_SCROLL, MAX_SCROLL);
+        // Scroll speed tracks the flow: Create's flowPressure (∝ mB/t) drives blocks/sec, scaled by
+        // the client's flow-speed setting.
+        float speed = Math.clamp(pressure * SCROLL_PER_PRESSURE, MIN_SCROLL, MAX_SCROLL)
+                * PipesNPhysicsConfig.EXPERIMENTAL_PIPE_LEVEL_FLOW_SPEED.get().floatValue();
         float t = (AnimationTickHolder.getTicks() + AnimationTickHolder.getPartialTicks()) / 20f;
         float scroll = (t * speed) % 1f;
         // Move the texture WITH the fluid (toward the downstream face). Flip this sign to reverse.

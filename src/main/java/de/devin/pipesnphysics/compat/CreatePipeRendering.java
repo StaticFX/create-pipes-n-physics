@@ -59,6 +59,12 @@ public final class CreatePipeRendering {
     private static final double SUBMERSION_EPS = 0.05;
 
     /**
+     * How far the render pressure (the scroll-speed knob) must move before a steady flow re-syncs it.
+     * Keeps a settled flow from sending an update every tick while still un-sticking a stale value.
+     */
+    private static final float PRESSURE_REFRESH_EPS = 8f;
+
+    /**
      * In-pipe LEVEL render (experimental spike, {@code EXPERIMENTAL_PIPE_LEVEL_RENDER}). When on, a
      * wet cell's solved WATERLINE (and, when flowing, the FLOW DIRECTION) is stamped onto the pipe's
      * {@code FluidTransportBehaviour} as a dedicated, client-synced-but-not-saved {@link PipeLevelData}
@@ -497,16 +503,46 @@ public final class CreatePipeRendering {
         return !travellingFeeder;
     }
 
-    /** Whether this edge's charged front has arrived at the given endpoint node. */
+    /**
+     * Whether this edge's travelling front has arrived at the given endpoint node — i.e. the fill
+     * {@link #chargeEdge} animates has crawled the WHOLE run contiguously from the source, not merely
+     * lit up the sink-adjacent cell.
+     *
+     * Checking only the terminal cell decoupled delivery from the drawn fluid: {@link #seedComplete}
+     * marks resting/standing cells complete, and {@link #preserveStandingFluid} keeps those complete
+     * flows on the sink-side cells alive while a freshly-started flow's front is still crawling a dry
+     * upstream gap (an elevated source draining down to a lower sink through a primed lower column).
+     * The old terminal-cell check then read that pre-existing standing fluid as "front arrived" and
+     * released the endpoint transfer immediately, so the tanks changed while the visible waterline was
+     * still creeping. Requiring EVERY trackable cell's downstream (toward-sink) connection to be
+     * complete holds the transfer until the front actually merges with the standing column — the air
+     * gap must fill before the incompressible column moves, which is also exactly what the renderer
+     * draws (its front mirrors {@code chargeEdge}).
+     *
+     * The per-cell check SKIPS (treats as passed) any cell the front itself can't track — a missing
+     * pipe, an untrackable direction, or a face with no interface — mirroring {@code chargeEdge}'s own
+     * break conditions, so an odd-geometry cell can never deadlock delivery. A fully-primed continuous
+     * column has every cell complete, so it still delivers instantly (and is already drawn full).
+     */
     private static boolean frontReachedNode(Level level, Graph graph, Edge edge, int nodeIndex) {
         List<BlockPos> pipes = edge.pipes();
-        BlockPos endCell = edge.b() == nodeIndex ? pipes.get(pipes.size() - 1) : pipes.get(0);
-        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, endCell);
-        if (pipe == null) return true;                          // can't track — don't stall
-        Direction towardNode = direction(endCell, graph.node(nodeIndex).pos());
-        if (towardNode == null) return true;
-        PipeConnection conn = pipe.getConnection(towardNode);
-        return conn == null || isComplete(conn);                // the front has exited toward the node
+        if (pipes.isEmpty()) return true;
+        // Walk source -> sink so each cell's downstream face points at the next cell (or the sink node
+        // for the last), the face chargeEdge fills last.
+        List<BlockPos> order = edge.b() == nodeIndex ? pipes : pipes.reversed();
+        BlockPos sinkPos = graph.node(nodeIndex).pos();
+        for (int j = 0; j < order.size(); j++) {
+            BlockPos cell = order.get(j);
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+            if (pipe == null) continue;                         // can't track — don't stall on it
+            BlockPos down = j == order.size() - 1 ? sinkPos : order.get(j + 1);
+            Direction toward = direction(cell, down);
+            if (toward == null) continue;
+            PipeConnection conn = pipe.getConnection(toward);
+            if (conn == null) continue;                         // no interface that way — skip
+            if (!isComplete(conn)) return false;                // front still crawling toward the sink
+        }
+        return true;                                            // charged all the way to the node
     }
 
     /**
@@ -824,7 +860,18 @@ public final class CreatePipeRendering {
             PipeConnection.Flow flow = current.get();
             boolean sameFluid = FluidStack.isSameFluidSameComponents(flow.fluid, fluid);
             if (flow.inbound == inbound && sameFluid) {
-                return false; // tickFlowProgress owns its progress — don't reset it
+                // Same direction + fluid: KEEP the fill progress (tickFlowProgress owns it), but refresh
+                // the pressure (the scroll-speed knob) so it tracks the CURRENT flow rate. Without this
+                // it stayed frozen at the rate from the first seed, so a transient re-seed — e.g.
+                // wrenching a pipe splits then rejoins the run for a tick at low/zero flow — stuck the
+                // animation speed low permanently. Only re-sync when it moved, so a steady flow is quiet.
+                var p = conn.getPressure();
+                if (Math.abs(Math.max(p.getFirst(), p.getSecond()) - pressure) <= PRESSURE_REFRESH_EPS) {
+                    return false;
+                }
+                conn.wipePressure();
+                conn.addPressure(inbound, pressure);
+                return true;
             }
             if (sameFluid && flow.complete) {
                 // A FULL pipe whose flow merely reversed direction is still full: flip the
