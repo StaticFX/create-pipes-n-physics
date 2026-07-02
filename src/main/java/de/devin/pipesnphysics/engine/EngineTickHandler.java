@@ -125,6 +125,15 @@ public final class EngineTickHandler {
     private static void tickNetwork(ServerLevel level, BlockPos pos, Set<BlockPos> covered,
                                     Map<BlockPos, Long> quiet, long now, boolean wake) {
         if (!level.isLoaded(pos)) return;
+        // Fast path: every pipe self-marks each tick, and a pipe IS a coverage/quiet cell, so check the
+        // RAW pos before resolving findSeed (a chunk BE lookup plus up to six neighbour lookups). Both
+        // maps are keyed by every coverage cell, so a hit means this pos is an already-solved or still-
+        // sleeping pipe — skip it. Non-pipe marks (a pump face, a tank wall) miss and fall through.
+        if (covered.contains(pos)) return;
+        if (!wake) {
+            Long sleepUntil = quiet.get(pos);
+            if (sleepUntil != null && sleepUntil > now) return;
+        }
         BlockPos seed = GraphBuilder.findSeed(level, pos);
         if (seed == null || covered.contains(seed)) return;
         if (!wake) {

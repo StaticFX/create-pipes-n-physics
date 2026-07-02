@@ -470,4 +470,65 @@ class NetworkSolverTest {
         for (double head : result.heads()) assertFalse(Double.isNaN(head));
         assertEquals(10, result.heads()[0], 1e-9, "isolated tank keeps its head");
     }
+
+    /**
+     * Above DIRECT_SOLVE_LIMIT the solver switches from Gaussian elimination to a sparse
+     * Jacobi-preconditioned conjugate gradient. It must solve the SAME system: a symmetric chain (both
+     * ends full) has to produce a symmetric head profile and conserve volume — a broken sparse matvec
+     * would violate either. n = 200 forces the sparse path.
+     */
+    @Test
+    void sparseSolverIsSymmetricAndConservesOnLargeNetwork() {
+        int n = 200;
+        List<NodeSpec> nodes = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            nodes.add(new NodeSpec(TANK_CAPACITANCE, i == 0 || i == n - 1 ? 100 : 0));
+        }
+        List<BranchSpec> branches = new ArrayList<>();
+        for (int i = 1; i < n; i++) branches.add(BranchSpec.passive(i - 1, i, 50));
+
+        Result result = step(nodes, branches);
+
+        double total = 0;
+        for (int i = 0; i < n; i++) total += result.netInflow()[i];
+        assertEquals(0, total, 1e-4, "volume conserved on the large network");
+        for (int i = 0; i < n; i++) {
+            assertFalse(Double.isNaN(result.heads()[i]), "head " + i + " must be finite");
+            assertEquals(result.heads()[n - 1 - i], result.heads()[i], 1e-6,
+                    "a symmetric input must give a symmetric head profile (node " + i + ")");
+        }
+    }
+
+    /**
+     * The sparse path must be stable over many ticks: a single full tank diffusing down a long chain
+     * conserves total volume every step, never overshoots (no negative head), and the surface spread
+     * only shrinks (the diffusion maximum principle). n = 150 stays on the sparse path.
+     */
+    @Test
+    void sparseSolverConservesAndSettlesOverManyTicks() {
+        int n = 150;
+        List<NodeSpec> nodes = new ArrayList<>();
+        for (int i = 0; i < n; i++) nodes.add(new NodeSpec(TANK_CAPACITANCE, i == 0 ? 100 : 0));
+        List<BranchSpec> branches = new ArrayList<>();
+        for (int i = 1; i < n; i++) branches.add(BranchSpec.passive(i - 1, i, 50));
+
+        double initialVolume = 100 * TANK_CAPACITANCE;
+        double previousSpread = 100;
+        for (int tick = 0; tick < 300; tick++) {
+            Result result = step(nodes, branches);
+            nodes = advance(nodes, result);
+
+            double lo = Double.MAX_VALUE, hi = -Double.MAX_VALUE, volume = 0;
+            for (NodeSpec node : nodes) {
+                lo = Math.min(lo, node.head());
+                hi = Math.max(hi, node.head());
+                volume += node.head() * node.capacitance();
+            }
+            assertEquals(initialVolume, volume, 1e-2, "volume conserved across steps (tick " + tick + ")");
+            assertTrue(lo >= -1e-6, "no tank overshoots below empty (tick " + tick + "), got " + lo);
+            assertTrue(hi - lo <= previousSpread + 1e-6, "the surface spread must not grow (tick " + tick + ")");
+            previousSpread = hi - lo;
+        }
+        assertTrue(previousSpread < 100, "the chain made progress toward equalization");
+    }
 }

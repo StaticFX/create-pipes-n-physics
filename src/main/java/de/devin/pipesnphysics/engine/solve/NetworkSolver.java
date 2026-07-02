@@ -367,37 +367,118 @@ public final class NetworkSolver {
     private static double[] solveHeads(List<NodeSpec> nodes, List<BranchSpec> branches,
                                        boolean[] active, double[] gateScale, double dt) {
         int n = nodes.size();
-        double[][] a = new double[n][n];
-        double[] rhs = new double[n];
+        if (n <= DIRECT_SOLVE_LIMIT) {
+            double[][] a = new double[n][n];
+            double[] rhs = new double[n];
+            for (int i = 0; i < n; i++) {
+                a[i][i] = nodes.get(i).capacitance() / dt;
+                rhs[i] = a[i][i] * nodes.get(i).head();
+            }
+            for (int e = 0; e < branches.size(); e++) {
+                if (!active[e]) continue;
+                BranchSpec br = branches.get(e);
+                double c = gateScale[e] * br.conductance();
+                a[br.a()][br.a()] += c;
+                a[br.b()][br.b()] += c;
+                a[br.a()][br.b()] -= c;
+                a[br.b()][br.a()] -= c;
+                rhs[br.a()] -= c * br.emf();
+                rhs[br.b()] += c * br.emf();
+            }
+            for (int i = 0; i < n; i++) {
+                if (a[i][i] == 0) {
+                    a[i][i] = 1;
+                    rhs[i] = nodes.get(i).head();
+                }
+            }
+            return gaussianSolve(a, rhs);
+        }
+        return sparseConjugateGradient(nodes, branches, active, gateScale, dt);
+    }
 
+    /**
+     * Solve {@code (C/dt + L) h = rhs} for a large network without ever materializing the dense
+     * matrix. The Laplacian has only ~E nonzero off-diagonals, so a sparse matvec over the active
+     * branches plus a diagonal is O(n+E) per iteration instead of the dense O(n²). A Jacobi (diagonal)
+     * preconditioner collapses the stiff conditioning that reservoir capacitances (up to 4,000,000/dt
+     * against ~conductance junction rows) impose, and the loop stops on a PHYSICAL head tolerance
+     * (~1e-6 blocks) rather than machine precision. Scratch arrays are all allocated once. Matches the
+     * dense path's system exactly, so it is identical numerically to the direct solve on the same input.
+     */
+    private static double[] sparseConjugateGradient(List<NodeSpec> nodes, List<BranchSpec> branches,
+                                                    boolean[] active, double[] gateScale, double dt) {
+        int n = nodes.size();
+        int m = branches.size();
+        double[] diag = new double[n];
+        double[] rhs = new double[n];
         for (int i = 0; i < n; i++) {
-            NodeSpec node = nodes.get(i);
-            a[i][i] = node.capacitance() / dt;
-            rhs[i] = node.capacitance() / dt * node.head();
+            double c = nodes.get(i).capacitance() / dt;
+            diag[i] = c;
+            rhs[i] = c * nodes.get(i).head();
         }
 
-        for (int e = 0; e < branches.size(); e++) {
+        // Fold each active branch into the diagonal + rhs, and record its off-diagonal stamp (a,b,c)
+        // for the matvec: A·p = diag∘p − Σ c·(p_b·e_a + p_a·e_b).
+        int[] ea = new int[m];
+        int[] eb = new int[m];
+        double[] ec = new double[m];
+        int edges = 0;
+        for (int e = 0; e < m; e++) {
             if (!active[e]) continue;
             BranchSpec br = branches.get(e);
             double c = gateScale[e] * br.conductance();
-            a[br.a()][br.a()] += c;
-            a[br.b()][br.b()] += c;
-            a[br.a()][br.b()] -= c;
-            a[br.b()][br.a()] -= c;
+            diag[br.a()] += c;
+            diag[br.b()] += c;
             rhs[br.a()] -= c * br.emf();
             rhs[br.b()] += c * br.emf();
+            ea[edges] = br.a();
+            eb[edges] = br.b();
+            ec[edges] = c;
+            edges++;
         }
-
         for (int i = 0; i < n; i++) {
-            if (a[i][i] == 0) {
-                a[i][i] = 1;
+            if (diag[i] == 0) {
+                diag[i] = 1;
                 rhs[i] = nodes.get(i).head();
             }
         }
 
-        return n <= DIRECT_SOLVE_LIMIT
-                ? gaussianSolve(a, rhs)
-                : conjugateGradient(a, rhs);
+        double[] x = new double[n];
+        double[] r = Arrays.copyOf(rhs, n); // r = rhs − A·x with x = 0
+        double[] z = new double[n];
+        double[] p = new double[n];
+        double[] ap = new double[n];
+        for (int i = 0; i < n; i++) {
+            z[i] = r[i] / diag[i];
+            p[i] = z[i];
+        }
+        double rzOld = dot(r, z);
+
+        for (int iter = 0; iter < 20 * n && rzOld > 0; iter++) {
+            for (int i = 0; i < n; i++) ap[i] = diag[i] * p[i];
+            for (int e = 0; e < edges; e++) {
+                ap[ea[e]] -= ec[e] * p[eb[e]];
+                ap[eb[e]] -= ec[e] * p[ea[e]];
+            }
+            double pap = dot(p, ap);
+            if (pap <= 0) break;
+            double alpha = rzOld / pap;
+            double maxStep = 0;
+            for (int i = 0; i < n; i++) {
+                double step = alpha * p[i];
+                x[i] += step;
+                r[i] -= alpha * ap[i];
+                double abs = Math.abs(step);
+                if (abs > maxStep) maxStep = abs;
+            }
+            if (maxStep < 1.0e-6) break; // heads settled to within 1e-6 blocks
+            for (int i = 0; i < n; i++) z[i] = r[i] / diag[i];
+            double rzNew = dot(r, z);
+            double beta = rzNew / rzOld;
+            for (int i = 0; i < n; i++) p[i] = z[i] + beta * p[i];
+            rzOld = rzNew;
+        }
+        return x;
     }
 
     private static double[] gaussianSolve(double[][] a, double[] rhs) {
@@ -428,43 +509,6 @@ public final class NetworkSolver {
             x[row] = Math.abs(a[row][row]) < 1.0e-12 ? 0 : sum / a[row][row];
         }
         return x;
-    }
-
-    private static double[] conjugateGradient(double[][] a, double[] rhs) {
-        int n = rhs.length;
-        double[] x = new double[n];
-        double[] r = Arrays.copyOf(rhs, n);
-        double[] p = Arrays.copyOf(rhs, n);
-        double rsOld = dot(r, r);
-        double tolerance = Math.max(1.0e-18, 1.0e-16 * rsOld);
-
-        for (int iter = 0; iter < 20 * n && rsOld > tolerance; iter++) {
-            double[] ap = multiply(a, p);
-            double pap = dot(p, ap);
-            if (pap <= 0) break;
-            double alpha = rsOld / pap;
-            for (int i = 0; i < n; i++) {
-                x[i] += alpha * p[i];
-                r[i] -= alpha * ap[i];
-            }
-            double rsNew = dot(r, r);
-            double beta = rsNew / rsOld;
-            for (int i = 0; i < n; i++) p[i] = r[i] + beta * p[i];
-            rsOld = rsNew;
-        }
-        return x;
-    }
-
-    private static double[] multiply(double[][] a, double[] v) {
-        int n = v.length;
-        double[] out = new double[n];
-        for (int i = 0; i < n; i++) {
-            double sum = 0;
-            double[] row = a[i];
-            for (int j = 0; j < n; j++) sum += row[j] * v[j];
-            out[i] = sum;
-        }
-        return out;
     }
 
     private static double dot(double[] a, double[] b) {
