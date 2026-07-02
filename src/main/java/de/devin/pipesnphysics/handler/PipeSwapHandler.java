@@ -62,21 +62,16 @@ public class PipeSwapHandler {
             pumpFacing = player.getDirection();
         }
 
-        ItemStack pipeItem = new ItemStack(pipeState.getBlock().asItem());
-
         BlockState pumpState = pumpBlock.defaultBlockState().setValue(PumpBlock.FACING, pumpFacing);
-        level.removeBlockEntity(pos);
-        level.setBlock(pos, pumpState, Block.UPDATE_ALL);
-
+        // Refund the pipe's REAL loot (an encased pipe's casing, a smart pipe's filter) before it is
+        // replaced — a synthesized asItem() stack is AIR for an encased pipe, so the old code deleted
+        // it without refund. Skipped in creative, like a creative break. setBlock removes the old BE
+        // below; do NOT pre-remove it, or this drop loses its BE context and onRemove side effects skip.
         if (!player.isCreative()) {
+            Block.dropResources(pipeState, level, pos, level.getBlockEntity(pos));
             held.shrink(1);
         }
-
-        if (!pipeItem.isEmpty() && !player.isCreative()) {
-            if (!player.getInventory().add(pipeItem)) {
-                player.drop(pipeItem, false);
-            }
-        }
+        level.setBlock(pos, pumpState, Block.UPDATE_ALL);
 
         level.playSound(null, pos, SoundEvents.METAL_PLACE, SoundSource.BLOCKS, 1.0f, 1.0f);
 
