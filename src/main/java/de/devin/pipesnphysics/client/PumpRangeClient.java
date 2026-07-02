@@ -20,6 +20,14 @@ public final class PumpRangeClient {
 
     private PumpRangeClient() {}
 
+    /** Drop the held range and timers — called when the player leaves the world or changes dimension. */
+    public static void clear() {
+        latest = null;
+        lastLookedAt = Long.MIN_VALUE;
+        lastRequestedPos = null;
+        lastRequestedAt = 0;
+    }
+
     public static void receive(PumpRangePayload payload, long gameTime) {
         if (latest == null || latest.pumpPos().equals(payload.pumpPos())
                 || gameTime - lastLookedAt <= 1) {

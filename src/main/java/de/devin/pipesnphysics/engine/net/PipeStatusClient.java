@@ -19,6 +19,14 @@ public final class PipeStatusClient {
 
     private PipeStatusClient() {}
 
+    /** Drop the held status and timers — called when the player leaves the world or changes dimension. */
+    public static void clear() {
+        latest = null;
+        latestReceivedAt = 0;
+        lastRequestedPos = null;
+        lastRequestedAt = 0;
+    }
+
     public static void receive(PipeStatusPayload payload, long gameTime) {
         latest = payload;
         latestReceivedAt = gameTime;

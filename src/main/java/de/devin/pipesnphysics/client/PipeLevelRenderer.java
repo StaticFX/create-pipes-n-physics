@@ -100,6 +100,11 @@ public final class PipeLevelRenderer {
 
     private PipeLevelRenderer() {}
 
+    /** Drop all fade records — called when the player leaves the world or changes dimension. */
+    public static void clear() {
+        FADES.clear();
+    }
+
     @SubscribeEvent
     public static void onRenderLevel(RenderLevelStageEvent event) {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) return;
