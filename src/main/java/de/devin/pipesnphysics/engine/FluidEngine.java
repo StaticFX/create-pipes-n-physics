@@ -35,14 +35,6 @@ import java.util.List;
 public final class FluidEngine {
     private FluidEngine() {}
 
-    /** Run one full tick (build, solve, apply) on the network containing seedPos. */
-    public static Solution tick(ServerLevel level, BlockPos seedPos) {
-        Graph graph = GraphBuilder.build(level, seedPos);
-        Solution solution = FlowSolver.solve(level, graph);
-        apply(level, solution);
-        return solution;
-    }
-
     /** Build a graph without solving. Used by /pipegraph and the overlay. */
     public static Graph buildGraph(ServerLevel level, BlockPos seedPos) {
         return GraphBuilder.build(level, seedPos);
@@ -55,18 +47,11 @@ public final class FluidEngine {
     }
 
     /**
-     * Execute the planned transfers. Capabilities are looked up again here — the
-     * world may have changed since the solve — and each transfer is clamped by what
-     * the source can actually give and the sink can actually take, so a stale plan
-     * degrades to a smaller (or zero) transfer instead of an error.
-     */
-    public static void apply(ServerLevel level, Solution solution) {
-        apply(level, solution.transfers());
-    }
-
-    /**
-     * Execute a specific set of transfers — used when the caller has held some back
-     * (e.g. until the visual fluid front reaches the sink, see {@code EngineTickHandler}).
+     * Execute a set of transfers — the caller may hold some back (e.g. until the visual fluid front
+     * reaches the sink, see {@code EngineTickHandler}). Capabilities are looked up again here — the
+     * world may have changed since the solve — and each transfer is clamped by what the source can
+     * actually give and the sink can actually take, so a stale plan degrades to a smaller (or zero)
+     * transfer instead of an error.
      */
     public static void apply(ServerLevel level, List<Solution.Transfer> transfers) {
         for (Solution.Transfer transfer : transfers) {

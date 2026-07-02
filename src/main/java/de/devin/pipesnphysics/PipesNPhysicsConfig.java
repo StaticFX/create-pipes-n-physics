@@ -3,9 +3,8 @@ package de.devin.pipesnphysics;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 /**
- * Server + client config for the v1 engine. Most knobs from the v0 build are
- * gone with the old engine; only the surviving features (Sable tank mass,
- * tilted/wave fluid rendering) and the master enable flag remain.
+ * Server + client config for the v2 hydraulic engine (see CLAUDE.md). Sim-affecting knobs live on
+ * the SERVER spec (synced to clients); rendering toggles live on the CLIENT spec.
  */
 public class PipesNPhysicsConfig {
     public static final ModConfigSpec SERVER_SPEC;
