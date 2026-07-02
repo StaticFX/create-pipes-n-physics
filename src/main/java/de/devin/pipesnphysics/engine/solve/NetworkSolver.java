@@ -161,6 +161,19 @@ public final class NetworkSolver {
             }
         }
         if (gated) {
+            // The pre-crest solve's one-way deactivations were computed against phantom flow through
+            // crest-broken branches carrying FULL conductance — a crest-broken feeder's pre-gate
+            // pressure can backflow-block a working pump. Once the gate removes that feeder the pump
+            // would deliver, so rebuild the active set from scratch (conductance-valid minus the frozen
+            // crest-blocked branches) and clear the one-way flags before re-solving. gateScale and
+            // crestBlocked stay frozen, so the crest gate remains one-shot; the re-run is still monotone.
+            for (int e = 0; e < m; e++) {
+                BranchSpec br = branches.get(e);
+                active[e] = br.conductance() > 0 && br.a() != br.b()
+                        && br.a() >= 0 && br.a() < n && br.b() >= 0 && br.b() < n
+                        && !crestBlocked[e];
+            }
+            Arrays.fill(backflowBlocked, false);
             heads = runActiveSet(nodes, branches, active, gateScale, flows, backflowBlocked, dt);
         }
 

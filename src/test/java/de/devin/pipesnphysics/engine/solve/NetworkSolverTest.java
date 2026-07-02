@@ -300,6 +300,35 @@ class NetworkSolverTest {
         assertTrue(result.crestBlocked()[1], "the downstream crest must report as broken");
     }
 
+    /**
+     * A pump must not be permanently dead-headed by a crest-broken feeder's PHANTOM pressure.
+     * node0 (100) feeds the junction through a run cresting at 200 — a genuinely broken siphon.
+     * In the pre-crest solve that feeder conducts at full strength and lifts the junction above
+     * the pump's reachable head, so the pump's check-valve branch backflow-deactivates. The crest
+     * gate then removes the feeder — and the pump, opposed by nothing, must deliver. Regression for
+     * the active set not being rebuilt after crest gating (the pre-gate backflow flag stuck on).
+     */
+    @Test
+    void pumpDeliversWhenCrestBrokenFeederNoLongerBackpressuresIt() {
+        List<NodeSpec> nodes = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 100), // high feeder, walled off by a broken crest
+                new NodeSpec(0, 0),                  // junction
+                new NodeSpec(TANK_CAPACITANCE, 40),  // the pump's supply
+                new NodeSpec(TANK_CAPACITANCE, 20)); // the sink
+        List<BranchSpec> branches = List.of(
+                new BranchSpec(0, 1, 40, 0, 0, 200, 0.5),        // breaks: 200 >> 100 + suctionLimit
+                new BranchSpec(2, 1, 4, 10, +1, Double.NaN, 0),  // pump lifts 10 blocks into the junction
+                new BranchSpec(1, 3, 40, 0, 0, Double.NaN, 0));
+
+        Result result = step(nodes, branches);
+
+        assertEquals(0, result.flows()[0], 1e-9, "the broken 200-block crest walls off the high feeder");
+        assertTrue(result.crestBlocked()[0], "the feeder's crest must report broken");
+        assertTrue(result.flows()[1] > 5,
+                "the pump must deliver once the crest-broken feeder no longer backflow-blocks it, "
+                        + "but flow was " + result.flows()[1]);
+    }
+
     @Test
     void pumpHeadLiftsTheCrestGate() {
         List<NodeSpec> tanks = List.of(
