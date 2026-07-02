@@ -65,8 +65,37 @@ public class SablePhysicsCompat {
             lastAppliedMass.put(key, massKg);
             lastAppliedOffset.put(key, offset);
         } catch (Exception e) {
-            return;
+            // The tracker's true state is now unknown (the -prevMass withdraw may have run before the
+            // +massKg add threw), so drop our bookkeeping: the next tick then re-applies from a clean
+            // slate instead of trusting a stale prevMass and double-subtracting a mass never added.
+            lastAppliedMass.remove(key);
+            lastAppliedOffset.remove(key);
+            PipesNPhysics.LOGGER.warn("Failed to apply fluid tank mass at {}", controllerPos, e);
         }
+    }
+
+    /** Remove any mass previously applied for a controller whose tank has drained to empty. */
+    public static void withdraw(ServerSubLevel subLevel, BlockPos controllerPos) {
+        MassTracker tracker = subLevel.getSelfMassTracker();
+        if (tracker == null) return;
+        String key = subLevel.getUniqueId() + ":" + controllerPos.toShortString();
+        Double prevMass = lastAppliedMass.remove(key);
+        Vec3 prevOffset = lastAppliedOffset.remove(key);
+        if (prevMass == null || prevMass <= 0) return;
+        try {
+            var level = subLevel.getLevel();
+            BlockState state = level.getBlockState(controllerPos);
+            tracker.addBlockMass(level, state, controllerPos, -prevMass,
+                    prevOffset != null ? prevOffset : tiltAwareOffset(subLevel, 0));
+        } catch (Exception e) {
+            PipesNPhysics.LOGGER.warn("Failed to withdraw fluid tank mass at {}", controllerPos, e);
+        }
+    }
+
+    /** Drop the applied-mass bookkeeping — the tracker is rebuilt from blocks on world load. */
+    public static void clear() {
+        lastAppliedMass.clear();
+        lastAppliedOffset.clear();
     }
 
     private static Vec3 tiltAwareOffset(ServerSubLevel subLevel, double fillFraction) {
