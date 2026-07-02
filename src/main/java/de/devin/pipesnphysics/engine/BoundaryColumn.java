@@ -114,20 +114,17 @@ public final class BoundaryColumn {
         }
 
         // A hose pulley draws from a fluid body through its hose: when its handler
-        // advertises a drainable world fluid, model it as a brimming, one-way source
-        // at the pulley's elevation rather than its tiny 1,500 mB buffer. The buffer
-        // would equalize and stall like any small reservoir, and its opening lip would
-        // gate the draw depending on where the pipe meets the pulley. Create's drainer
-        // clamps the real per-tick volume and its counterpart bookkeeping stops the
-        // pulley from reclaiming fluid it just deposited, so a one-way source is safe.
-        // No drainable fluid (pulley over air, or filling) falls through to the generic
-        // handler path below, where the buffer behaves as an ordinary fill sink.
-        if (isHosePulley(level, pos)) {
-            FluidStack drainable = cap.getFluidInTank(0);
-            if (!drainable.isEmpty()
-                    && !cap.drain(drainable.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()) {
+        // can actually drain world fluid, model the hose tip as a brimming, one-way
+        // source rather than treating the pulley's tiny 1,500 mB buffer as the column.
+        // Ask the handler's drain path directly; its exposed tank slot can stay EMPTY
+        // while Create's drainer is still discovering the body, which made the engine
+        // report a dry source until some unrelated block update woke the pulley.
+        if (level.getBlockEntity(pos) instanceof HosePulleyBlockEntity pulley) {
+            FluidStack drainable = cap.drain(1, FluidAction.SIMULATE);
+            if (!drainable.isEmpty()) {
                 return new BoundaryColumn(pos, pos,
-                        SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_SOURCE_CAPACITY_MB,
+                        SableCompat.getWorldY(level, hoseTip(pos, pulley)) - 0.5, 1,
+                        PULLEY_SOURCE_CAPACITY_MB,
                         drainable.copyWithAmount(PULLEY_SOURCE_CAPACITY_MB),
                         PULLEY_SOURCE_CAPACITY_MB, null, true);
             }
@@ -153,9 +150,9 @@ public final class BoundaryColumn {
                 SableCompat.getWorldY(level, pos) - 0.5, 1, capacity, found, amount, null, false);
     }
 
-    /** A Create hose pulley block, whose handler drains/fills a world fluid body. */
-    private static boolean isHosePulley(Level level, BlockPos pos) {
-        return level.getBlockEntity(pos) instanceof HosePulleyBlockEntity;
+    /** The block currently touched by the hose tip, matching Create's handler root. */
+    private static BlockPos hoseTip(BlockPos pulleyPos, HosePulleyBlockEntity pulley) {
+        return pulleyPos.below((int) Math.ceil(pulley.getInterpolatedOffset(1)));
     }
 
     /**
