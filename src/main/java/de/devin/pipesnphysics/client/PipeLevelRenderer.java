@@ -3,8 +3,8 @@ package de.devin.pipesnphysics.client;
 import com.mojang.blaze3d.vertex.ByteBufferBuilder;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
-import com.simibubi.create.content.fluids.PipeConnection;
 import com.simibubi.create.content.fluids.pipes.AxisPipeBlock;
 import com.simibubi.create.content.fluids.pipes.StraightPipeBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysics;
@@ -40,11 +40,13 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * SPIKE renderer for {@code EXPERIMENTAL_PIPE_LEVEL_RENDER}: draws resting fluid inside a straight
- * pipe at its actual WATERLINE — a partial fill at the solved surface — instead of Create's binary
- * full-or-empty fill. The waterline is encoded server-side onto the pipe flow (see
- * {@link CreatePipeRendering}); the two pipe-render mixins hide a marked flow from Create so this
- * renderer owns it.
+ * In-pipe LEVEL renderer for {@code PIPE_LEVEL_RENDER}: draws fluid inside a straight pipe as a
+ * partial fill instead of Create's binary full-or-empty — a RESTING cell at its solved waterline, and
+ * (when {@code PIPE_FLOW_PARTIAL_FILL} is on) a FLOWING horizontal cell at its head
+ * waterline too, so the flowing fill rises with the head. Everything it draws comes from the dedicated synced {@link PipeLevelData}
+ * fields stamped server-side (see {@link CreatePipeRendering}): the waterline + direction, the
+ * engine-owned travelling-front fill, and the fluid — it reads none of Create's Flow state. The
+ * two pipe-render mixins hide a stamped cell from Create so this renderer owns it.
  *
  * Backend-agnostic by design: it draws from {@link RenderLevelStageEvent} rather than a BER, because
  * under Flywheel Create's pipe BER is suppressed (the visual handles it) — an event hook always runs.
@@ -55,20 +57,27 @@ import java.util.Map;
 public final class PipeLevelRenderer {
     /** Fluid-column half-width inside the pipe (matches Create's stream radius, {@code 3/16}). */
     private static final float PIPE_RADIUS = 3f / 16f;
+    /**
+     * Pull the fluid back from a NON-CONTINUING axis end (an open mouth, a dead end, a reservoir
+     * face) so its end quad doesn't sit flush with the pipe opening and z-fight the rim — the level
+     * renderer's own version of the {@code OPEN_END_INSET} the Create-pipe mixins apply. Create's
+     * visible gap is {@code 0.125·0.5}; matched here.
+     */
+    private static final float OPEN_END_INSET = 0.0625f;
 
     /**
-     * Scroll speed (blocks/sec) per unit of flow pressure — Create's {@code flowPressure} is ∝ mB/t.
-     * {@link #MAX_SCROLL} bounds it so a brisk flow (e.g. a pump pulling from an infinite source) does
-     * not scroll frantically fast; the fill still SPEEDS UP with flow, it just stops climbing past the cap.
+     * Scroll speed bounds (blocks/sec). The scroll runs at the fluid's real speed — the synced
+     * front advance rate (cells/tick · 20) — so texture and fill front move together.
+     * {@link #MAX_SCROLL} bounds it so a brisk flow (e.g. a pump pulling from an infinite source)
+     * does not scroll frantically fast; the speed still climbs with flow, it just caps.
      */
-    private static final float SCROLL_PER_PRESSURE = 0.08f;
     private static final float MIN_SCROLL = 0.4f;
     private static final float MAX_SCROLL = 4f;
 
     /**
-     * How many chunks out from the camera to scan for pipes. Bounded for the spike; the mixins hide
-     * marked flows at any distance, so a marked pipe farther than this shows no fluid (a known spike
-     * limit — tune later / distance-gate the mixin for a real rollout).
+     * How many chunks out from the camera to scan for pipes. Bounded for cost; the mixins hide
+     * marked flows at any distance, so a marked pipe farther than this shows no fluid (a known
+     * limit — tune later / distance-gate the mixin for a wider scan).
      */
     private static final int SCAN_RADIUS_CHUNKS = 6;
 
@@ -98,22 +107,39 @@ public final class PipeLevelRenderer {
         float lastSeen;
     }
 
+    /**
+     * Per-cell front interpolation state: when the synced front value last CHANGED, so the fill can
+     * be extrapolated by the synced advance rate between server stamps — the server integrates the
+     * same rate per tick, so the extrapolation meets the next stamp and the front advances smoothly
+     * instead of stepping at 20 tps. (This replaced Create's {@code LerpedFloat} sub-tick smoothing,
+     * which came for free while the front rode {@code Flow.progress}.)
+     */
+    private static final Map<BlockPos, FrontAnim> FRONTS = new HashMap<>();
+
+    /** Mutable per-cell front record (see {@link #FRONTS}). */
+    private static final class FrontAnim {
+        int data;
+        float syncTick;
+        float lastSeen;
+    }
+
     private PipeLevelRenderer() {}
 
-    /** Drop all fade records — called when the player leaves the world or changes dimension. */
+    /** Drop all animation records — called when the player leaves the world or changes dimension. */
     public static void clear() {
         FADES.clear();
+        FRONTS.clear();
     }
 
     @SubscribeEvent
     public static void onRenderLevel(RenderLevelStageEvent event) {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) return;
-        if (!PipesNPhysicsConfig.EXPERIMENTAL_PIPE_LEVEL_RENDER.get()) return;
+        if (!PipesNPhysicsConfig.PIPE_LEVEL_RENDER.get()) return;
 
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
         if (level == null) {
-            FADES.clear();
+            clear();
             return;
         }
 
@@ -138,9 +164,10 @@ public final class PipeLevelRenderer {
             }
         }
 
-        // Drop fade records for cells that left the scan radius (a fading cell keeps refreshing lastSeen
-        // until its recede finishes and removes it explicitly).
+        // Drop animation records for cells that left the scan radius (a fading cell keeps refreshing
+        // lastSeen until its recede finishes and removes it explicitly).
         FADES.entrySet().removeIf(e -> now - e.getValue().lastSeen > FADE_TICKS + 4f);
+        FRONTS.entrySet().removeIf(e -> now - e.getValue().lastSeen > FADE_TICKS + 4f);
 
         if (drewAny) OWN_BUFFER.endBatch();
     }
@@ -155,10 +182,11 @@ public final class PipeLevelRenderer {
         if (!(pipe instanceof PipeLevelData holder)) return false;
         BlockPos cellPos = be.getBlockPos();
 
-        // Level + direction come from the dedicated synced field; the fluid TYPE from any flow (which
-        // Create still syncs — we only hid it from Create's own draw).
+        // Level + direction + front + fluid all come from the dedicated synced fields — the renderer
+        // no longer reads Create's Flow objects at all.
         int data = holder.pipesnphysics$getLevelData();
-        FluidStack fluid = data != 0 ? anyFluid(pipe) : null;
+        FluidStack fluid = data != 0 && !holder.pipesnphysics$getRenderFluid().isEmpty()
+                ? holder.pipesnphysics$getRenderFluid() : null;
 
         boolean fading = false;
         float fadeScale = 1f;
@@ -194,25 +222,32 @@ public final class PipeLevelRenderer {
         int dirIndex = CreatePipeRendering.levelFlowDir(data);
         Direction flowDir = fading || dirIndex < 0 ? null : Direction.from3DDataValue(dirIndex);
 
+        // A flowing (flowDir set) and a resting cell both carry a true head-surface elevation as their
+        // fraction; a flowing horizontal cell only differs in that it never drops below a visible floor
+        // (never blank while carrying flow — {@link #flowingTop}), and a flowing vertical bore fills.
+        // Whether a flowing run is drawn partial or full is decided server-side (it stamps a full
+        // fraction when the partial-fill toggle is off), so this reads no config.
+        boolean flowing = flowDir != null;
+
         float lo = 0.5f - PIPE_RADIUS;
         float hi = 0.5f + PIPE_RADIUS;
         float x0, y0, z0, x1, y1, z1;
         switch (state.getValue(AxisPipeBlock.AXIS)) {
             case Y -> {
-                // Vertical tube: fills the full block height up to the waterline fraction.
+                // Vertical tube: a flowing bore fills fully; a resting surface rises to its waterline.
                 x0 = lo; z0 = lo; x1 = hi; z1 = hi;
-                y0 = 0f; y1 = Math.min(frac, 1f);
+                y0 = 0f; y1 = flowing ? 1f : Math.min(frac, 1f);
             }
             case X -> {
                 // Horizontal tube along X: a horizontal surface partway up the tube cross-section.
-                float top = horizontalTop(frac, lo, hi, flowDir);
+                float top = flowing ? flowingTop(frac, lo, hi) : horizontalTop(frac, lo, hi);
                 if (top <= lo) return false;
                 x0 = 0f; x1 = 1f;
                 y0 = lo; y1 = top;
                 z0 = lo; z1 = hi;
             }
             default -> {
-                float top = horizontalTop(frac, lo, hi, flowDir);
+                float top = flowing ? flowingTop(frac, lo, hi) : horizontalTop(frac, lo, hi);
                 if (top <= lo) return false;
                 z0 = 0f; z1 = 1f;
                 y0 = lo; y1 = top;
@@ -222,11 +257,12 @@ public final class PipeLevelRenderer {
 
         int light = LevelRenderer.getLightColor(level, cellPos);
 
-        // Advance the travelling front: clip the cell's fluid along the flow axis by how far it has
-        // filled (the connection fill progress chargeEdge animates), from the inbound face. So a
-        // filling pipe shows fluid moving IN cell-by-cell instead of each cell popping full at once.
+        // The travelling front: clip the cell's fluid along the flow axis by the engine-owned front
+        // fraction (integrated server-side from the solved flow rate into the synced field), from
+        // the inbound face — so a filling pipe shows fluid moving IN cell-by-cell instead of each
+        // cell popping full at once. Extrapolated by the synced rate between stamps for smoothness.
         if (flowDir != null) {
-            float front = frontProgress(pipe, flowDir, AnimationTickHolder.getPartialTicks());
+            float front = displayedFront(cellPos, holder.pipesnphysics$getFrontData(), now);
             if (front < 1f) {
                 boolean positive = flowDir.getAxisDirection() == Direction.AxisDirection.POSITIVE;
                 switch (flowDir.getAxis()) {
@@ -237,6 +273,22 @@ public final class PipeLevelRenderer {
             }
         }
 
+        // Inset each axis end that does NOT continue into another fluid pipe (an open mouth, a dead
+        // end, or a reservoir face): its end quad would otherwise be coplanar with the pipe opening
+        // and z-fight the rim (the open-end flicker). An interior joint between two cells has a pipe
+        // on both sides, so it stays seamless. Applied after the front clip so the mouth end is inset
+        // whatever the fill; guarded so the box never inverts.
+        Direction.Axis axis = state.getValue(AxisPipeBlock.AXIS);
+        boolean openNeg = FluidPropagator.getPipe(level,
+                cellPos.relative(Direction.fromAxisAndDirection(axis, Direction.AxisDirection.NEGATIVE))) == null;
+        boolean openPos = FluidPropagator.getPipe(level,
+                cellPos.relative(Direction.fromAxisAndDirection(axis, Direction.AxisDirection.POSITIVE))) == null;
+        switch (axis) {
+            case X -> { if (openNeg) x0 = Math.min(x0 + OPEN_END_INSET, x1); if (openPos) x1 = Math.max(x1 - OPEN_END_INSET, x0); }
+            case Y -> { if (openNeg) y0 = Math.min(y0 + OPEN_END_INSET, y1); if (openPos) y1 = Math.max(y1 - OPEN_END_INSET, y0); }
+            default -> { if (openNeg) z0 = Math.min(z0 + OPEN_END_INSET, z1); if (openPos) z1 = Math.max(z1 - OPEN_END_INSET, z0); }
+        }
+
         poseStack.pushPose();
         poseStack.translate(cellPos.getX() - camera.x, cellPos.getY() - camera.y, cellPos.getZ() - camera.z);
         if (flowDir == null) {
@@ -244,24 +296,40 @@ public final class PipeLevelRenderer {
             NeoForgeCatnipServices.FLUID_RENDERER.renderFluidBox(
                     fluid, x0, y0, z0, x1, y1, z1, OWN_BUFFER, poseStack, light, true, true);
         } else {
-            renderFlowingBox(fluid, x0, y0, z0, x1, y1, z1, light, flowDir, maxPressure(pipe), poseStack);
+            // Scroll at the fluid's real speed: the synced front rate (cells/tick → blocks/sec).
+            // Rate 0 is a HELD front (chained edge waiting at its upstream node): draw it truly
+            // still rather than flooring to MIN_SCROLL — nothing is moving yet.
+            float rate = CreatePipeRendering.frontRate(holder.pipesnphysics$getFrontData());
+            float speed = rate <= 0f ? 0f
+                    : Math.clamp(rate * 20f, MIN_SCROLL, MAX_SCROLL)
+                            * PipesNPhysicsConfig.PIPE_LEVEL_FLOW_SPEED.get().floatValue();
+            renderFlowingBox(fluid, x0, y0, z0, x1, y1, z1, light, flowDir, speed, poseStack);
         }
         poseStack.popPose();
         return true;
     }
 
+    /** Thinnest a flowing horizontal channel draws (fraction of the tube band) so it never blanks while carrying flow. */
+    private static final float FLOW_MIN_FILL = 0.15f;
+
     /**
-     * The rendered surface height for a HORIZONTAL cell. The waterline is clamped into the tube band
-     * [lo, hi]: below lo the tube is empty. A cell whose waterline sits below the tube would draw
-     * nothing — correct at REST (the fluid is genuinely below the pipe) but wrong while FLOWING (a
-     * pipe actively carrying fluid is full of it), so a flowing cell fills the tube instead of
-     * vanishing. This mirrors {@code stampWaterlines}, which only declines to stamp cells ABOVE the
-     * waterline; a stamped-but-below-tube cell must therefore be a low resting surface (return lo, i.e.
-     * empty) or a flowing pipe (return hi, i.e. full).
+     * The rendered surface height for a RESTING horizontal cell: its fraction is a true surface
+     * elevation, clamped into the tube band [lo, hi]. A fraction below the tube is a genuinely low
+     * resting surface and the cell draws nothing ({@link #renderCell} bails on {@code top <= lo}). A
+     * backed-up cell arrives at frac 1 (stamped FULL upstream) and fills the tube.
      */
-    private static float horizontalTop(float frac, float lo, float hi, Direction flowDir) {
-        float top = Math.clamp(frac, lo, hi);
-        return top <= lo && flowDir != null ? hi : top;
+    private static float horizontalTop(float frac, float lo, float hi) {
+        return Math.clamp(frac, lo, hi);
+    }
+
+    /**
+     * The surface height for a FLOWING horizontal cell: its fraction is the head waterline (same true
+     * elevation as a resting cell, flattened per run server-side so it tracks the head without stepping),
+     * clamped into the tube band but never below a visible floor — so a flowing pipe always shows at
+     * least a sliver and fills to full as the head rises above the bore.
+     */
+    private static float flowingTop(float frac, float lo, float hi) {
+        return Math.clamp(frac, lo + FLOW_MIN_FILL * (hi - lo), hi);
     }
 
     /**
@@ -273,7 +341,7 @@ public final class PipeLevelRenderer {
      */
     private static void renderFlowingBox(FluidStack stack, float x0, float y0, float z0,
                                          float x1, float y1, float z1, int light, Direction flowDir,
-                                         float pressure, PoseStack ms) {
+                                         float speed, PoseStack ms) {
         IClientFluidTypeExtensions ext = IClientFluidTypeExtensions.of(stack.getFluid());
         TextureAtlasSprite sprite = Minecraft.getInstance().getTextureAtlas(InventoryMenu.BLOCK_ATLAS)
                 .apply(ext.getStillTexture(stack));
@@ -282,10 +350,6 @@ public final class PipeLevelRenderer {
         int lightOut = (light & 0xF00000) | luminosity << 4;
         VertexConsumer builder = FluidRenderHelper.getFluidBuilder(OWN_BUFFER);
 
-        // Scroll speed tracks the flow: Create's flowPressure (∝ mB/t) drives blocks/sec, scaled by
-        // the client's flow-speed setting.
-        float speed = Math.clamp(pressure * SCROLL_PER_PRESSURE, MIN_SCROLL, MAX_SCROLL)
-                * PipesNPhysicsConfig.EXPERIMENTAL_PIPE_LEVEL_FLOW_SPEED.get().floatValue();
         float t = (AnimationTickHolder.getTicks() + AnimationTickHolder.getPartialTicks()) / 20f;
         float scroll = (t * speed) % 1f;
         // Move the texture WITH the fluid (toward the downstream face). Flip this sign to reverse.
@@ -406,41 +470,21 @@ public final class PipeLevelRenderer {
     }
 
     /**
-     * How far the travelling front has filled this cell, 0..1 along the flow: the average of the
-     * inbound (upstream) and outbound (downstream) connection fill progress, which {@code chargeEdge}
-     * advances cell-by-cell (the inbound half fills, then the outbound). 1 once the front has passed.
+     * The 0..1 front fill of a cell as displayed THIS frame: the synced fraction plus the synced
+     * advance rate times the time since that value arrived, clamped to 1. The server integrates the
+     * same rate each tick, so the extrapolation meets the next stamp and the fill advances smoothly
+     * between server updates instead of stepping at 20 tps. An untracked cell (no front data)
+     * renders unclipped — full.
      */
-    private static float frontProgress(FluidTransportBehaviour pipe, Direction flowDir, float partial) {
-        return 0.5f * (connProgress(pipe.getFlow(flowDir.getOpposite()), partial)
-                + connProgress(pipe.getFlow(flowDir), partial));
-    }
-
-    private static float connProgress(PipeConnection.Flow flow, float partial) {
-        if (flow == null) return 0f;
-        if (flow.complete || flow.progress == null) return 1f;
-        return flow.progress.getValue(partial);
-    }
-
-    /**
-     * The largest flow pressure across this cell's connections — Create's {@code flowPressure}, which
-     * {@code chargeEdge} set proportional to mB/t. Drives the scroll speed so it tracks the flow rate.
-     */
-    private static float maxPressure(FluidTransportBehaviour pipe) {
-        float max = 0f;
-        for (Direction dir : DIRECTIONS) {
-            PipeConnection conn = pipe.getConnection(dir);
-            if (conn == null) continue;
-            max = Math.max(max, Math.max(conn.getPressure().getFirst(), conn.getPressure().getSecond()));
+    private static float displayedFront(BlockPos cell, int frontData, float now) {
+        if (frontData == 0) return 1f;
+        FrontAnim anim = FRONTS.computeIfAbsent(cell.immutable(), k -> new FrontAnim());
+        if (anim.data != frontData) {
+            anim.data = frontData;
+            anim.syncTick = now;
         }
-        return max;
-    }
-
-    /** Any non-empty flow's fluid on this pipe (for its TYPE/colour/texture), or null if dry. */
-    private static FluidStack anyFluid(FluidTransportBehaviour pipe) {
-        for (Direction dir : DIRECTIONS) {
-            PipeConnection.Flow flow = pipe.getFlow(dir);
-            if (flow != null && !flow.fluid.isEmpty()) return flow.fluid;
-        }
-        return null;
+        anim.lastSeen = now;
+        return Math.min(1f, CreatePipeRendering.frontFraction(frontData)
+                + CreatePipeRendering.frontRate(frontData) * (now - anim.syncTick));
     }
 }

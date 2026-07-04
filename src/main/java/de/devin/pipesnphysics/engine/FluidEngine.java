@@ -1,5 +1,6 @@
 package de.devin.pipesnphysics.engine;
 
+import com.simibubi.create.content.fluids.hosePulley.HosePulleyBlockEntity;
 import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -75,6 +76,10 @@ public final class FluidEngine {
             // cooldown — the no-reclaim guard for hand-placed-source intake.
             if (BoundaryColumn.findHandler(level, transfer.to()) == null) {
                 OpenEndPipes.markSpilled(level, transfer.to());
+            } else if (level.getBlockEntity(transfer.to()) instanceof HosePulleyBlockEntity) {
+                // A transfer INTO a pulley pushes fluid out to the world; hold it as a one-way
+                // sink for the cooldown so drain-priority does not reclaim the fresh block.
+                OpenEndPipes.markPulleyDeposited(level, transfer.to());
             }
         }
     }

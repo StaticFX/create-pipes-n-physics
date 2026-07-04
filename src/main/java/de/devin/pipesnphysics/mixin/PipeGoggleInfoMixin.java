@@ -129,9 +129,16 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         float total = data.headTotalBlocks();
         boolean hasBudget = total > 0.05f;
         if (left < 0) {
-            pipesnphysics$lang("gui.goggles.reach_limit")
-                    .style(ChatFormatting.RED)
-                    .forGoggles(tooltip, 1);
+            // A run that is actually MOVING fluid has obviously reached — flag "Reach limit" only
+            // when nothing is flowing. A downhill equalization between two tanks solves a small
+            // positive flow while its friction-free ceiling sits below the probed cell (negative
+            // left), and warning "raise the supply or add a pump" there flatly contradicts the
+            // flow line right above it.
+            if (data.status() != PipeStatusPayload.STATUS_FLOWING) {
+                pipesnphysics$lang("gui.goggles.reach_limit")
+                        .style(ChatFormatting.RED)
+                        .forGoggles(tooltip, 1);
+            }
             return;
         }
         ChatFormatting color = left < 2 ? ChatFormatting.GOLD : ChatFormatting.GREEN;

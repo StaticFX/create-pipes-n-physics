@@ -33,6 +33,15 @@ public final class OpenEndPipes {
      */
     private static final Map<ResourceKey<Level>, Map<BlockPos, Long>> SPILL_TICKS = new HashMap<>();
 
+    /**
+     * Game-time of the last deposit out of each hose pulley (keyed by the pulley pos). A pulley
+     * that just pushed fluid into the world reads its own fresh block as a drainable body the next
+     * tick; under drain-priority that would flip it back to a source and reclaim its output. While
+     * a pulley is recently-deposited it is held as a one-way sink instead — see
+     * {@code BoundaryColumn.resolve}. Same latch idea as {@link #recentlySpilled}, one node down.
+     */
+    private static final Map<ResourceKey<Level>, Map<BlockPos, Long>> PULLEY_DEPOSIT_TICKS = new HashMap<>();
+
     private OpenEndPipes() {}
 
     /** Record that an open mouth just spilled into the world (called when a spill executes). */
@@ -52,6 +61,23 @@ public final class OpenEndPipes {
         if (when == null) return false;
         if (level.getGameTime() - when < cooldown) return true;
         ticks.remove(spacePos);
+        return false;
+    }
+
+    /** Record that a hose pulley just took fluid to deposit into the world (called when a fill executes). */
+    public static void markPulleyDeposited(Level level, BlockPos pulleyPos) {
+        PULLEY_DEPOSIT_TICKS.computeIfAbsent(level.dimension(), k -> new HashMap<>())
+                .put(pulleyPos.immutable(), level.getGameTime());
+    }
+
+    /** Whether this pulley deposited within the last {@code cooldown} ticks (stale entries pruned on read). */
+    public static boolean pulleyRecentlyDeposited(Level level, BlockPos pulleyPos, int cooldown) {
+        Map<BlockPos, Long> ticks = PULLEY_DEPOSIT_TICKS.get(level.dimension());
+        if (ticks == null) return false;
+        Long when = ticks.get(pulleyPos);
+        if (when == null) return false;
+        if (level.getGameTime() - when < cooldown) return true;
+        ticks.remove(pulleyPos);
         return false;
     }
 
@@ -160,5 +186,6 @@ public final class OpenEndPipes {
     public static void clear() {
         CACHE.clear();
         SPILL_TICKS.clear();
+        PULLEY_DEPOSIT_TICKS.clear();
     }
 }

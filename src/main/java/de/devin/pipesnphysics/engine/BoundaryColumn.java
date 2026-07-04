@@ -46,12 +46,13 @@ public final class BoundaryColumn {
     private static final int OPEN_END_CAPACITY_MB = 4_000_000;
 
     /**
-     * Capacity stand-in for a hose pulley drawing from a fluid body: large enough that
-     * its head holds steady within a tick (the pulley lifts water to its own level under
-     * kinetic power, so it reads as a brimming reservoir at the pulley), while the actual
-     * per-tick volume is still clamped by what Create's drainer will hand over.
+     * Capacity stand-in for a hose pulley bridging the pipe network to a world fluid body:
+     * large enough that its head holds steady within a tick (the pulley lifts / deposits at
+     * its own level under kinetic power, so it reads as a fixed reservoir at the pulley),
+     * while the actual per-tick volume is still clamped by what Create's drainer hands over
+     * (as a brimming SOURCE) or filler accepts (as a bottomless SINK).
      */
-    private static final int PULLEY_SOURCE_CAPACITY_MB = 4_000_000;
+    private static final int PULLEY_CAPACITY_MB = 4_000_000;
 
     private final BlockPos identity;
     private final BlockPos accessPos;
@@ -118,24 +119,36 @@ public final class BoundaryColumn {
                     SableCompat.getUpProjectionY(level, controllerPos));
         }
 
-        // A hose pulley draws from a fluid body through its hose: when its handler
-        // advertises a drainable world fluid, model it as a brimming, one-way source
-        // at the pulley's elevation rather than its tiny 1,500 mB buffer. The buffer
-        // would equalize and stall like any small reservoir, and its opening lip would
-        // gate the draw depending on where the pipe meets the pulley. Create's drainer
-        // clamps the real per-tick volume and its counterpart bookkeeping stops the
-        // pulley from reclaiming fluid it just deposited, so a one-way source is safe.
-        // No drainable fluid (pulley over air, or filling) falls through to the generic
-        // handler path below, where the buffer behaves as an ordinary fill sink.
+        // A hose pulley bridges the pipe network to a world fluid body through its hose.
+        // Model it as a fixed reservoir at the pulley's elevation rather than its tiny
+        // 1,500 mB buffer — the buffer would equalize and stall like any small reservoir,
+        // and its opening lip would gate flow by where the pipe meets the pulley. Create's
+        // drainer/filler clamps the real per-tick volume either way.
+        //
+        // DRAIN-PRIORITY: when its handler advertises a drainable body, it is a brimming,
+        // one-way SOURCE (draw a lake, unchanged). Otherwise it is a bottomless, one-way
+        // SINK — the network pushes fluid out through it and Create deposits it into the
+        // world (the "can't push out of a pulley" gap). A pulley that JUST deposited is
+        // held as a sink for a cooldown even though its fresh block now reads drainable:
+        // without that latch drain-priority would flip it to a source and suck its own
+        // output straight back (the reclaim oscillation, the same class the open-end spill
+        // latch guards). Create's own counterpart bookkeeping only softens this; the latch
+        // is what actually holds the direction.
         if (isHosePulley(level, pos)) {
             FluidStack drainable = cap.getFluidInTank(0);
-            if (!drainable.isEmpty()
-                    && !cap.drain(drainable.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()) {
+            boolean drainableBody = !drainable.isEmpty()
+                    && !cap.drain(drainable.copyWithAmount(1), FluidAction.SIMULATE).isEmpty();
+            boolean depositing = OpenEndPipes.pulleyRecentlyDeposited(level, pos,
+                    PipesNPhysicsConfig.OPEN_END_INTAKE_COOLDOWN_TICKS.get());
+            if (drainableBody && !depositing) {
                 return new BoundaryColumn(pos, pos,
-                        SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_SOURCE_CAPACITY_MB,
-                        drainable.copyWithAmount(PULLEY_SOURCE_CAPACITY_MB),
-                        PULLEY_SOURCE_CAPACITY_MB, null, true, 1.0);
+                        SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_CAPACITY_MB,
+                        drainable.copyWithAmount(PULLEY_CAPACITY_MB),
+                        PULLEY_CAPACITY_MB, null, true, 1.0);
             }
+            return new BoundaryColumn(pos, pos,
+                    SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_CAPACITY_MB,
+                    FluidStack.EMPTY, 0, null, false, 1.0);
         }
 
         int capacity = 0;

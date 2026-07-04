@@ -21,7 +21,7 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  * fronts hit this constant; a pipe whose flow continues into a neighbour keeps progress at
  * 1 and renders seamless. Mirrors {@link TransparentStraightPipeRendererMixin}.
  *
- * It also hands the in-pipe LEVEL renderer ({@code EXPERIMENTAL_PIPE_LEVEL_RENDER}) ownership of cells
+ * It also hands the in-pipe LEVEL renderer ({@code PIPE_LEVEL_RENDER}) ownership of cells
  * with a solved waterline: when the flag is on, a cell whose pipe behaviour carries level data
  * ({@link de.devin.pipesnphysics.compat.PipeLevelData}, a dedicated synced field — NOT the fluid
  * amount) is hidden from Create (its {@code getFlow} reads null, so Create's loop skips it) and

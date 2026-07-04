@@ -21,8 +21,10 @@ import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.fluids.FluidStack;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -33,15 +35,20 @@ import java.util.Set;
  * owns the {@code PipeConnection.Flow} objects Create draws. After each solve we
  * set flows on carrying cells and clear the rest.
  *
- * A FLOWING edge fills as a travelling front ({@link #chargeEdge}), seeded along the flow
- * direction up to the front; within each cell the inbound half fills first, then the outbound.
- * Fill speed SCALES WITH THE FLOW RATE ({@link #flowPressure}): a brisk pump fills the run fast,
- * a trickle fills it slowly, so the visible fill tracks how hard fluid is actually moving.
- * Delivery stays IN STEP — {@link #deliveryReady} releases the endpoint transfer only once this
- * front reaches the sink, so visual and actual delivery line up. The front is stateless (read
- * back each tick from the cells' own flow-completeness), so it survives reloads and edits; a flow
- * restart no longer re-crawls a long run from scratch because the {@code isBackedUp}/drainDeadEdge
- * guards keep the charged cells through a transient (the long-pipe "delivery in bursts" fix).
+ * A FLOWING edge fills as a travelling front, seeded along the flow direction up to the front;
+ * within each cell the inbound half fills first, then the outbound. Fill speed SCALES WITH THE
+ * FLOW RATE ({@link #flowPressure}): a brisk pump fills the run fast, a trickle fills it slowly,
+ * so the visible fill tracks how hard fluid is actually moving. The front has two drivers by
+ * renderer: the stock (binary) path animates it through Create's Flow progress
+ * ({@link #chargeEdge} + {@code tickFlowProgress}); the LEVEL-render path OWNS it
+ * ({@link #advanceFront}) — the fill state lives in the pipes' own synced {@link PipeLevelData}
+ * front field, integrated here from the solved rate, so it no longer depends on Create's transport
+ * cosmetics. Delivery stays IN STEP on both — {@link #deliveryReady} releases the endpoint
+ * transfer only once the active front reaches the sink, so visual and actual delivery line up.
+ * The front is stateless (read back each tick from the cells' own fill state), so it survives
+ * reloads and edits; a flow restart no longer re-crawls a long run from scratch because the
+ * {@code isBackedUp}/drainDeadEdge guards keep the charged cells through a transient (the
+ * long-pipe "delivery in bursts" fix).
  *
  * A RESTING edge (full but not flowing, e.g. equalized tanks) is shown full at once
  * on each cell that sits below the connected fluid surface. Every other network cell is
@@ -67,7 +74,7 @@ public final class CreatePipeRendering {
     private static final float PRESSURE_REFRESH_EPS = 8f;
 
     /**
-     * In-pipe LEVEL render (experimental spike, {@code EXPERIMENTAL_PIPE_LEVEL_RENDER}). When on, a
+     * In-pipe LEVEL render ({@code PIPE_LEVEL_RENDER}). When on, a
      * wet cell's solved WATERLINE (and, when flowing, the FLOW DIRECTION) is stamped onto the pipe's
      * {@code FluidTransportBehaviour} as a dedicated, client-synced-but-not-saved {@link PipeLevelData}
      * int: {@code 0} = not rendered; else {@code (flowDir+1)·}{@link #DIR_STRIDE}{@code + frac·}{@link
@@ -79,6 +86,24 @@ public final class CreatePipeRendering {
      */
     private static final int LEVEL_SCALE = 1_000;
     private static final int DIR_STRIDE = 2_000; // > LEVEL_SCALE, so the fraction never overflows the direction band
+
+    /**
+     * The engine-owned travelling-front state (the {@link PipeLevelData} FRONT field, encoded by
+     * {@link #encodeFront}): how far fluid has advanced through a cell along the flow axis, the
+     * advance direction, and the advance rate. {@code 0} = untracked. The rate rides along so the
+     * client can extrapolate between server stamps (smooth sub-tick fill) and scroll the texture at
+     * the real fluid speed.
+     */
+    private static final int FRONT_SCALE = 1_000;
+    private static final int FRONT_FRAC_STRIDE = 1_024; // > FRONT_SCALE, power of two
+    private static final int FRONT_RATE_SCALE = 256;    // rate units per cell/tick
+
+    /**
+     * Rate jitter (in 1/{@link #FRONT_RATE_SCALE} cells/tick units) a full cell's stamp ignores:
+     * a steadily-flowing cell's rate wobbles with the solved mB/t, and without a deadband every
+     * wobble would re-sync the cell each tick.
+     */
+    private static final int FRONT_RATE_EPS = 4;
 
     /** Create's {@code FluidTankRenderer} cap + puddle insets — used to match the pipe waterline to the tank's RENDERED surface. */
     private static final double TANK_CAP = 1 / 4d;
@@ -125,13 +150,69 @@ public final class CreatePipeRendering {
     }
 
     /**
+     * Encode one cell's owned-front state as a {@link PipeLevelData} front int (always &gt;= 1, so 0
+     * stays reserved for "untracked"): {@code fraction} is how far fluid has advanced through the
+     * cell along the flow (0..1), {@code flowDir} the downstream {@code Direction.get3DDataValue}
+     * it advances toward (or -1 for fluid at rest), {@code cellsPerTick} the advance rate.
+     */
+    public static int encodeFront(double fraction, int flowDir, double cellsPerTick) {
+        int f = (int) Math.round(Math.clamp(fraction, 0.0, 1.0) * FRONT_SCALE);
+        int r = Math.clamp(Math.round(cellsPerTick * FRONT_RATE_SCALE), 0, 255);
+        return (r * 8 + flowDir + 1) * FRONT_FRAC_STRIDE + f + 1;
+    }
+
+    /** The 0..1 advanced fraction encoded in a {@link PipeLevelData} front value. */
+    public static float frontFraction(int data) {
+        return Math.clamp(((data - 1) % FRONT_FRAC_STRIDE) / (float) FRONT_SCALE, 0f, 1f);
+    }
+
+    /** The downstream {@code Direction.get3DDataValue} the front advances toward, or -1 at rest. */
+    public static int frontFlowDir(int data) {
+        return (data - 1) / FRONT_FRAC_STRIDE % 8 - 1;
+    }
+
+    /** The front's advance rate in cells/tick — drives the client's extrapolation and scroll speed. */
+    public static float frontRate(int data) {
+        return (data - 1) / (FRONT_FRAC_STRIDE * 8) / (float) FRONT_RATE_SCALE;
+    }
+
+    /** One cell's owned-front state this tick: advanced fraction, downstream dir (-1 still), cells/tick. */
+    private record CellFront(double fraction, int flowDir, double rate) {}
+
+    private static final CellFront FULL_STILL = new CellFront(1, -1, 0);
+
+    /**
+     * How far the owned front advances per tick (in cells) at a given fill pressure. Mirrors
+     * Create's own per-connection fill speed ({@code PipeConnection.tickFlowProgress}:
+     * {@code 1/32 + p/128 · 31/32} per half-cell connection per tick, two halves to a cell), so the
+     * owned front fills at exactly the pace the old Flow-progress animation did.
+     */
+    private static double cellsPerTick(float pressure) {
+        return (1 / 32d + Math.clamp(pressure / 128d, 0d, 1d) * 31 / 32d) / 2d;
+    }
+
+    /**
      * Whether Create's own pipe renderers should SKIP drawing this cell because the level renderer owns
      * it (flag on + the pipe behaviour holds level data). Shared by both pipe-render mixins.
      */
     public static boolean hidesFromCreate(FluidTransportBehaviour pipe) {
         return pipe instanceof PipeLevelData data
                 && data.pipesnphysics$getLevelData() != 0
-                && PipesNPhysicsConfig.EXPERIMENTAL_PIPE_LEVEL_RENDER.get();
+                && PipesNPhysicsConfig.PIPE_LEVEL_RENDER.get();
+    }
+
+    /**
+     * Whether the engine owns this cell's fill animation — the level render is on and the cell
+     * carries level/front data. {@code GravityFlowMixin} skips Create's {@code tickFlowProgress}
+     * for such cells: the owned front is integrated by {@link #advanceFront} from the solved flow
+     * rate, and letting Create advance its Flow progress underneath would run a second,
+     * disagreeing integrator. (The cell's Create flows are seeded already-complete or held
+     * charging as pure bookkeeping, hidden from Create's draw.)
+     */
+    public static boolean ownsAnimation(FluidTransportBehaviour pipe) {
+        return pipe instanceof PipeLevelData data
+                && (data.pipesnphysics$getLevelData() != 0 || data.pipesnphysics$getFrontData() != 0)
+                && levelRenderEnabled();
     }
 
     /**
@@ -145,14 +226,14 @@ public final class CreatePipeRendering {
     }
 
     /**
-     * Whether the in-pipe LEVEL render spike is on. The toggle is a CLIENT config (a single global
+     * Whether the in-pipe LEVEL render is on. The toggle is a CLIENT config (a single global
      * file, trivially flippable), but the waterline is encoded here on the server side; in
      * singleplayer the integrated server shares the JVM with the client and reads it directly. Guarded
      * on a client being present so a dedicated server never touches the unloaded client spec — the
-     * spike is singleplayer-only for now.
+     * level render is singleplayer-only for now.
      */
     public static boolean levelRenderEnabled() {
-        return FMLEnvironment.dist.isClient() && PipesNPhysicsConfig.EXPERIMENTAL_PIPE_LEVEL_RENDER.get();
+        return FMLEnvironment.dist.isClient() && PipesNPhysicsConfig.PIPE_LEVEL_RENDER.get();
     }
 
     /**
@@ -166,6 +247,13 @@ public final class CreatePipeRendering {
         // it stays an immutable empty when the flag is off — the default, and always on a dedicated
         // server — and is only mutated on the levelRender-gated paths below.
         Set<BlockPos> standing = levelRender ? new HashSet<>() : Set.of();
+        // The engine-owned front state advanceFront integrated this tick, per cell — stamped onto
+        // the pipes by stampWaterlines. Level-render only, like `standing`.
+        Map<BlockPos, CellFront> fronts = levelRender ? new HashMap<>() : Map.of();
+        // Level-path flowing edges are DEFERRED and advanced together (advanceChained) so their
+        // fronts chain into ONE continuous travel across shared junction/pump nodes, instead of
+        // every edge starting its own crawl from its own upstream end at once.
+        List<LevelFlow> chained = levelRender ? new ArrayList<>() : List.of();
         boolean draining = false;
 
         for (Edge edge : graph.edges()) {
@@ -189,16 +277,18 @@ public final class CreatePipeRendering {
                 // below the solved edge flow, so the inflow edge's fast solved rate must not scroll
                 // faster than what actually crosses it (the visual would outrun the delivered fluid).
                 int movedPerTick = PipeProbe.actualEdgeFlow(graph, solution, edge);
-                chargeEdge(level, graph, edge, flowing,
-                        flow.direction() == EdgeFlow.Direction.A_TO_B, movedPerTick, filled);
-                // When a run starts flowing, the travelling front charges from the upstream end — but
-                // STANDING fluid already sits at the lower (downstream) end. Preserve those settled
-                // cells so the sweep doesn't clear them ahead of the front (which despawns the fluid
-                // and makes the run visibly re-crawl, re-gating delivery). Only reservoir-supported
-                // cells are kept, so a genuinely empty run still fills as a clean front. This runs for
-                // BOTH renderers — the binary (default/server) renderer swept the settled column the
-                // tick flow started; only the STILL-render bookkeeping is level-render-gated.
-                preserveStandingFluid(level, graph, edge, solution, filled, standing, levelRender);
+                boolean fromA = flow.direction() == EdgeFlow.Direction.A_TO_B;
+                if (levelRender && !flowing.getFluid().getFluidType().isLighterThanAir()) {
+                    // The level path OWNS the travelling front: integrate it from the flow rate
+                    // into the synced front field (Create's Flow progress is not ticked on owned
+                    // cells). Deferred so all flowing edges advance together, chained across
+                    // shared nodes (advanceChained, below the loop). Gas stays with Create
+                    // end-to-end — the level renderer never draws it.
+                    chained.add(new LevelFlow(edge, flowing, fromA, movedPerTick));
+                } else {
+                    chargeEdge(level, graph, edge, flowing, fromA, movedPerTick, filled);
+                    preserveStandingFluid(level, graph, edge, solution, filled, standing, levelRender);
+                }
                 continue;
             }
 
@@ -267,6 +357,19 @@ public final class CreatePipeRendering {
             }
         }
 
+        // Advance every level-path flowing edge, CHAINED across shared nodes so the fill reads as
+        // one continuous travel. Then keep each run's settled standing fluid: when a run starts
+        // flowing, the travelling front charges from the upstream end — but STANDING fluid already
+        // sits at the lower (downstream) end. Preserve those settled cells so the sweep doesn't
+        // clear them ahead of the front (which despawns the fluid and makes the run visibly
+        // re-crawl, re-gating delivery). Only reservoir-supported cells are kept, so a genuinely
+        // empty run still fills as a clean front. (The binary/stock renderer runs the same
+        // preserve inline in the loop above.)
+        advanceChained(level, graph, chained, filled, fronts);
+        for (LevelFlow lf : chained) {
+            preserveStandingFluid(level, graph, lf.edge(), solution, filled, standing, levelRender);
+        }
+
         // A shut valve is a NODE, so it sits in no edge and would render empty — a one-cell gap
         // between the held feed and the settled downstream. Fill it: the held column presses fluid
         // right up to the valve and the far side sits settled against it, so the valve cell is full.
@@ -275,13 +378,14 @@ public final class CreatePipeRendering {
         // downstream before the front reaches it.
         for (Node node : graph.nodes()) {
             if (node.isClosedGate()) fillGateCell(level, graph, node, solution, filled);
+            else if (node.isJunction()) fillDeadEndCell(level, graph, node, solution, filled);
         }
 
         // LEVEL render (spike): stamp every wet cell's solved waterline onto its pipe behaviour (see
         // PipeLevelData), so the custom renderer can draw a partial fill. One pass over all wet cells —
         // resting, FLOWING, held, backed-up alike — so the waterline shows whether or not fluid moves.
         Set<BlockPos> levelCells = levelRender ? new HashSet<>() : Set.of();
-        if (levelRender) stampWaterlines(level, graph, solution, standing, levelCells);
+        if (levelRender) stampWaterlines(level, graph, solution, standing, filled, fronts, levelCells);
 
         for (BlockPos cell : graph.coverage()) {
             // Sweep each covered cell in ONE pipe lookup: drop a flow orphaned by an edit (any cell we
@@ -302,9 +406,19 @@ public final class CreatePipeRendering {
         if (dropFlow) {
             for (Direction dir : Direction.values()) changed |= clearFlow(pipe.getConnection(dir));
         }
-        if (resetLevel && pipe instanceof PipeLevelData data && data.pipesnphysics$getLevelData() != 0) {
-            data.pipesnphysics$setLevelData(0);
-            changed = true;
+        if (resetLevel && pipe instanceof PipeLevelData data) {
+            if (data.pipesnphysics$getLevelData() != 0) {
+                data.pipesnphysics$setLevelData(0);
+                changed = true;
+            }
+            if (data.pipesnphysics$getFrontData() != 0) {
+                data.pipesnphysics$setFrontData(0);
+                changed = true;
+            }
+            if (!data.pipesnphysics$getRenderFluid().isEmpty()) {
+                data.pipesnphysics$setRenderFluid(FluidStack.EMPTY);
+                changed = true;
+            }
         }
         if (changed) pipe.blockEntity.notifyUpdate();
     }
@@ -341,16 +455,23 @@ public final class CreatePipeRendering {
     }
 
     /**
-     * Stamp each wet pipe cell's solved waterline onto its behaviour ({@link PipeLevelData}, encoded by
-     * {@link #encodeLevel}), so {@code client.PipeLevelRenderer} draws the partial fill and the
-     * pipe-render mixins hide Create's binary fill for it. Runs for every edge with display heads, on
-     * whatever cells currently carry fluid — flowing cells included — so the level shows whether or not
-     * fluid moves. Every stamped cell is added to {@code levelCells} so the caller can reset the field
-     * on cells it did NOT stamp. Gas has no waterline (it fills by the mirror test), so a gas edge is
-     * left to Create.
+     * Stamp each wet pipe cell's render state onto its behaviour ({@link PipeLevelData}): the solved
+     * waterline ({@link #encodeLevel}), the engine-owned front ({@link #encodeFront}), and the fluid
+     * to draw — so {@code client.PipeLevelRenderer} renders entirely from the synced fields and the
+     * pipe-render mixins hide Create's binary fill. The single writer of all three fields. Runs for
+     * every edge with display heads, on whatever cells currently carry fluid — flowing cells
+     * included — so the level shows whether or not fluid moves. Every stamped cell is added to
+     * {@code levelCells} so the caller can reset the fields on cells it did NOT stamp. Gas has no
+     * waterline (it fills by the mirror test), so a gas edge is left to Create.
      */
     private static void stampWaterlines(Level level, Graph graph, Solution solution,
-                                        Set<BlockPos> standing, Set<BlockPos> levelCells) {
+                                        Set<BlockPos> standing, Set<BlockPos> filled,
+                                        Map<BlockPos, CellFront> fronts, Set<BlockPos> levelCells) {
+        // Whether a FLOWING run is drawn at its head waterline (rises with the head) or full. Read once
+        // here, not per cell; dist-guarded like levelRenderEnabled() because the CLIENT spec is absent on
+        // a dedicated server (a GameTest forces stampWaterlines through the explicit-flag apply overload).
+        boolean partialFlow = FMLEnvironment.dist.isClient()
+                && PipesNPhysicsConfig.PIPE_FLOW_PARTIAL_FILL.get();
         for (Edge edge : graph.edges()) {
             // A SOURCE_DRY stall is phantom flow apply skips entirely (its cells are swept, not
             // charged), so it must not be stamped either — the classify below would otherwise read it
@@ -366,7 +487,20 @@ public final class CreatePipeRendering {
             // is stamped, not left unmarked (which would leave that one cell rendered by Create).
             if (graph.node(edge.a()).isClosedGate() && graph.node(edge.b()).isHandler() && rawB != null) rawA = rawB;
             else if (graph.node(edge.b()).isClosedGate() && graph.node(edge.a()).isHandler() && rawA != null) rawB = rawA;
-            if (rawA == null || rawB == null) continue;
+            if (rawA == null || rawB == null) {
+                // No solved waterline — but this edge may still be HELD full by drainDeadEdge through a
+                // brief transient (a drained tank-to-tank run, or a pump source that dipped dry): its
+                // cells are in `filled` and its Create flows are preserved, it just has no head to seed
+                // a waterline. Keep the LEVEL renderer OWNING those held cells (stamp them full & still
+                // from the preserved flow) instead of skipping the edge. Skipping cleared the fields, so
+                // `ownsAnimation` flipped false — Create's binary fill popped back in and the client
+                // began a 6-tick fade; on an oscillating stop (a fall fed in bursts / a top tank hovering
+                // near-empty) both cells blip fade→re-stamp in unison, reading as "both pipes recrawl at
+                // once and flicker". The binary path already keeps the run charged here (drySourcePump-
+                // RunKeepsChargedPipe); this restores the same continuity on the level path.
+                stampHeldEdge(level, edge, filled, levelCells);
+                continue;
+            }
             // Anchor tank nodes to Create's RENDERED surface (cap/puddle inset), matching apply's
             // resting seeding, so the encoded waterline meets the tank's visible fluid.
             double headA = displaySurface(level, graph.node(edge.a()).pos(), rawA);
@@ -415,14 +549,55 @@ public final class CreatePipeRendering {
                 double waterline = Math.min(restA, restB);
                 headA = waterline;
                 headB = waterline;
+            } else if (moving && partialFlow) {
+                // Partial-fill: a MOVING run is drawn at its HEAD WATERLINE, so the fill rises as the
+                // head rises (the "flowing fluid doesn't raise with the head" report). Flatten to ONE
+                // level per run — the endpoint-head AVERAGE — so it tracks the head WITHOUT a per-cell
+                // gradient stepping between adjacent windows through the narrow tube band (the "one
+                // window half, next full" report). AVERAGE (not the idle min) so a rise at EITHER end
+                // lifts it; a cell pressurised ABOVE this line (a pump riser / primed crest, interp <= 0
+                // below) still fills FULL.
+                double waterline = (headA + headB) / 2.0;
+                headA = waterline;
+                headB = waterline;
             }
 
             List<BlockPos> pipes = edge.pipes();
             for (int i = 0; i < pipes.size(); i++) {
                 BlockPos cell = pipes.get(i);
                 FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
-                if (pipe == null) continue;
+                if (!(pipe instanceof PipeLevelData holder)) continue;
                 double frac = (i + 1.0) / (edge.length() + 1);
+
+                // The owned front decides whether fluid has reached the cell at all (the stamp gate)
+                // and how far through it the fill has advanced (the renderer's along-axis clip):
+                //   MOVING    — advanceFront integrated it this tick; a cell the front hasn't reached
+                //               stays unstamped (and is swept).
+                //   STANDING  — settled fluid ahead of the front: full but still.
+                //   BACKED-UP — trapped where it advanced: the hold COMPLETES its in-flight cell
+                //               (fraction floored to 1). The run renders FULL while held anyway
+                //               (flowDir -1, no clip), and the old Flow-progress front finished its
+                //               charging halves during a stall (tickFlowProgress kept running), so
+                //               resuming from full matches it — resuming from the frozen mid-fill
+                //               fraction made the cell visibly recede from full before re-filling.
+                //   IDLE      — restEdge seeded the submerged cells this tick (resting fills at
+                //               once), so `filled` is the fluid-presence bookkeeping.
+                CellFront front;
+                if (moving && !standing.contains(cell)) {
+                    front = fronts.get(cell);
+                    if (front == null || front.fraction() <= 0) continue;
+                } else if (moving) {
+                    front = FULL_STILL;
+                } else if (backedUp) {
+                    int stored = holder.pipesnphysics$getFrontData();
+                    if (stored != 0) front = new CellFront(1, frontFlowDir(stored), 0);
+                    else if (hasFluid(pipe)) front = FULL_STILL;
+                    else continue;
+                } else {
+                    if (!filled.contains(cell)) continue;
+                    front = FULL_STILL;
+                }
+
                 // The downstream Direction the fluid moves toward (for the scrolling texture), or -1
                 // when the run is at rest / backed up. pipes() is ordered a→b, so downstream is the
                 // next cell toward b when flow runs A→B, else toward a.
@@ -436,30 +611,96 @@ public final class CreatePipeRendering {
                     Direction d = PipeGeometry.between(cell, downstream);
                     if (d != null) flowDir = d.get3DDataValue();
                 }
-                // BACKED-UP cells are full where the fluid reached. IDLE settles to the interpolated
-                // (flat-min) surface and reads DRY above it. A MOVING cell whose interpolated surface
-                // sits BELOW it is a pressurized/climbing pipe (pump riser, primed siphon crest) that
-                // is carrying flow, so it is FULL — not invisible; a moving cell with a free surface
-                // inside it still shows a partial waterline.
+                // A BACKED-UP cell renders FULL: pressed against a stop, it is a full cross-section (the
+                // head gradient is PRESSURE, not a free surface). A MOVING cell shows its head waterline
+                // (interp; headA/headB were flattened to the run average above, so every same-Y cell
+                // reads the same and it rises with the head), EXCEPT a cell pressurised ABOVE that line —
+                // a pump riser / primed crest (interp <= 0) — which is FULL, not dry, and with partial
+                // fill OFF a moving cell stays FULL as before. An IDLE run shows its settled (min)
+                // waterline; a cell above it (interp <= 0) is left unstamped below and drawn dry.
                 double interp = headA + (headB - headA) * frac - (SableCompat.getWorldY(level, cell) - 0.5);
-                double cellFrac = backedUp ? 1.0
-                        : moving && interp <= 0 ? 1.0
-                        : interp;
+                double cellFrac;
+                if (backedUp) cellFrac = 1.0;
+                else if (moving) cellFrac = !partialFlow || interp <= 0 ? 1.0 : interp;
+                else cellFrac = interp;
                 // Only a cell whose waterline reaches it (cellFrac > 0) is stamped. A cell ABOVE the
-                // waterline (cellFrac <= 0 — only IDLE runs reach here; backed-up/climbing cells floor
+                // waterline (cellFrac <= 0 — only IDLE runs reach here; backed-up/moving cells floor
                 // to 1.0) is left UNSTAMPED so Create keeps drawing it: that is the stranded fluid of a
                 // receding hump, which Create drains cell-by-cell (drainDeadEdge). Stamping it hides
                 // Create yet the renderer draws nothing below its own cell, so the hump would blank
-                // instantly instead of receding. Its Flow carries the fluid type; the field the level.
-                if (cellFrac > 0 && hasFluid(pipe) && pipe instanceof PipeLevelData holder) {
-                    levelCells.add(cell);
-                    int data = encodeLevel(cellFrac, flowDir);
-                    if (holder.pipesnphysics$getLevelData() != data) {
-                        holder.pipesnphysics$setLevelData(data);
-                        pipe.blockEntity.notifyUpdate();
-                    }
+                // instantly instead of receding.
+                if (cellFrac <= 0) continue;
+                // The fluid the renderer draws. A receding run can reach here with an empty rep (no
+                // restFluids while drainDeadEdge holds its cells); its own seeded flows still carry
+                // the type, so read it back rather than stamping an invisible empty.
+                FluidStack cellFluid = rep.isEmpty() ? flowFluid(pipe) : rep;
+                if (cellFluid.isEmpty()) continue;
+
+                levelCells.add(cell);
+                boolean changed = false;
+                int data = encodeLevel(cellFrac, flowDir);
+                if (holder.pipesnphysics$getLevelData() != data) {
+                    holder.pipesnphysics$setLevelData(data);
+                    changed = true;
                 }
+                int frontData = encodeFront(front.fraction(), front.flowDir(), front.rate());
+                if (holder.pipesnphysics$getFrontData() != frontData
+                        && !onlyRateJitter(holder.pipesnphysics$getFrontData(), frontData)) {
+                    holder.pipesnphysics$setFrontData(frontData);
+                    changed = true;
+                }
+                if (!FluidStack.isSameFluidSameComponents(holder.pipesnphysics$getRenderFluid(), cellFluid)) {
+                    holder.pipesnphysics$setRenderFluid(cellFluid.copyWithAmount(1));
+                    changed = true;
+                }
+                if (changed) pipe.blockEntity.notifyUpdate();
             }
+        }
+    }
+
+    /**
+     * Keep the LEVEL renderer owning the cells a headless edge is HELD on ({@code drainDeadEdge}
+     * added them to {@code filled}), stamping each full &amp; still from its preserved Create flow.
+     * Called instead of skipping an edge with no solved node heads, so a run receding gradually
+     * through a transient never blips the render off (which handed it back to Create's binary fill
+     * and started a client fade — the flicker). A cell the recede heartbeat already released is not
+     * in {@code filled}, so it is left unstamped and fades out, preserving the gradual recede.
+     */
+    private static void stampHeldEdge(Level level, Edge edge, Set<BlockPos> filled, Set<BlockPos> levelCells) {
+        for (BlockPos cell : edge.pipes()) {
+            if (!filled.contains(cell)) continue; // only the cells drainDeadEdge is still holding
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+            if (!(pipe instanceof PipeLevelData holder)) continue;
+            FluidStack cellFluid = flowFluid(pipe);
+            // Gas has no waterline (it fills by the mirror test), so leave a gas run to Create.
+            if (cellFluid.isEmpty() || cellFluid.getFluid().getFluidType().isLighterThanAir()) continue;
+            // KEEP the last flow direction + rate so the fluid keeps SCROLLING through the brief stop
+            // (it is still draining OUT the same way it was flowing) instead of freezing to still — a
+            // dead scroll reads as a visual pause in the flow. The scroll DIRECTION lives in the LEVEL
+            // field's flowDir and the SPEED in the FRONT field's rate, so both carry it. A cell that was
+            // already resting (stored dir -1, or no field) stays still. Idempotent across held ticks:
+            // once stamped it re-reads its own preserved dir/rate, so the scroll runs unbroken to resume.
+            int stored = holder.pipesnphysics$getFrontData();
+            int flowDir = stored != 0 ? frontFlowDir(stored) : -1;
+            float rate = stored != 0 ? frontRate(stored) : 0f;
+            levelCells.add(cell);
+            boolean changed = false;
+            int levelData = encodeLevel(1.0, flowDir);
+            if (holder.pipesnphysics$getLevelData() != levelData) {
+                holder.pipesnphysics$setLevelData(levelData);
+                changed = true;
+            }
+            int frontData = encodeFront(1, flowDir, rate);
+            if (holder.pipesnphysics$getFrontData() != frontData
+                    && !onlyRateJitter(holder.pipesnphysics$getFrontData(), frontData)) {
+                holder.pipesnphysics$setFrontData(frontData);
+                changed = true;
+            }
+            if (!FluidStack.isSameFluidSameComponents(holder.pipesnphysics$getRenderFluid(), cellFluid)) {
+                holder.pipesnphysics$setRenderFluid(cellFluid.copyWithAmount(1));
+                changed = true;
+            }
+            if (changed) pipe.blockEntity.notifyUpdate();
         }
     }
 
@@ -489,6 +730,16 @@ public final class CreatePipeRendering {
      */
     public static boolean deliveryReady(Level level, Graph graph, Solution solution,
                                         Solution.Transfer transfer) {
+        return deliveryReady(level, graph, solution, transfer, levelRenderEnabled());
+    }
+
+    /**
+     * As {@link #deliveryReady(Level, Graph, Solution, Solution.Transfer)} but with the level-render
+     * flag passed explicitly, so a GameTest can exercise the owned-front gate without mutating live
+     * config (mirrors the {@code apply} overload).
+     */
+    public static boolean deliveryReady(Level level, Graph graph, Solution solution,
+                                        Solution.Transfer transfer, boolean levelRender) {
         Node sink = graph.nodeAt(transfer.to());
         if (sink == null) return true;
 
@@ -507,7 +758,7 @@ public final class CreatePipeRendering {
                 continue;
             }
             if (edge.pipes().isEmpty()) return true;           // adjacent: nothing to travel
-            if (frontReachedNode(level, graph, edge, sink.index())) return true;
+            if (frontReachedNode(level, graph, edge, sink.index(), levelRender)) return true;
             travellingFeeder = true;
         }
         return !travellingFeeder;
@@ -533,8 +784,16 @@ public final class CreatePipeRendering {
      * pipe, an untrackable direction, or a face with no interface — mirroring {@code chargeEdge}'s own
      * break conditions, so an odd-geometry cell can never deadlock delivery. A fully-primed continuous
      * column has every cell complete, so it still delivers instantly (and is already drawn full).
+     *
+     * On the LEVEL-render path the ENGINE-OWNED front field is authoritative wherever stamped: full
+     * means the front has passed through the cell ({@code advanceFront} integrates it; a standing
+     * column ahead of the front is stamped full+still, so it passes, exactly like its complete flows
+     * did). An UNSTAMPED cell — the dry gap the front is still crawling — falls through to the flow
+     * check below and holds (its flows are swept). The stock path never stamps the field, so it
+     * always takes the flow check unchanged.
      */
-    private static boolean frontReachedNode(Level level, Graph graph, Edge edge, int nodeIndex) {
+    private static boolean frontReachedNode(Level level, Graph graph, Edge edge, int nodeIndex,
+                                            boolean levelRender) {
         List<BlockPos> pipes = edge.pipes();
         if (pipes.isEmpty()) return true;
         // Walk source -> sink so each cell's downstream face points at the next cell (or the sink node
@@ -545,6 +804,11 @@ public final class CreatePipeRendering {
             BlockPos cell = order.get(j);
             FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
             if (pipe == null) continue;                         // can't track — don't stall on it
+            if (levelRender && pipe instanceof PipeLevelData data
+                    && data.pipesnphysics$getFrontData() != 0) {
+                if (frontFraction(data.pipesnphysics$getFrontData()) < 1f) return false;
+                continue;
+            }
             BlockPos down = j == order.size() - 1 ? sinkPos : order.get(j + 1);
             Direction toward = PipeGeometry.between(cell, down);
             if (toward == null) continue;
@@ -603,6 +867,222 @@ public final class CreatePipeRendering {
 
             // The next cell only starts once BOTH halves of this one are full.
             reached = isComplete(inC) && isComplete(outC);
+        }
+    }
+
+    /** A level-path flowing edge queued for the chained front advance. */
+    private record LevelFlow(Edge edge, FluidStack fluid, boolean fromA, int moved) {}
+
+    /**
+     * Advance every level-path flowing edge's owned front, CHAINED across shared nodes so a
+     * multi-edge line fills as ONE continuous travel: an edge whose upstream node is a zero-volume
+     * pass-through (a junction or pump) holds its front at rest until every feeder front has
+     * ARRIVED at that node — without this, each edge started crawling from its own upstream end
+     * the moment the solve flowed, so the runs on either side of a junction visibly filled (and
+     * on a reversal re-crawled) independently. A reservoir upstream (tank, basin, open end)
+     * never holds: it buffers its own fluid, which is also what breaks the hold cycle of a
+     * pump-driven loop through reservoirs. A HELD edge is advanced FROZEN — its already-stamped
+     * fill is kept in place (still, rate 0) rather than swept, so a mid-crawl hold neither
+     * despawns nor drifts. A pure feeder cycle with no advancing edge behind it (a pump ring
+     * through junctions only) force-advances instead of deadlocking.
+     */
+    private static void advanceChained(Level level, Graph graph, List<LevelFlow> flows,
+                                       Set<BlockPos> filled, Map<BlockPos, CellFront> fronts) {
+        if (flows.isEmpty()) return;
+        boolean[] done = new boolean[flows.size()];
+        int remaining = flows.size();
+
+        // Cascade: advance every edge whose upstream is ready; an edge completing its run this
+        // tick can release its dependents within the same tick, so a short feeder doesn't add a
+        // one-tick stutter at the node.
+        boolean progress = true;
+        while (remaining > 0 && progress) {
+            progress = false;
+            for (int i = 0; i < flows.size(); i++) {
+                if (done[i]) continue;
+                LevelFlow lf = flows.get(i);
+                if (!upstreamReady(level, graph, flows, done, fronts, i)) continue;
+                advanceFront(level, graph, lf.edge(), lf.fluid(), lf.fromA(), lf.moved(), false,
+                        filled, fronts);
+                done[i] = true;
+                remaining--;
+                progress = true;
+            }
+        }
+        if (remaining == 0) return;
+
+        // Whatever remains either genuinely WAITS on a front still crawling toward its upstream
+        // node — frozen, transitively — or sits in a pure feeder cycle none of whose members
+        // advanced (no reservoir anywhere behind it): force-advance those, a ring must not
+        // deadlock its fill forever.
+        boolean[] frozen = new boolean[flows.size()];
+        boolean grew = true;
+        while (grew) {
+            grew = false;
+            for (int i = 0; i < flows.size(); i++) {
+                if (done[i] || frozen[i]) continue;
+                if (hasWaitingFeeder(level, graph, flows, done, frozen, fronts, i)) {
+                    frozen[i] = true;
+                    grew = true;
+                }
+            }
+        }
+        for (int i = 0; i < flows.size(); i++) {
+            if (done[i]) continue;
+            LevelFlow lf = flows.get(i);
+            advanceFront(level, graph, lf.edge(), lf.fluid(), lf.fromA(), lf.moved(), frozen[i],
+                    filled, fronts);
+        }
+    }
+
+    /**
+     * Whether this flow's upstream node can feed it this tick: a reservoir (handler/open end)
+     * always can; a pass-through node only once every flowing feeder INTO it has been advanced
+     * this tick AND its front has arrived (its whole run is full).
+     */
+    private static boolean upstreamReady(Level level, Graph graph, List<LevelFlow> flows,
+                                         boolean[] done, Map<BlockPos, CellFront> fronts, int self) {
+        LevelFlow lf = flows.get(self);
+        int up = lf.fromA() ? lf.edge().a() : lf.edge().b();
+        Node node = graph.node(up);
+        if (node.isHandler() || node.isOpenEnd()) return true;
+        for (int j = 0; j < flows.size(); j++) {
+            if (j == self) continue;
+            LevelFlow f = flows.get(j);
+            int downstream = f.fromA() ? f.edge().b() : f.edge().a();
+            if (downstream != up) continue;
+            if (!done[j] || !frontComplete(level, f.edge(), fronts)) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Whether this held flow is (transitively) waiting on a feeder that is really crawling — one
+     * advanced this tick with an incomplete front, or one itself frozen behind such a feeder.
+     * A held flow with no such feeder is part of a pure cycle and is force-advanced instead.
+     */
+    private static boolean hasWaitingFeeder(Level level, Graph graph, List<LevelFlow> flows,
+                                            boolean[] done, boolean[] frozen,
+                                            Map<BlockPos, CellFront> fronts, int self) {
+        LevelFlow lf = flows.get(self);
+        int up = lf.fromA() ? lf.edge().a() : lf.edge().b();
+        for (int j = 0; j < flows.size(); j++) {
+            if (j == self) continue;
+            LevelFlow f = flows.get(j);
+            int downstream = f.fromA() ? f.edge().b() : f.edge().a();
+            if (downstream != up) continue;
+            if (frozen[j]) return true;
+            if (done[j] && !frontComplete(level, f.edge(), fronts)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Whether an edge's front (as advanced THIS tick, in {@code fronts}) has filled its whole run.
+     * Untrackable cells (no pipe) are skipped, mirroring the walk's own break conditions, so odd
+     * geometry can't hold a dependent edge forever.
+     */
+    private static boolean frontComplete(Level level, Edge edge, Map<BlockPos, CellFront> fronts) {
+        for (BlockPos cell : edge.pipes()) {
+            CellFront front = fronts.get(cell);
+            if (front != null && front.fraction() >= 1) continue;
+            if (FluidPropagator.getPipe(level, cell) == null) continue; // can't track — don't hold on it
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Advance the ENGINE-OWNED travelling front of a flowing edge by one tick — the level-render
+     * replacement for {@link #chargeEdge}, which animates the front through Create's Flow progress
+     * (advanced by {@code tickFlowProgress}, which owned cells skip). The front state lives in the
+     * cells' own synced {@link PipeLevelData} front field, read back each tick — stateless across
+     * ticks like the old one, so it survives edits. The field is not SAVED, so on a fresh load a
+     * cell re-derives its fill from the PERSISTED Create flows: a steadily-flowing run comes back
+     * full instead of re-crawling, a mid-fill run resumes from its last half-cell boundary.
+     *
+     * The fill speed is {@link #cellsPerTick} of the same {@link #flowPressure} the old front used,
+     * so the pace is unchanged: a brisk pump fills the run fast, a trickle slowly. Reversal keeps a
+     * FULL cell full (the scroll just flips) but restarts a mid-fill cell from the new upstream
+     * end, matching {@link #seedCharging}. Create's flows are seeded alongside at half-cell
+     * granularity — complete behind the front, charging (held, never ticked) at it — because they
+     * remain the persisted and stock-visible state: the reload re-derivation above, a receding
+     * hump's fluid type, and the delivery gate's unstamped-cell fallback all read them.
+     *
+     * {@code frozen} (a chained edge held at its upstream node, {@link #advanceChained}) walks and
+     * re-stamps the existing fill without advancing it — rate 0, so the client neither scrolls
+     * nor extrapolates it — keeping a mid-crawl hold in place instead of letting the sweep clear it.
+     */
+    private static void advanceFront(Level level, Graph graph, Edge edge, FluidStack fluid,
+                                     boolean flowFromA, int mbPerTick, boolean frozen,
+                                     Set<BlockPos> filled, Map<BlockPos, CellFront> fronts) {
+        List<BlockPos> pipes = edge.pipes();
+        if (pipes.isEmpty()) return;
+        List<BlockPos> order = flowFromA ? pipes : pipes.reversed();
+        BlockPos upstream = (flowFromA ? graph.node(edge.a()) : graph.node(edge.b())).pos();
+        BlockPos downstream = (flowFromA ? graph.node(edge.b()) : graph.node(edge.a())).pos();
+        float pressure = flowPressure(mbPerTick);
+        double rate = frozen ? 0 : cellsPerTick(pressure);
+        double advance = rate;
+
+        for (int j = 0; j < order.size(); j++) {
+            BlockPos cell = order.get(j);
+            FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, cell);
+            if (pipe == null) break;
+
+            BlockPos up = j == 0 ? upstream : order.get(j - 1);
+            BlockPos down = j == order.size() - 1 ? downstream : order.get(j + 1);
+            Direction inDir = PipeGeometry.between(cell, up);
+            Direction outDir = PipeGeometry.between(cell, down);
+            if (inDir == null || outDir == null) break;
+            PipeConnection inC = pipe.getConnection(inDir);
+            PipeConnection outC = pipe.getConnection(outDir);
+            if (inC == null || outC == null) break; // can't draw a continuous front here
+
+            int dir = outDir.get3DDataValue();
+            double fraction;
+            int stored = pipe instanceof PipeLevelData data ? data.pipesnphysics$getFrontData() : 0;
+            if (stored != 0) {
+                fraction = frontFraction(stored);
+                int storedDir = frontFlowDir(stored);
+                // Reversal: a full cell stays full (only the scroll flips); a mid-fill cell restarts
+                // from the new upstream end. A still (-1) stored dir is a backed-up or standing hold
+                // with no direction of record — resume it as-is.
+                if (storedDir != -1 && storedDir != dir && fraction < 1) fraction = 0;
+            } else {
+                // No field (fresh cell, or just loaded — the field is not saved): re-derive the fill
+                // from the persisted Create flows, at their half-cell granularity.
+                fraction = isComplete(outC) ? 1 : isComplete(inC) ? 0.5 : 0;
+            }
+
+            if (fraction < 1) {
+                double before = fraction;
+                fraction = Math.min(1, fraction + advance);
+                advance -= fraction - before;
+            }
+            if (fraction <= 0) break; // the front stopped before this cell
+
+            fronts.put(cell, new CellFront(fraction, dir, rate));
+            filled.add(cell);
+
+            // Keep Create's flows in step at half-cell granularity: the inbound half completes once
+            // the fill passes the centre, the outbound once it exits. The in-progress half holds a
+            // charging flow (present but never ticked) so the cell still reads wet server-side, and
+            // the not-yet-reached exit stays hidden, mirroring chargeEdge.
+            boolean changed;
+            if (fraction >= 1) {
+                changed = seedComplete(inC, true, fluid);
+                changed |= seedComplete(outC, false, fluid);
+            } else if (fraction >= 0.5) {
+                changed = seedComplete(inC, true, fluid);
+                changed |= seedCharging(outC, false, fluid, pressure);
+            } else {
+                changed = seedCharging(inC, true, fluid, pressure);
+                changed |= clearFlow(outC);
+            }
+            if (changed) pipe.blockEntity.notifyUpdate();
+
+            if (fraction < 1) break; // the front ends inside this cell
         }
     }
 
@@ -770,6 +1250,42 @@ public final class CreatePipeRendering {
         if (anyWet) filled.add(gate.pos());
     }
 
+    /**
+     * Render a dead-end JUNCTION cell — a pipe capped by a solid block — full of the fluid resting
+     * against it. Like a shut valve, a junction is a NODE in no edge, so {@link #restEdge} fills the
+     * run only up to its last edge cell and leaves this terminal cell dry: the fluid visibly stops
+     * one cell short of the block. Only a TRUE dead end (a single incident run) is handled — a
+     * multi-way junction (3–4 connections) stays the known gap. Filled only when that run holds
+     * fluid reaching the junction (its adjacent cell is in {@code filled}) and this cell sits below
+     * the settled waterline (the same dead-end centre threshold {@code restingCellSubmerged} uses),
+     * so a dry or above-surface junction stays empty.
+     */
+    private static void fillDeadEndCell(Level level, Graph graph, Node junction, Solution solution,
+                                        Set<BlockPos> filled) {
+        List<Edge> edges = graph.edgesOf(junction.index());
+        if (edges.size() != 1) return;
+        Edge edge = edges.get(0);
+        FluidStack fluid = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+        if (fluid.isEmpty()) fluid = solution.edgeFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
+        if (fluid.isEmpty()) return;
+        BlockPos adj = PipeGeometry.adjacentCell(graph, edge, junction.index());
+        if (adj == null || !filled.contains(adj)) return;
+        FluidTransportBehaviour pipe = FluidPropagator.getPipe(level, junction.pos());
+        if (pipe == null) return;
+        Double head = solution.nodeHeads().get(junction.index());
+        if (head == null) return;
+        // A liquid dead end fills once its waterline reaches the cell centre (matching restEdge's
+        // dead-end threshold); a gas pools against the cap regardless — the adjacent cell being wet
+        // already proved the run holds it.
+        if (!fluid.getFluid().getFluidType().isLighterThanAir()
+                && head + SUBMERSION_EPS < SableCompat.getWorldY(level, junction.pos())) {
+            return;
+        }
+        Direction dir = PipeGeometry.between(junction.pos(), adj);
+        if (dir == null) return;
+        if (seedComplete(pipe.getConnection(dir), true, fluid)) pipe.blockEntity.notifyUpdate();
+        filled.add(junction.pos());
+    }
 
     /**
      * The resting fill orientation a PUMP endpoint forces on a tied run, or null if neither end is a
@@ -853,6 +1369,29 @@ public final class CreatePipeRendering {
             }
         }
         return false;
+    }
+
+    /** Any non-empty flow's fluid on this pipe (its type), or EMPTY if dry — the stamp's rep fallback. */
+    private static FluidStack flowFluid(FluidTransportBehaviour pipe) {
+        for (Direction dir : Direction.values()) {
+            if (pipe.getConnection(dir) instanceof PipeConnectionAccessor accessor) {
+                Optional<PipeConnection.Flow> flow = accessor.pipesnphysics$getFlow();
+                if (flow.isPresent() && !flow.get().fluid.isEmpty()) return flow.get().fluid;
+            }
+        }
+        return FluidStack.EMPTY;
+    }
+
+    /**
+     * Whether two front values differ only by rate jitter within {@link #FRONT_RATE_EPS} — same
+     * fraction and direction. A steadily-flowing full cell's rate wobbles with the solved mB/t;
+     * without the deadband every wobble would re-sync the cell.
+     */
+    private static boolean onlyRateJitter(int stored, int fresh) {
+        if (stored == 0) return false;
+        int band = FRONT_FRAC_STRIDE * 8;
+        if ((stored - 1) % band != (fresh - 1) % band) return false;
+        return Math.abs((stored - 1) / band - (fresh - 1) / band) <= FRONT_RATE_EPS;
     }
 
     /** Seed an incomplete (still-filling) Flow; leaves an existing one for the animation. */

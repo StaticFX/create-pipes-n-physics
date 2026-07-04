@@ -58,6 +58,12 @@ public final class FlowSolver {
     private static final double ACTIVE_FLOW_EPS = 0.05;
     private static final double FLOW_TOLERANCE = 1.0e-7;
 
+    /** Valve-throttle governor: max relaxation rounds, and how close to the target flow is "converged". */
+    private static final int GOVERNOR_MAX_ROUNDS = 24;
+    private static final double GOVERNOR_TOLERANCE = 0.02;
+    /** Below this fully-open flow (mB/t) a throttled run has nothing worth governing. */
+    private static final double GOVERNOR_MIN_FLOW = 0.05;
+
     private FlowSolver() {}
 
     public static Solution solve(Level level, Graph graph) {
@@ -236,7 +242,8 @@ public final class FlowSolver {
 
     private record BranchMeta(int edgeIndex, BoundaryColumn columnA, BoundaryColumn columnB,
                               double lipA, double lipB,
-                              int pumpNode, double pumpHead, double pumpInternalG) {}
+                              int pumpNode, double pumpHead, double pumpInternalG,
+                              double throttle) {}
 
     private static boolean solveGroup(Level level, Graph graph, Columns columns,
                                       Map<Integer, PumpState> pumps,
@@ -300,8 +307,12 @@ public final class FlowSolver {
         }
         if (branches.isEmpty()) return false;
 
-        NetworkSolver.Result result = NetworkSolver.solve(nodeSpecs, branches, 1,
+        Governed governed = solveGoverned(nodeSpecs, branches, meta, 1,
                 PipesNPhysicsConfig.SUCTION_LIMIT.get());
+        NetworkSolver.Result result = governed.result();
+        // Downstream (pump load, display, transfers) reads the EFFECTIVE conductances the governor
+        // settled on, so a throttled run's readouts match the flow it actually solved.
+        branches = governed.branches();
 
         recordDisplayHeads(graph, solverIndex, nodeSpecs, canSupply, branches, result,
                 gas, results.nodeHeads, results.nodeCeilings, results.nodeAnchors);
@@ -383,6 +394,83 @@ public final class FlowSolver {
             }
         }
         return active;
+    }
+
+    /**
+     * Solve the network, enforcing each fluid valve's throttle as a THROUGHPUT GOVERNOR: a branch a
+     * player has cranked to {@code throttle} (0..1) of full may carry at most {@code throttle × its
+     * fully-open flow}, so "let through 50%" always halves the flow — wherever the valve sits.
+     *
+     * A valve is really a variable resistance, and a resistance in series with a strong pump (whose
+     * internal conductance dominates the loop) barely limits the flow; scaling the pipe conductance
+     * therefore did almost nothing on a pumped run. Instead this finds, per throttled branch, the
+     * conductance scale that makes its flow hit the target, by fixed-point relaxation: solve fully
+     * open to read the reference flow, set each target to {@code throttle × reference}, then repeatedly
+     * nudge each branch's conductance by {@code target / |flow|} and re-solve. Reducing a branch's
+     * conductance monotonically reduces its flow, so this converges; a slack valve in series with a
+     * tighter one relaxes back toward fully open (its flow already sits under its target), so the
+     * tightest one governs. Only networks that actually hold a part-closed valve pay the extra solves.
+     */
+    private static Governed solveGoverned(List<NodeSpec> nodeSpecs, List<BranchSpec> branches,
+                                          List<BranchMeta> meta, double dt, double suctionLimit) {
+        int m = branches.size();
+        boolean anyThrottled = false;
+        for (int b = 0; b < m; b++) {
+            if (meta.get(b).throttle() < 1 - 1e-6) { anyThrottled = true; break; }
+        }
+        if (!anyThrottled) {
+            return new Governed(NetworkSolver.solve(nodeSpecs, branches, dt, suctionLimit), branches);
+        }
+
+        double[] scale = new double[m];
+        double[] target = new double[m];
+        Arrays.fill(scale, 1);
+        Arrays.fill(target, Double.NaN);
+
+        List<BranchSpec> effective = branches;
+        NetworkSolver.Result result = NetworkSolver.solve(nodeSpecs, branches, dt, suctionLimit);
+        for (int round = 0; round < GOVERNOR_MAX_ROUNDS; round++) {
+            if (round == 0) {
+                // First solve is fully open (all scales 1): its flows are the reference the
+                // throttle percentages apply to.
+                for (int b = 0; b < m; b++) {
+                    double throttle = meta.get(b).throttle();
+                    if (throttle < 1 - 1e-6) target[b] = throttle * Math.abs(result.flows()[b]);
+                }
+            }
+            boolean converged = true;
+            for (int b = 0; b < m; b++) {
+                if (Double.isNaN(target[b]) || target[b] < GOVERNOR_MIN_FLOW) continue;
+                double flow = Math.abs(result.flows()[b]);
+                double ratio = target[b] / Math.max(flow, GOVERNOR_MIN_FLOW);
+                // Over target → choke it down; under target with room to open → relax back toward
+                // fully open. Either way multiply the scale by the ratio and clamp to (0, 1].
+                if (flow > target[b] * (1 + GOVERNOR_TOLERANCE)
+                        || (scale[b] < 1 && flow < target[b] * (1 - GOVERNOR_TOLERANCE))) {
+                    scale[b] = Math.clamp(scale[b] * ratio, 1e-4, 1);
+                    converged = false;
+                }
+            }
+            if (converged) break;
+            effective = scaleConductance(branches, scale);
+            result = NetworkSolver.solve(nodeSpecs, effective, dt, suctionLimit);
+        }
+        return new Governed(result, effective);
+    }
+
+    /** A governed solve: the settled result plus the effective (throttle-scaled) branch conductances. */
+    private record Governed(NetworkSolver.Result result, List<BranchSpec> branches) {}
+
+    /** A copy of the branch list with each branch's conductance multiplied by {@code scale[b]}. */
+    private static List<BranchSpec> scaleConductance(List<BranchSpec> branches, double[] scale) {
+        List<BranchSpec> scaled = new ArrayList<>(branches.size());
+        for (int b = 0; b < branches.size(); b++) {
+            BranchSpec s = branches.get(b);
+            scaled.add(scale[b] == 1 ? s
+                    : new BranchSpec(s.a(), s.b(), s.conductance() * scale[b], s.emf(),
+                            s.allowedSign(), s.crestHeight(), s.crestPos()));
+        }
+        return scaled;
     }
 
     /**
@@ -561,10 +649,11 @@ public final class FlowSolver {
         if (columnA != null && columnA.isEmpty()) allowedSign = combineSign(allowedSign, -1);
         if (columnB != null && columnB.isEmpty()) allowedSign = combineSign(allowedSign, +1);
 
-        // A hose pulley only ever supplies (it draws from a fluid body, it does not
-        // accept fluid back through the same connection). Pin the branch to flow OUT
-        // of it; this also stops the engine from pushing fluid into the pulley and
-        // having it deposit blocks it would then drain straight back.
+        // An infinite SOURCE (a hose pulley over a body it can drain, an open-end intake
+        // mouth) only ever supplies — pin the branch to flow OUT of it. A pulley in the
+        // opposite, FILL role is instead modelled as an empty SINK column (receive-only via
+        // the isEmpty rule above), and drain-priority + the deposit latch keep the two roles
+        // from flipping tick-to-tick and reclaiming the fluid just pushed out.
         if (columnA != null && columnA.isInfiniteSource()) allowedSign = combineSign(allowedSign, +1);
         if (columnB != null && columnB.isInfiniteSource()) allowedSign = combineSign(allowedSign, -1);
         if (allowedSign == Integer.MIN_VALUE) return;
@@ -592,15 +681,18 @@ public final class FlowSolver {
             crestPos = statics.crestPos();
         }
 
-        // Throttle the FINAL conductance, so it scales whether the pipe run or the pump
-        // (its internal-conductance cap, applied above) is the limiter.
-        conductance *= throttle;
-
+        // The throttle is NOT baked into the conductance here. Scaling conductance only limits
+        // the flow when the valve's own run is the binding resistor — in series with a strong
+        // pump (whose tiny internal conductance dominates the loop) halving a fat pipe's
+        // conductance barely moves the flow, so "let through 50%" did almost nothing (74→67 on
+        // a real pump). Instead the throttle is a THROUGHPUT GOVERNOR applied by {@code solveGoverned}:
+        // it caps the run's flow to {@code throttle × fully-open flow}, so 50% always means half,
+        // wherever the valve sits. The angle is carried on the meta for that loop.
         branches.add(new BranchSpec(solverA, solverB, conductance, emf, allowedSign,
                 crestHeight, crestPos));
         meta.add(new BranchMeta(edge.index(),
                 columns.byNode.get(edge.a()), columns.byNode.get(edge.b()), lipA, lipB,
-                driveNode, driveHead, driveInternalG));
+                driveNode, driveHead, driveInternalG, throttle));
         // Whether this is a held FEED candidate (a pump driving out toward a shut gate) is decided
         // post-solve in solveGroup, where the hydraulic islands are known — the pump only HOLDS a
         // column if it actually has a supply behind it (a source in its island).
