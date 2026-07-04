@@ -1,7 +1,9 @@
 package de.devin.pipesnphysics.mixin;
 
 import com.simibubi.create.content.fluids.OpenEndedPipe;
+import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import com.simibubi.create.foundation.fluid.FluidHelper;
+import com.simibubi.create.foundation.mixin.accessor.FlowingFluidAccessor;
 import com.simibubi.create.infrastructure.config.AllConfigs;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
@@ -11,6 +13,7 @@ import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.material.FlowingFluid;
@@ -126,24 +129,42 @@ public class OpenEndedPipeMixin {
     private void pipesnphysics$removeFluidFromWorld(boolean simulate,
                                                     CallbackInfoReturnable<FluidStack> cir) {
         BlockPos worldBlockPos = pipesnphysics$getWorldOutputPos();
-        if (worldBlockPos == null) return;
-
-        if (world == null || !world.isLoaded(worldBlockPos)) {
+        if (worldBlockPos == null) return; // off a sub-level: Create's stock reads/consumes outputPos
+        if (world == null) {
             cir.setReturnValue(FluidStack.EMPTY);
             return;
         }
+        // On a sub-level the source may be a block ON the contraption (the raw plot-coords outputPos)
+        // OR a block in the host world under the projected mouth — mirroring spill, which goes to the
+        // world. Try the sub-level block first, then the world.
+        FluidStack drained = pipesnphysics$drainSourceAt(outputPos, simulate);
+        if (drained.isEmpty()) drained = pipesnphysics$drainSourceAt(worldBlockPos, simulate);
+        cir.setReturnValue(drained);
+    }
 
-        BlockState state = world.getBlockState(worldBlockPos);
+    /**
+     * Drain a fluid source at {@code pos}, CONSUMING it: a cauldron/honey block drains itself; a finite
+     * source drops to level 14 (flows away); a self-regenerating lake is left as the source (its
+     * getNewLiquid would re-source level 14 anyway). Mirrors Create's own consume — the old mixin left
+     * EVERY source in place (level 0), which minted infinite fluid from a finite one (so finite/sub-level
+     * intake had to be gated off). EMPTY if there is no drainable source here.
+     */
+    @Unique
+    private FluidStack pipesnphysics$drainSourceAt(BlockPos pos, boolean simulate) {
+        if (!world.isLoaded(pos)) return FluidStack.EMPTY;
+        BlockState state = world.getBlockState(pos);
+        FluidStack drainable = VanillaFluidTargets.drainBlock(world, pos, state, simulate);
+        if (!drainable.isEmpty()) return drainable;
         FluidState fluidState = state.getFluidState();
-        if (!fluidState.isSource()) {
-            cir.setReturnValue(FluidStack.EMPTY);
-            return;
-        }
+        if (!fluidState.isSource()) return FluidStack.EMPTY;
 
-        if (!simulate) {
-            world.setBlock(worldBlockPos, fluidState.createLegacyBlock(), Block.UPDATE_ALL);
-        }
-        cir.setReturnValue(new FluidStack(fluidState.getType(), 1000));
+        FluidStack stack = new FluidStack(fluidState.getType(), 1000);
+        if (simulate) return stack;
+        BlockState drainedState = fluidState.createLegacyBlock().setValue(LiquidBlock.LEVEL, 14);
+        boolean regenerates = drainedState.getFluidState().getType() instanceof FlowingFluidAccessor flowing
+                && flowing.create$getNewLiquid(world, pos, drainedState).equals(fluidState);
+        if (!regenerates) world.setBlock(pos, drainedState, Block.UPDATE_ALL);
+        return stack;
     }
 
     /**

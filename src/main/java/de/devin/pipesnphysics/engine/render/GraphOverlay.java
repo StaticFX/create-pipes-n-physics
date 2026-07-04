@@ -48,6 +48,11 @@ public final class GraphOverlay {
 
     private GraphOverlay() {}
 
+    /** Drop all snapshots — called when the player leaves the world or changes dimension. */
+    public static void clear() {
+        ACTIVE.clear();
+    }
+
     /** Called from the network payload handler. */
     public static void receive(GraphOverlayPayload payload) {
         ACTIVE.add(new ActiveOverlay(payload, System.currentTimeMillis()));

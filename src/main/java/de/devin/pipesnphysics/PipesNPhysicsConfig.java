@@ -3,9 +3,8 @@ package de.devin.pipesnphysics;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 /**
- * Server + client config for the v1 engine. Most knobs from the v0 build are
- * gone with the old engine; only the surviving features (Sable tank mass,
- * tilted/wave fluid rendering) and the master enable flag remain.
+ * Server + client config for the v2 hydraulic engine (see CLAUDE.md). Sim-affecting knobs live on
+ * the SERVER spec (synced to clients); rendering toggles live on the CLIENT spec.
  */
 public class PipesNPhysicsConfig {
     public static final ModConfigSpec SERVER_SPEC;
@@ -32,13 +31,15 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue SHOW_PUMP_RANGE_ARROWS;
     public static final ModConfigSpec.BooleanValue PRESERVE_PUMP_RANGE;
     public static final ModConfigSpec.IntValue PUMP_RANGE_PRESERVE_SECONDS;
+    public static final ModConfigSpec.BooleanValue ENABLE_PIPE_SWAP;
+    public static final ModConfigSpec.BooleanValue PIPE_LEVEL_RENDER;
+    public static final ModConfigSpec.DoubleValue PIPE_LEVEL_FLOW_SPEED;
+    public static final ModConfigSpec.BooleanValue PIPE_FLOW_PARTIAL_FILL;
     public static final ModConfigSpec.BooleanValue FLUID_TILT_ENABLED;
     public static final ModConfigSpec.BooleanValue FLUID_WAVE_MESH;
     public static final ModConfigSpec.IntValue FLUID_SURFACE_RESOLUTION;
     public static final ModConfigSpec.BooleanValue FLUID_DEBUG_RENDER;
     public static final ModConfigSpec.BooleanValue FLUID_HIDE_TEXTURE;
-    public static final ModConfigSpec.BooleanValue EXPERIMENTAL_PIPE_LEVEL_RENDER;
-    public static final ModConfigSpec.DoubleValue EXPERIMENTAL_PIPE_LEVEL_FLOW_SPEED;
 
     static {
         ModConfigSpec.Builder server = new ModConfigSpec.Builder();
@@ -135,7 +136,39 @@ public class PipesNPhysicsConfig {
                 .comment("How many seconds the pump range indicator lingers after looking away.")
                 .defineInRange("pumpRangePreserveSeconds", 5, 1, 60);
         client.pop();
-        client.push("fluidPhysics");
+        client.push("controls");
+        ENABLE_PIPE_SWAP = client
+                .comment("Shift + right-click a pipe element (pump, valve, smart fluid pipe, pipe) held in",
+                        "hand onto another pipe element to replace it in place — the old block's drops are",
+                        "refunded and one held block is consumed. Handy for editing a run without breaking it",
+                        "first. (Read on the client, so it only takes effect in singleplayer / on your own",
+                        "integrated server; a dedicated server always allows the swap.)")
+                .define("enablePipeSwap", true);
+        client.pop();
+        client.push("pipeRendering");
+        PIPE_LEVEL_RENDER = client
+                .comment("Draw fluid inside pipes at its actual waterline (a partial fill at the solved",
+                        "surface) instead of Create's binary full-or-empty fill. Resting fluid in straight",
+                        "glass pipes only. The per-cell waterline is computed server-side onto the synced pipe",
+                        "flow; in singleplayer the integrated server reads this client flag directly, so it",
+                        "works without a per-world server-config edit. (The server-side encode is gated on the",
+                        "CLIENT being present, so it takes effect in singleplayer only for now.) When false,",
+                        "pipes render exactly as stock Create.")
+                .define("pipeLevelRender", true);
+        PIPE_LEVEL_FLOW_SPEED = client
+                .comment("Speed multiplier for the in-pipe fluid scroll animation (the level renderer above).",
+                        "1.0 = default; lower it to calm a fast flow, raise it to make it livelier. Only the",
+                        "animation speed changes, not the actual fluid transfer.")
+                .defineInRange("pipeLevelFlowSpeed", 1.0, 0.0, 10.0);
+        PIPE_FLOW_PARTIAL_FILL = client
+                .comment("Needs the level renderer above: draw a FLOWING horizontal pipe at its head WATERLINE",
+                        "(like a resting pipe), so the fill rises as the head rises instead of always brimming",
+                        "the tube. A display metric, not physics (a pressurised pipe is really full); pump",
+                        "risers / crests pressurised above the line stay full, and vertical runs fill their bore.",
+                        "When false, a flowing pipe fills the whole tube as before.")
+                .define("pipeFlowPartialFill", true);
+        client.pop();
+        client.push("sableFluidPhysics");
         FLUID_TILT_ENABLED = client
                 .comment("Enable tilted fluid rendering in tanks on Sable sub-levels.")
                 .define("fluidTiltEnabled", true);
@@ -151,20 +184,6 @@ public class PipesNPhysicsConfig {
         FLUID_HIDE_TEXTURE = client
                 .comment("Hide fluid textures, showing only debug wireframe.")
                 .define("fluidHideTexture", false);
-        EXPERIMENTAL_PIPE_LEVEL_RENDER = client
-                .comment("EXPERIMENTAL (spike): draw fluid inside pipes at its actual waterline (a partial",
-                        "fill at the solved surface) instead of Create's binary full-or-empty fill. Resting",
-                        "fluid in straight glass pipes only. The per-cell waterline is computed server-side",
-                        "onto the synced pipe flow; in singleplayer the integrated server reads this client",
-                        "flag directly, so it works without a per-world server-config edit. (Spike: the",
-                        "server-side encode is gated on the CLIENT being present, so it is singleplayer-only",
-                        "for now.) When false, pipes render exactly as stock Create.")
-                .define("experimentalPipeLevelRender", false);
-        EXPERIMENTAL_PIPE_LEVEL_FLOW_SPEED = client
-                .comment("Speed multiplier for the in-pipe fluid scroll animation (the level renderer above).",
-                        "1.0 = default; lower it to calm a fast flow, raise it to make it livelier. Only the",
-                        "animation speed changes, not the actual fluid transfer.")
-                .defineInRange("experimentalPipeLevelFlowSpeed", 1.0, 0.0, 10.0);
         client.pop();
         CLIENT_SPEC = client.build();
     }

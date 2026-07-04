@@ -46,12 +46,13 @@ public final class BoundaryColumn {
     private static final int OPEN_END_CAPACITY_MB = 4_000_000;
 
     /**
-     * Capacity stand-in for a hose pulley drawing from a fluid body: large enough that
-     * its head holds steady within a tick (the pulley lifts water to its own level under
-     * kinetic power, so it reads as a brimming reservoir at the pulley), while the actual
-     * per-tick volume is still clamped by what Create's drainer will hand over.
+     * Capacity stand-in for a hose pulley bridging the pipe network to a world fluid body:
+     * large enough that its head holds steady within a tick (the pulley lifts / deposits at
+     * its own level under kinetic power, so it reads as a fixed reservoir at the pulley),
+     * while the actual per-tick volume is still clamped by what Create's drainer hands over
+     * (as a brimming SOURCE) or filler accepts (as a bottomless SINK).
      */
-    private static final int PULLEY_SOURCE_CAPACITY_MB = 4_000_000;
+    private static final int PULLEY_CAPACITY_MB = 4_000_000;
 
     private final BlockPos identity;
     private final BlockPos accessPos;
@@ -118,24 +119,36 @@ public final class BoundaryColumn {
                     SableCompat.getUpProjectionY(level, controllerPos));
         }
 
-        // A hose pulley draws from a fluid body through its hose: when its handler
-        // advertises a drainable world fluid, model it as a brimming, one-way source
-        // at the pulley's elevation rather than its tiny 1,500 mB buffer. The buffer
-        // would equalize and stall like any small reservoir, and its opening lip would
-        // gate the draw depending on where the pipe meets the pulley. Create's drainer
-        // clamps the real per-tick volume and its counterpart bookkeeping stops the
-        // pulley from reclaiming fluid it just deposited, so a one-way source is safe.
-        // No drainable fluid (pulley over air, or filling) falls through to the generic
-        // handler path below, where the buffer behaves as an ordinary fill sink.
+        // A hose pulley bridges the pipe network to a world fluid body through its hose.
+        // Model it as a fixed reservoir at the pulley's elevation rather than its tiny
+        // 1,500 mB buffer — the buffer would equalize and stall like any small reservoir,
+        // and its opening lip would gate flow by where the pipe meets the pulley. Create's
+        // drainer/filler clamps the real per-tick volume either way.
+        //
+        // DRAIN-PRIORITY: when its handler advertises a drainable body, it is a brimming,
+        // one-way SOURCE (draw a lake, unchanged). Otherwise it is a bottomless, one-way
+        // SINK — the network pushes fluid out through it and Create deposits it into the
+        // world (the "can't push out of a pulley" gap). A pulley that JUST deposited is
+        // held as a sink for a cooldown even though its fresh block now reads drainable:
+        // without that latch drain-priority would flip it to a source and suck its own
+        // output straight back (the reclaim oscillation, the same class the open-end spill
+        // latch guards). Create's own counterpart bookkeeping only softens this; the latch
+        // is what actually holds the direction.
         if (isHosePulley(level, pos)) {
             FluidStack drainable = cap.getFluidInTank(0);
-            if (!drainable.isEmpty()
-                    && !cap.drain(drainable.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()) {
+            boolean drainableBody = !drainable.isEmpty()
+                    && !cap.drain(drainable.copyWithAmount(1), FluidAction.SIMULATE).isEmpty();
+            boolean depositing = OpenEndPipes.pulleyRecentlyDeposited(level, pos,
+                    PipesNPhysicsConfig.OPEN_END_INTAKE_COOLDOWN_TICKS.get());
+            if (drainableBody && !depositing) {
                 return new BoundaryColumn(pos, pos,
-                        SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_SOURCE_CAPACITY_MB,
-                        drainable.copyWithAmount(PULLEY_SOURCE_CAPACITY_MB),
-                        PULLEY_SOURCE_CAPACITY_MB, null, true, 1.0);
+                        SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_CAPACITY_MB,
+                        drainable.copyWithAmount(PULLEY_CAPACITY_MB),
+                        PULLEY_CAPACITY_MB, null, true, 1.0);
             }
+            return new BoundaryColumn(pos, pos,
+                    SableCompat.getWorldY(level, pos) - 0.5, 1, PULLEY_CAPACITY_MB,
+                    FluidStack.EMPTY, 0, null, false, 1.0);
         }
 
         int capacity = 0;
@@ -202,43 +215,39 @@ public final class BoundaryColumn {
     }
 
     /**
-     * The world fluid an open mouth may draw IN, or EMPTY to keep it a one-way spill
-     * outlet. Eligible bodies:
-     *   - residual already pulled into the pipe's buffer (a partly-delivered draw);
-     *   - a cauldron / honey block, which drains to a clean empty state;
-     *   - a self-regenerating fluid source (a lake), tested with Create's OWN refill check
-     *     ({@code getNewLiquid} on the drained-to-14 state equals the source — the exact
-     *     discriminator {@code OpenEndedPipe} uses) — always drinkable, on the main level
-     *     or projected onto a world lake from a Sable sub-level;
-     *   - ANY other source (a finite / hand-placed block) on the MAIN level, UNLESS the
-     *     network recently spilled or the block is {@link #contested} between two mouths.
-     *     Finite intake is off on Sable sub-levels (the projected coords break the contested
-     *     scan and the sub-level spill mixin preserves rather than consumes a source).
+     * The fluid an open mouth may draw IN, or EMPTY to keep it a one-way spill outlet. Checks the
+     * block the pipe faces on its OWN level FIRST — a main-level source, or one placed on a Sable
+     * sub-level (at its plot coords) — then, for a contraption mouth hovering over the host world, the
+     * PROJECTED world block (mirroring spill, which goes to the world). Residual already pulled into
+     * the pipe's buffer short-circuits both. Finite intake now works on sub-levels too: the drain
+     * (OpenEndedPipeMixin) consumes a finite source and leaves a lake, so it can no longer mint fluid.
      */
     private static FluidStack intakeFluid(Level level, BlockPos space, boolean networkSpilled) {
         if (!PipesNPhysicsConfig.ENABLE_OPEN_END_INTAKE.get()) return FluidStack.EMPTY;
         FluidStack residual = OpenEndPipes.bufferedIntake(level, space);
         if (!residual.isEmpty()) return residual;
+        FluidStack local = drinkableSource(level, space, networkSpilled);
+        if (!local.isEmpty()) return local;
         BlockPos out = worldOutputPos(level, space);
-        BlockState state = level.getBlockState(out);
-        FluidStack drainable = VanillaFluidTargets.drainBlock(level, out, state, true);
+        return out.equals(space) ? FluidStack.EMPTY : drinkableSource(level, out, networkSpilled);
+    }
+
+    /**
+     * The fluid drinkable from the block at {@code pos}, or EMPTY: a cauldron/honey block; a
+     * self-regenerating lake (Create's own {@code getNewLiquid}-on-drained-to-14 discriminator); or a
+     * finite/hand-placed source — the last one UNLESS the network recently spilled (its own spit) or the
+     * block is {@link #contested} between two mouths (a broken run's gap, which drinking teleports across).
+     */
+    private static FluidStack drinkableSource(Level level, BlockPos pos, boolean networkSpilled) {
+        BlockState state = level.getBlockState(pos);
+        FluidStack drainable = VanillaFluidTargets.drainBlock(level, pos, state, true);
         if (!drainable.isEmpty()) return drainable;
         FluidState fluidState = state.getFluidState();
         if (!fluidState.isSource()) return FluidStack.EMPTY;
-        if (survivesDrain(level, out, fluidState)) {
-            return new FluidStack(fluidState.getType(), 1000); // a lake — always drinkable
+        if (survivesDrain(level, pos, fluidState)) {
+            return new FluidStack(fluidState.getType(), 1000);
         }
-        // A finite/hand-placed source: pull it, UNLESS
-        //   - this network spilled recently (could be sucking its own spit back), or
-        //   - the block is wedged between two pipe mouths — a broken run's spill, drinking
-        //     which would teleport fluid across the gap, or
-        //   - the mouth is on a Sable sub-level (out != space): the projection breaks the
-        //     contested scan, and the sub-level spill mixin PRESERVES a drained source
-        //     rather than consuming it, so a finite block there would mint infinite fluid.
-        //     Lakes are handled above (survivesDrain reads the real world block), so a
-        //     contraption pipe dipped in a world lake still works.
-        boolean projected = !out.equals(space);
-        if (!projected && !networkSpilled && !contested(level, out)) {
+        if (!networkSpilled && !contested(level, pos)) {
             return new FluidStack(fluidState.getType(), 1000);
         }
         return FluidStack.EMPTY;

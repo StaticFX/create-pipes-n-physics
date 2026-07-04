@@ -300,6 +300,35 @@ class NetworkSolverTest {
         assertTrue(result.crestBlocked()[1], "the downstream crest must report as broken");
     }
 
+    /**
+     * A pump must not be permanently dead-headed by a crest-broken feeder's PHANTOM pressure.
+     * node0 (100) feeds the junction through a run cresting at 200 — a genuinely broken siphon.
+     * In the pre-crest solve that feeder conducts at full strength and lifts the junction above
+     * the pump's reachable head, so the pump's check-valve branch backflow-deactivates. The crest
+     * gate then removes the feeder — and the pump, opposed by nothing, must deliver. Regression for
+     * the active set not being rebuilt after crest gating (the pre-gate backflow flag stuck on).
+     */
+    @Test
+    void pumpDeliversWhenCrestBrokenFeederNoLongerBackpressuresIt() {
+        List<NodeSpec> nodes = List.of(
+                new NodeSpec(TANK_CAPACITANCE, 100), // high feeder, walled off by a broken crest
+                new NodeSpec(0, 0),                  // junction
+                new NodeSpec(TANK_CAPACITANCE, 40),  // the pump's supply
+                new NodeSpec(TANK_CAPACITANCE, 20)); // the sink
+        List<BranchSpec> branches = List.of(
+                new BranchSpec(0, 1, 40, 0, 0, 200, 0.5),        // breaks: 200 >> 100 + suctionLimit
+                new BranchSpec(2, 1, 4, 10, +1, Double.NaN, 0),  // pump lifts 10 blocks into the junction
+                new BranchSpec(1, 3, 40, 0, 0, Double.NaN, 0));
+
+        Result result = step(nodes, branches);
+
+        assertEquals(0, result.flows()[0], 1e-9, "the broken 200-block crest walls off the high feeder");
+        assertTrue(result.crestBlocked()[0], "the feeder's crest must report broken");
+        assertTrue(result.flows()[1] > 5,
+                "the pump must deliver once the crest-broken feeder no longer backflow-blocks it, "
+                        + "but flow was " + result.flows()[1]);
+    }
+
     @Test
     void pumpHeadLiftsTheCrestGate() {
         List<NodeSpec> tanks = List.of(
@@ -440,5 +469,66 @@ class NetworkSolverTest {
         for (double flow : result.flows()) assertEquals(0, flow, 0.0);
         for (double head : result.heads()) assertFalse(Double.isNaN(head));
         assertEquals(10, result.heads()[0], 1e-9, "isolated tank keeps its head");
+    }
+
+    /**
+     * Above DIRECT_SOLVE_LIMIT the solver switches from Gaussian elimination to a sparse
+     * Jacobi-preconditioned conjugate gradient. It must solve the SAME system: a symmetric chain (both
+     * ends full) has to produce a symmetric head profile and conserve volume — a broken sparse matvec
+     * would violate either. n = 200 forces the sparse path.
+     */
+    @Test
+    void sparseSolverIsSymmetricAndConservesOnLargeNetwork() {
+        int n = 200;
+        List<NodeSpec> nodes = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            nodes.add(new NodeSpec(TANK_CAPACITANCE, i == 0 || i == n - 1 ? 100 : 0));
+        }
+        List<BranchSpec> branches = new ArrayList<>();
+        for (int i = 1; i < n; i++) branches.add(BranchSpec.passive(i - 1, i, 50));
+
+        Result result = step(nodes, branches);
+
+        double total = 0;
+        for (int i = 0; i < n; i++) total += result.netInflow()[i];
+        assertEquals(0, total, 1e-4, "volume conserved on the large network");
+        for (int i = 0; i < n; i++) {
+            assertFalse(Double.isNaN(result.heads()[i]), "head " + i + " must be finite");
+            assertEquals(result.heads()[n - 1 - i], result.heads()[i], 1e-6,
+                    "a symmetric input must give a symmetric head profile (node " + i + ")");
+        }
+    }
+
+    /**
+     * The sparse path must be stable over many ticks: a single full tank diffusing down a long chain
+     * conserves total volume every step, never overshoots (no negative head), and the surface spread
+     * only shrinks (the diffusion maximum principle). n = 150 stays on the sparse path.
+     */
+    @Test
+    void sparseSolverConservesAndSettlesOverManyTicks() {
+        int n = 150;
+        List<NodeSpec> nodes = new ArrayList<>();
+        for (int i = 0; i < n; i++) nodes.add(new NodeSpec(TANK_CAPACITANCE, i == 0 ? 100 : 0));
+        List<BranchSpec> branches = new ArrayList<>();
+        for (int i = 1; i < n; i++) branches.add(BranchSpec.passive(i - 1, i, 50));
+
+        double initialVolume = 100 * TANK_CAPACITANCE;
+        double previousSpread = 100;
+        for (int tick = 0; tick < 300; tick++) {
+            Result result = step(nodes, branches);
+            nodes = advance(nodes, result);
+
+            double lo = Double.MAX_VALUE, hi = -Double.MAX_VALUE, volume = 0;
+            for (NodeSpec node : nodes) {
+                lo = Math.min(lo, node.head());
+                hi = Math.max(hi, node.head());
+                volume += node.head() * node.capacitance();
+            }
+            assertEquals(initialVolume, volume, 1e-2, "volume conserved across steps (tick " + tick + ")");
+            assertTrue(lo >= -1e-6, "no tank overshoots below empty (tick " + tick + "), got " + lo);
+            assertTrue(hi - lo <= previousSpread + 1e-6, "the surface spread must not grow (tick " + tick + ")");
+            previousSpread = hi - lo;
+        }
+        assertTrue(previousSpread < 100, "the chain made progress toward equalization");
     }
 }

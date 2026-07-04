@@ -4,7 +4,9 @@ import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
+import de.devin.pipesnphysics.engine.solve.Apportion;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver;
+import de.devin.pipesnphysics.engine.solve.UnionFind;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver.BranchSpec;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver.NodeSpec;
 import net.minecraft.core.BlockPos;
@@ -21,6 +23,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -55,6 +58,12 @@ public final class FlowSolver {
     private static final double ACTIVE_FLOW_EPS = 0.05;
     private static final double FLOW_TOLERANCE = 1.0e-7;
 
+    /** Valve-throttle governor: max relaxation rounds, and how close to the target flow is "converged". */
+    private static final int GOVERNOR_MAX_ROUNDS = 24;
+    private static final double GOVERNOR_TOLERANCE = 0.02;
+    /** Below this fully-open flow (mB/t) a throttled run has nothing worth governing. */
+    private static final double GOVERNOR_MIN_FLOW = 0.05;
+
     private FlowSolver() {}
 
     public static Solution solve(Level level, Graph graph) {
@@ -67,13 +76,16 @@ public final class FlowSolver {
         if (groupSamples.isEmpty()) return Solution.idle(graph);
 
         Map<Integer, PumpState> pumps = collectPumps(level, graph);
+        // Per-edge data that does NOT depend on the fluid (the valve throttle and the crest geometry):
+        // resolve it ONCE here rather than re-scanning every pipe cell's BE / world-Y on every fluid pass.
+        Map<Integer, EdgeStatics> edgeStatics = computeEdgeStatics(level, graph);
 
         GroupResults results = new GroupResults(graph.edges().size());
         Set<BlockPos> claimedEmpties = new HashSet<>();
         boolean active = false;
 
         for (FluidStack sample : groupSamples) {
-            active |= solveGroup(level, graph, columns, pumps, sample, claimedEmpties, results);
+            active |= solveGroup(level, graph, columns, pumps, edgeStatics, sample, claimedEmpties, results);
         }
 
         Set<Integer> stalled = new HashSet<>(results.stalledEdges);
@@ -230,10 +242,12 @@ public final class FlowSolver {
 
     private record BranchMeta(int edgeIndex, BoundaryColumn columnA, BoundaryColumn columnB,
                               double lipA, double lipB,
-                              int pumpNode, double pumpHead, double pumpInternalG) {}
+                              int pumpNode, double pumpHead, double pumpInternalG,
+                              double throttle) {}
 
     private static boolean solveGroup(Level level, Graph graph, Columns columns,
-                                      Map<Integer, PumpState> pumps, FluidStack sample,
+                                      Map<Integer, PumpState> pumps,
+                                      Map<Integer, EdgeStatics> edgeStatics, FluidStack sample,
                                       Set<BlockPos> claimedEmpties, GroupResults results) {
         FluidType type = sample.getFluid().getFluidType();
         boolean gas = type.isLighterThanAir();
@@ -288,13 +302,17 @@ public final class FlowSolver {
         List<BranchSpec> branches = new ArrayList<>();
         List<BranchMeta> meta = new ArrayList<>();
         for (Edge edge : graph.edges()) {
-            assembleBranch(level, graph, columns, pumps, edge, solverIndex, gateEdgeIndex, sample,
-                    gas, conductancePerTile, branches, meta, results);
+            assembleBranch(level, graph, columns, pumps, edgeStatics.get(edge.index()), edge,
+                    solverIndex, gateEdgeIndex, sample, gas, conductancePerTile, branches, meta, results);
         }
         if (branches.isEmpty()) return false;
 
-        NetworkSolver.Result result = NetworkSolver.solve(nodeSpecs, branches, 1,
+        Governed governed = solveGoverned(nodeSpecs, branches, meta, 1,
                 PipesNPhysicsConfig.SUCTION_LIMIT.get());
+        NetworkSolver.Result result = governed.result();
+        // Downstream (pump load, display, transfers) reads the EFFECTIVE conductances the governor
+        // settled on, so a throttled run's readouts match the flow it actually solved.
+        branches = governed.branches();
 
         recordDisplayHeads(graph, solverIndex, nodeSpecs, canSupply, branches, result,
                 gas, results.nodeHeads, results.nodeCeilings, results.nodeAnchors);
@@ -379,6 +397,83 @@ public final class FlowSolver {
     }
 
     /**
+     * Solve the network, enforcing each fluid valve's throttle as a THROUGHPUT GOVERNOR: a branch a
+     * player has cranked to {@code throttle} (0..1) of full may carry at most {@code throttle × its
+     * fully-open flow}, so "let through 50%" always halves the flow — wherever the valve sits.
+     *
+     * A valve is really a variable resistance, and a resistance in series with a strong pump (whose
+     * internal conductance dominates the loop) barely limits the flow; scaling the pipe conductance
+     * therefore did almost nothing on a pumped run. Instead this finds, per throttled branch, the
+     * conductance scale that makes its flow hit the target, by fixed-point relaxation: solve fully
+     * open to read the reference flow, set each target to {@code throttle × reference}, then repeatedly
+     * nudge each branch's conductance by {@code target / |flow|} and re-solve. Reducing a branch's
+     * conductance monotonically reduces its flow, so this converges; a slack valve in series with a
+     * tighter one relaxes back toward fully open (its flow already sits under its target), so the
+     * tightest one governs. Only networks that actually hold a part-closed valve pay the extra solves.
+     */
+    private static Governed solveGoverned(List<NodeSpec> nodeSpecs, List<BranchSpec> branches,
+                                          List<BranchMeta> meta, double dt, double suctionLimit) {
+        int m = branches.size();
+        boolean anyThrottled = false;
+        for (int b = 0; b < m; b++) {
+            if (meta.get(b).throttle() < 1 - 1e-6) { anyThrottled = true; break; }
+        }
+        if (!anyThrottled) {
+            return new Governed(NetworkSolver.solve(nodeSpecs, branches, dt, suctionLimit), branches);
+        }
+
+        double[] scale = new double[m];
+        double[] target = new double[m];
+        Arrays.fill(scale, 1);
+        Arrays.fill(target, Double.NaN);
+
+        List<BranchSpec> effective = branches;
+        NetworkSolver.Result result = NetworkSolver.solve(nodeSpecs, branches, dt, suctionLimit);
+        for (int round = 0; round < GOVERNOR_MAX_ROUNDS; round++) {
+            if (round == 0) {
+                // First solve is fully open (all scales 1): its flows are the reference the
+                // throttle percentages apply to.
+                for (int b = 0; b < m; b++) {
+                    double throttle = meta.get(b).throttle();
+                    if (throttle < 1 - 1e-6) target[b] = throttle * Math.abs(result.flows()[b]);
+                }
+            }
+            boolean converged = true;
+            for (int b = 0; b < m; b++) {
+                if (Double.isNaN(target[b]) || target[b] < GOVERNOR_MIN_FLOW) continue;
+                double flow = Math.abs(result.flows()[b]);
+                double ratio = target[b] / Math.max(flow, GOVERNOR_MIN_FLOW);
+                // Over target → choke it down; under target with room to open → relax back toward
+                // fully open. Either way multiply the scale by the ratio and clamp to (0, 1].
+                if (flow > target[b] * (1 + GOVERNOR_TOLERANCE)
+                        || (scale[b] < 1 && flow < target[b] * (1 - GOVERNOR_TOLERANCE))) {
+                    scale[b] = Math.clamp(scale[b] * ratio, 1e-4, 1);
+                    converged = false;
+                }
+            }
+            if (converged) break;
+            effective = scaleConductance(branches, scale);
+            result = NetworkSolver.solve(nodeSpecs, effective, dt, suctionLimit);
+        }
+        return new Governed(result, effective);
+    }
+
+    /** A governed solve: the settled result plus the effective (throttle-scaled) branch conductances. */
+    private record Governed(NetworkSolver.Result result, List<BranchSpec> branches) {}
+
+    /** A copy of the branch list with each branch's conductance multiplied by {@code scale[b]}. */
+    private static List<BranchSpec> scaleConductance(List<BranchSpec> branches, double[] scale) {
+        List<BranchSpec> scaled = new ArrayList<>(branches.size());
+        for (int b = 0; b < branches.size(); b++) {
+            BranchSpec s = branches.get(b);
+            scaled.add(scale[b] == 1 ? s
+                    : new BranchSpec(s.a(), s.b(), s.conductance() * scale[b], s.emf(),
+                            s.allowedSign(), s.crestHeight(), s.crestPos()));
+        }
+        return scaled;
+    }
+
+    /**
      * A column joins a fluid's pass when its handler can actually give or take that fluid,
      * or when it is an unclaimed empty that accepts it.
      *
@@ -394,6 +489,20 @@ public final class FlowSolver {
     private static boolean participates(Level level, BoundaryColumn column, FluidStack sample,
                                         Set<BlockPos> claimedEmpties) {
         IFluidHandler cap = column.handler(level);
+        // An open end is decided from engine state, NEVER by probing the capability with
+        // fill/drain(SIMULATE): those MUTATE the world — Create's OpenEndedPipe wipes a differing
+        // buffered fluid and runs the spill-collision reaction (a lake block turning to stone)
+        // BEFORE their own simulate guard, so a foreign fluid's pass corrupts the mouth. The handler
+        // is still resolved above for its side effects (it populates the open-end cache and drives
+        // manageSource, which apply() depends on) — that is normal per-tick management, not a probe.
+        // An intake mouth gives only its own fluid; an empty outlet accepts any unclaimed pass fluid.
+        if (column.isOpenEnd()) {
+            if (column.isInfiniteSource()) {
+                return FluidStack.isSameFluidSameComponents(column.contents(), sample);
+            }
+            if (claimedEmpties.contains(column.identity())) return false;
+            return true;
+        }
         if (cap == null) return false;
         if (!column.isEmpty()) {
             return !cap.drain(sample.copyWithAmount(1), FluidAction.SIMULATE).isEmpty()
@@ -454,7 +563,7 @@ public final class FlowSolver {
     // ------------------------------------------------------------------ branch assembly
 
     private static void assembleBranch(Level level, Graph graph, Columns columns,
-                                       Map<Integer, PumpState> pumps, Edge edge,
+                                       Map<Integer, PumpState> pumps, EdgeStatics statics, Edge edge,
                                        int[] solverIndex, Map<Long, Integer> gateEdgeIndex,
                                        FluidStack sample,
                                        boolean gas,
@@ -474,8 +583,9 @@ public final class FlowSolver {
         // A valve the shaft has opened still caps the run by the angle the player dialed
         // in; 0 degrees shuts it as hard as the shaft would. The factor is applied to the
         // FINAL conductance below (after the pump-internal cap), not here — a pump's tiny
-        // internal conductance otherwise masks the throttle on every pumped run.
-        double throttle = runThrottle(level, edge);
+        // internal conductance otherwise masks the throttle on every pumped run. Fluid-independent,
+        // so it (and the crest below) is precomputed once per edge (see computeEdgeStatics).
+        double throttle = statics.throttle();
         if (throttle <= 0) {
             blockedEdges.add(edge.index());
             results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.VALVE);
@@ -500,7 +610,7 @@ public final class FlowSolver {
             }
 
             Node pumpNode = graph.node(nodeIndex);
-            BlockPos toward = adjacentCell(graph, edge, nodeIndex);
+            BlockPos toward = PipeGeometry.adjacentCell(graph, edge, nodeIndex);
             int outSign = side == 0 ? +1 : -1;
 
             if (toward.equals(pumpNode.pos().relative(pump.pushSide()))) {
@@ -539,24 +649,25 @@ public final class FlowSolver {
         if (columnA != null && columnA.isEmpty()) allowedSign = combineSign(allowedSign, -1);
         if (columnB != null && columnB.isEmpty()) allowedSign = combineSign(allowedSign, +1);
 
-        // A hose pulley only ever supplies (it draws from a fluid body, it does not
-        // accept fluid back through the same connection). Pin the branch to flow OUT
-        // of it; this also stops the engine from pushing fluid into the pulley and
-        // having it deposit blocks it would then drain straight back.
+        // An infinite SOURCE (a hose pulley over a body it can drain, an open-end intake
+        // mouth) only ever supplies — pin the branch to flow OUT of it. A pulley in the
+        // opposite, FILL role is instead modelled as an empty SINK column (receive-only via
+        // the isEmpty rule above), and drain-priority + the deposit latch keep the two roles
+        // from flipping tick-to-tick and reclaiming the fluid just pushed out.
         if (columnA != null && columnA.isInfiniteSource()) allowedSign = combineSign(allowedSign, +1);
         if (columnB != null && columnB.isInfiniteSource()) allowedSign = combineSign(allowedSign, -1);
         if (allowedSign == Integer.MIN_VALUE) return;
 
         if (!gas) {
             if (columnA != null) {
-                BlockPos opening = adjacentCell(graph, edge, edge.a());
+                BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.a());
                 lipA = SableCompat.getWorldY(level, opening) - 0.5;
                 if (!canDrawFrom(level, graph.node(edge.a()), columnA, opening, lipA)) {
                     allowedSign = combineSign(allowedSign, -1);
                 }
             }
             if (columnB != null) {
-                BlockPos opening = adjacentCell(graph, edge, edge.b());
+                BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.b());
                 lipB = SableCompat.getWorldY(level, opening) - 0.5;
                 if (!canDrawFrom(level, graph.node(edge.b()), columnB, opening, lipB)) {
                     allowedSign = combineSign(allowedSign, +1);
@@ -566,24 +677,22 @@ public final class FlowSolver {
             // waterline) is "no supply", not a fault.
             if (allowedSign == Integer.MIN_VALUE) return;
 
-            for (int i = 0; i < edge.pipes().size(); i++) {
-                double cellY = SableCompat.getWorldY(level, edge.pipes().get(i));
-                if (Double.isNaN(crestHeight) || cellY > crestHeight) {
-                    crestHeight = cellY;
-                    crestPos = (i + 1.0) / (edge.length() + 1);
-                }
-            }
+            crestHeight = statics.crestHeight();
+            crestPos = statics.crestPos();
         }
 
-        // Throttle the FINAL conductance, so it scales whether the pipe run or the pump
-        // (its internal-conductance cap, applied above) is the limiter.
-        conductance *= throttle;
-
+        // The throttle is NOT baked into the conductance here. Scaling conductance only limits
+        // the flow when the valve's own run is the binding resistor — in series with a strong
+        // pump (whose tiny internal conductance dominates the loop) halving a fat pipe's
+        // conductance barely moves the flow, so "let through 50%" did almost nothing (74→67 on
+        // a real pump). Instead the throttle is a THROUGHPUT GOVERNOR applied by {@code solveGoverned}:
+        // it caps the run's flow to {@code throttle × fully-open flow}, so 50% always means half,
+        // wherever the valve sits. The angle is carried on the meta for that loop.
         branches.add(new BranchSpec(solverA, solverB, conductance, emf, allowedSign,
                 crestHeight, crestPos));
         meta.add(new BranchMeta(edge.index(),
                 columns.byNode.get(edge.a()), columns.byNode.get(edge.b()), lipA, lipB,
-                driveNode, driveHead, driveInternalG));
+                driveNode, driveHead, driveInternalG, throttle));
         // Whether this is a held FEED candidate (a pump driving out toward a shut gate) is decided
         // post-solve in solveGroup, where the hydraulic islands are known — the pump only HOLDS a
         // column if it actually has a supply behind it (a source in its island).
@@ -625,14 +734,35 @@ public final class FlowSolver {
             var behaviour = FluidPropagator.getPipe(level, cell);
             if (behaviour != null) {
                 var state = level.getBlockState(cell);
-                Direction fromPrevious = directionBetween(cell, previous);
-                Direction fromNext = directionBetween(cell, next);
+                Direction fromPrevious = PipeGeometry.between(cell, previous);
+                Direction fromNext = PipeGeometry.between(cell, next);
                 if (fromPrevious != null && !behaviour.canPullFluidFrom(sample, state, fromPrevious)) return false;
                 if (fromNext != null && !behaviour.canPullFluidFrom(sample, state, fromNext)) return false;
             }
             previous = cell;
         }
         return true;
+    }
+
+    /** Per-edge data that does not depend on the pass fluid: the valve throttle and the crest geometry. */
+    private record EdgeStatics(double throttle, double crestHeight, double crestPos) {}
+
+    /** Resolve every edge's fluid-independent {@link EdgeStatics} once, before the per-fluid passes. */
+    private static Map<Integer, EdgeStatics> computeEdgeStatics(Level level, Graph graph) {
+        Map<Integer, EdgeStatics> statics = new HashMap<>(graph.edges().size() * 2);
+        for (Edge edge : graph.edges()) {
+            double crestHeight = Double.NaN;
+            double crestPos = 0;
+            for (int i = 0; i < edge.pipes().size(); i++) {
+                double cellY = SableCompat.getWorldY(level, edge.pipes().get(i));
+                if (Double.isNaN(crestHeight) || cellY > crestHeight) {
+                    crestHeight = cellY;
+                    crestPos = (i + 1.0) / (edge.length() + 1);
+                }
+            }
+            statics.put(edge.index(), new EdgeStatics(runThrottle(level, edge), crestHeight, crestPos));
+        }
+        return statics;
     }
 
     /**
@@ -652,10 +782,6 @@ public final class FlowSolver {
         return factor;
     }
 
-    private static Direction directionBetween(BlockPos from, BlockPos to) {
-        return Direction.fromDelta(
-                to.getX() - from.getX(), to.getY() - from.getY(), to.getZ() - from.getZ());
-    }
 
     /**
      * Fluid can only leave a column through an opening its surface reaches. Open
@@ -674,14 +800,6 @@ public final class FlowSolver {
     private static int combineSign(int current, int wanted) {
         if (current == Integer.MIN_VALUE || current == -wanted) return Integer.MIN_VALUE;
         return wanted;
-    }
-
-    /** The cell (pipe or opposite node) an edge touches at the given node — its first step out. */
-    static BlockPos adjacentCell(Graph graph, Edge edge, int nodeIndex) {
-        if (edge.pipes().isEmpty()) return graph.node(edge.other(nodeIndex)).pos();
-        return nodeIndex == edge.a()
-                ? edge.pipes().get(0)
-                : edge.pipes().get(edge.pipes().size() - 1);
     }
 
     // ------------------------------------------------------------------ transfer planning
@@ -747,24 +865,64 @@ public final class FlowSolver {
             }
         }
 
+        // Apportion within each hydraulic island by PROPORTIONAL share, not first-come-first-served.
+        // When a source's clamped give cannot satisfy all its island's sinks, the old greedy pairing
+        // let the first-discovered sink take everything and starved the rest EVERY tick — delivery
+        // tracked invisible graph-discovery order ("one machine on the manifold never gets fluid
+        // unless I pause the other"). Give each sink a fraction of the shortfall proportional to its
+        // take (largest-remainder rounding keeps integer mB and conservation), then realise it with a
+        // northwest-corner fill. The island grouping is unchanged (no fluid crosses a barrier).
         int planned = 0;
-        for (int s = 0; s < sources.size(); s++) {
-            int give = giving.get(s);
-            for (int t = 0; t < sinks.size() && give > 0; t++) {
-                if (!sourceIsland.get(s).equals(sinkIsland.get(t))) continue;
-                int take = taking.get(t);
-                if (take <= 0) continue;
-                int amount = Math.min(give, take);
-                transfers.add(new Solution.Transfer(
-                        sources.get(s).accessPos(), sinks.get(t).accessPos(),
-                        sample.copyWithAmount(amount)));
-                if (sinks.get(t).isEmpty()) claimedEmpties.add(sinks.get(t).identity());
-                give -= amount;
-                taking.set(t, take - amount);
-                planned += amount;
+        for (int id : new LinkedHashSet<>(sourceIsland)) {
+            List<Integer> srcIdx = indicesInIsland(sourceIsland, id);
+            List<Integer> snkIdx = indicesInIsland(sinkIsland, id);
+            if (snkIdx.isEmpty()) continue;
+
+            int give = sumAt(giving, srcIdx);
+            int take = sumAt(taking, snkIdx);
+            int move = Math.min(give, take);
+            if (move <= 0) continue;
+
+            int[] srcShare = Apportion.largestRemainder(move, weightsAt(giving, srcIdx));
+            int[] snkShare = Apportion.largestRemainder(move, weightsAt(taking, snkIdx));
+
+            int j = 0;
+            for (int i = 0; i < srcIdx.size(); i++) {
+                BoundaryColumn source = sources.get(srcIdx.get(i));
+                while (srcShare[i] > 0 && j < snkIdx.size()) {
+                    if (snkShare[j] <= 0) { j++; continue; }
+                    BoundaryColumn sink = sinks.get(snkIdx.get(j));
+                    int amount = Math.min(srcShare[i], snkShare[j]);
+                    transfers.add(new Solution.Transfer(
+                            source.accessPos(), sink.accessPos(), sample.copyWithAmount(amount)));
+                    if (sink.isEmpty()) claimedEmpties.add(sink.identity());
+                    srcShare[i] -= amount;
+                    snkShare[j] -= amount;
+                    planned += amount;
+                }
             }
         }
         return new TransferPlan(planned, !sources.isEmpty(), !sinks.isEmpty());
+    }
+
+    private static List<Integer> indicesInIsland(List<Integer> island, int id) {
+        List<Integer> out = new ArrayList<>();
+        for (int i = 0; i < island.size(); i++) {
+            if (island.get(i) == id) out.add(i);
+        }
+        return out;
+    }
+
+    private static int sumAt(List<Integer> values, List<Integer> indices) {
+        int sum = 0;
+        for (int i : indices) sum += values.get(i);
+        return sum;
+    }
+
+    private static int[] weightsAt(List<Integer> values, List<Integer> indices) {
+        int[] out = new int[indices.size()];
+        for (int i = 0; i < indices.size(); i++) out[i] = values.get(indices.get(i));
+        return out;
     }
 
     /**
@@ -774,31 +932,21 @@ public final class FlowSolver {
      * absent, so the halves they used to join fall into separate components.
      */
     private static int[] islands(List<BranchSpec> branches, NetworkSolver.Result result) {
-        int n = result.heads().length;
-        int[] parent = new int[n];
-        for (int i = 0; i < n; i++) parent[i] = i;
+        UnionFind uf = new UnionFind(result.heads().length);
         for (int b = 0; b < branches.size(); b++) {
-            if (result.active()[b]) union(parent, branches.get(b).a(), branches.get(b).b());
+            if (result.active()[b]) uf.union(branches.get(b).a(), branches.get(b).b());
         }
-        for (int i = 0; i < n; i++) parent[i] = find(parent, i);
-        return parent;
-    }
-
-    private static int find(int[] parent, int i) {
-        while (parent[i] != i) {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        return i;
-    }
-
-    private static void union(int[] parent, int a, int b) {
-        parent[find(parent, a)] = find(parent, b);
+        return uf.roots();
     }
 
     /** What the handler will really give up this tick, probed without mutating it. */
     private static int probeDrainable(Level level, BoundaryColumn column, FluidStack sample, int amount) {
         IFluidHandler cap = column.handler(level);
+        // Open ends are never probed through Create's handler (see participates): an intake mouth
+        // yields its own precomputed per-tick amount, a receive-only outlet gives nothing.
+        if (column.isOpenEnd()) {
+            return column.isInfiniteSource() ? Math.min(amount, column.contentMb()) : 0;
+        }
         return cap == null ? 0
                 : cap.drain(sample.copyWithAmount(amount), FluidAction.SIMULATE).getAmount();
     }
@@ -806,6 +954,11 @@ public final class FlowSolver {
     /** What the handler will really accept this tick, probed without mutating it. */
     private static int probeFillable(Level level, BoundaryColumn column, FluidStack sample, int amount) {
         IFluidHandler cap = column.handler(level);
+        // Open ends are never probed through Create's handler (see participates): an intake mouth
+        // takes nothing, a receive-only outlet always accepts the spill (accumulation is at apply).
+        if (column.isOpenEnd()) {
+            return column.isInfiniteSource() ? 0 : amount;
+        }
         return cap == null ? 0
                 : cap.fill(sample.copyWithAmount(amount), FluidAction.SIMULATE);
     }

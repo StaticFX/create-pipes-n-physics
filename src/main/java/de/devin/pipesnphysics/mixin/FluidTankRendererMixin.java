@@ -80,6 +80,38 @@ public class FluidTankRendererMixin {
     @Unique private static final Map<BlockPos, float[]> WAVE_LAST_QUAT = new HashMap<>();
     @Unique private static final Map<BlockPos, Float> SMOOTH_LEVEL = new HashMap<>();
 
+    /**
+     * Wall-clock of each tank's last render, so the per-tank wave state above is evicted once a tank
+     * stops rendering (left the view, unloaded, another world) instead of leaking for the session —
+     * the maps are keyed by bare BlockPos and were never pruned. Eviction only drops unused cache
+     * entries; a tank that renders again just rebuilds a fresh (calm) wave, so nothing looks different.
+     */
+    @Unique private static final Map<BlockPos, Long> WAVE_LAST_SEEN = new HashMap<>();
+    @Unique private static long pipesnphysics$lastPruneMs = 0;
+    @Unique private static final long WAVE_PRUNE_INTERVAL_MS = 2000;
+    @Unique private static final long WAVE_STALE_MS = 5000;
+
+    /** Drop the wave state of tanks that have not rendered in a while, throttled to keep it cheap. */
+    @Unique
+    private static void pipesnphysics$pruneStaleWaveState() {
+        long now = System.currentTimeMillis();
+        if (now - pipesnphysics$lastPruneMs < WAVE_PRUNE_INTERVAL_MS) return;
+        pipesnphysics$lastPruneMs = now;
+        WAVE_LAST_SEEN.entrySet().removeIf(entry -> {
+            if (now - entry.getValue() <= WAVE_STALE_MS) return false;
+            BlockPos pos = entry.getKey();
+            WAVE_CUR.remove(pos);
+            WAVE_PREV.remove(pos);
+            WAVE_TICK.remove(pos);
+            WAVE_LAST_UP.remove(pos);
+            WAVE_LAST_POS.remove(pos);
+            WAVE_LAST_VEL.remove(pos);
+            WAVE_LAST_QUAT.remove(pos);
+            SMOOTH_LEVEL.remove(pos);
+            return true;
+        });
+    }
+
     // ========================================================================
     // Main render method
     // ========================================================================
@@ -88,6 +120,8 @@ public class FluidTankRendererMixin {
     private void renderTiltedFluid(FluidTankBlockEntity be, float partialTicks, PoseStack ms,
                                     MultiBufferSource buffer, int light, int overlay, CallbackInfo ci) {
         if (!PipesNPhysicsConfig.FLUID_TILT_ENABLED.get()) return;
+
+        pipesnphysics$pruneStaleWaveState();
 
         FluidTankAccessor acc = (FluidTankAccessor) be;
         if (!be.isController() || !acc.pipesnphysics$isWindow()) return;
@@ -141,6 +175,7 @@ public class FluidTankRendererMixin {
             if (Math.abs(level - targetLevel) < 0.002f) level = targetLevel;
         }
         SMOOTH_LEVEL.put(levelKey, level);
+        WAVE_LAST_SEEN.put(levelKey.immutable(), System.currentTimeMillis());
 
         float clampedLevel = Mth.clamp(level * totalHeight, 0, totalHeight);
 

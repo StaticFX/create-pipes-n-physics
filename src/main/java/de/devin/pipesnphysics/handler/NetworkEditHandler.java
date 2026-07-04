@@ -1,8 +1,11 @@
 package de.devin.pipesnphysics.handler;
 
 import com.simibubi.create.content.fluids.FluidPropagator;
+import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
+import de.devin.pipesnphysics.engine.OpenEndPipes;
+import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
@@ -35,7 +38,12 @@ public final class NetworkEditHandler {
 
     @SubscribeEvent
     public static void onBreak(BlockEvent.BreakEvent event) {
-        if (event.getLevel() instanceof Level level) wakeAround(level, event.getPos());
+        if (event.getLevel() instanceof Level level && !level.isClientSide()) {
+            // Prune any open-end mouth whose pipe this was, so its buffer is not leaked and a rebuilt
+            // mouth starts clean (a no-op for a non-mouth break).
+            OpenEndPipes.onPipeRemoved(level, event.getPos());
+            wakeAround(level, event.getPos());
+        }
     }
 
     @SubscribeEvent
@@ -58,6 +66,33 @@ public final class NetworkEditHandler {
         EngineTickHandler.markChanged(level, pos);
         for (Direction dir : Direction.values()) {
             EngineTickHandler.markChanged(level, pos.relative(dir));
+        }
+        wakeThroughTank(level, pos);
+    }
+
+    /**
+     * A multiblock tank's single pipe connection can be many blocks from the edited cell — well
+     * outside {@link GraphBuilder#findSeed}'s one-block ring — so a break/place on a far corner would
+     * never wake the network. Walk the whole controller footprint and mark any pipe adjacent to any of
+     * its blocks. A no-op for a non-tank edit or a single-block tank (already covered by the ring).
+     */
+    public static void wakeThroughTank(Level level, BlockPos pos) {
+        if (!(level.getBlockEntity(pos) instanceof FluidTankBlockEntity tank)) return;
+        FluidTankBlockEntity controller = tank.getControllerBE();
+        if (controller == null) return;
+        int width = ((FluidTankAccessor) (Object) controller).pipesnphysics$getWidth();
+        int height = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
+        BlockPos base = controller.getBlockPos();
+        for (int dx = 0; dx < width; dx++) {
+            for (int dy = 0; dy < height; dy++) {
+                for (int dz = 0; dz < width; dz++) {
+                    BlockPos cell = base.offset(dx, dy, dz);
+                    for (Direction dir : Direction.values()) {
+                        BlockPos neighbor = cell.relative(dir);
+                        if (isPipe(level, neighbor)) EngineTickHandler.markChanged(level, neighbor);
+                    }
+                }
+            }
         }
     }
 
