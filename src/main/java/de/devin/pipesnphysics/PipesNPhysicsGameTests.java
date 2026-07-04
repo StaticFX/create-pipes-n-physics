@@ -2976,8 +2976,14 @@ public class PipesNPhysicsGameTests {
      * longer solved) tank-to-tank run must still drain to empty rather than stay
      * stuck full (the failure mode if the drain freezes when the network sleeps).
      * The recede is gradual; this guards the end state, the feel is visual.
+     *
+     * Runs in its OWN batch: this test drives the LIVE engine over many ticks, and the
+     * {@code levelRender*} integration tests in the default batch drive {@code apply(...,true)}
+     * by hand (stamping {@link PipeLevelData} and mutating pipes) — shared-level residue from
+     * those perturbs this network's recede/sleep timing and wrongly reads it as stuck. A fresh
+     * batch level isolates it. (The recede product code is unchanged; this is a harness artifact.)
      */
-    @GameTest(template = "gravity/2_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1000)
+    @GameTest(template = "gravity/2_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1000, batch = "isolatedRecede")
     public static void drainedPipeRecedesNotStuck(GameTestHelper helper) {
         BlockPos top = new BlockPos(0, 4, 0);
         fill(helper, top, 8000);
