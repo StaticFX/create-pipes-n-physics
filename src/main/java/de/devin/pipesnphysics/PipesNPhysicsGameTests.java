@@ -1983,7 +1983,7 @@ public class PipesNPhysicsGameTests {
      * of the single_pump template is swapped for a plain pipe and the far cell capped, so the run is
      * tank -> pipe -> dead-end pipe -> stone with NO pump — a pure HANDLER<->JUNCTION edge.
      */
-    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200, batch = "levelRender")
     public static void deadEndJunctionCellRendersAgainstTheBlock(GameTestHelper helper) {
         fill(helper, new BlockPos(0, 1, 1), 8000);           // full tank -> run sits below its surface
         helper.setBlock(new BlockPos(2, 1, 1), AllBlocks.FLUID_PIPE.get().defaultBlockState()); // pump -> pipe
@@ -2191,8 +2191,14 @@ public class PipesNPhysicsGameTests {
      * interpolation, a missed clamp, or a stamped wrong cell is caught — not just an all-full pass. Uses
      * the explicit-flag {@code apply} overload so no live config is mutated, and the synthetic-solution
      * helper so the heads are exact (no dependence on tank geometry).
+     *
+     * Batch {@code "levelRender"}: the render-integration tests (this one and the other
+     * {@code apply(...,true)} / {@code fillDeadEndCell} drivers) stamp {@link PipeLevelData} and seed
+     * flows directly into the level. Left in the default batch that shared-level residue perturbs the
+     * live-engine timing tests running beside them (it hung {@code drainedPipeRecedesNotStuck}'s recede).
+     * A dedicated batch gives them their own level so they can't leak into the behavioural tests.
      */
-    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    @GameTest(template = "piping/long_pipe", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "levelRender")
     public static void pipeLevelRenderEncodesSolvedWaterline(GameTestHelper helper) {
         helper.runAfterDelay(2, () -> {
             Level level = helper.getLevel();
@@ -2299,7 +2305,7 @@ public class PipesNPhysicsGameTests {
      * feeder's front fills its whole run, and delivery to the far sink releases only after the
      * full chained travel.
      */
-    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200, batch = "levelRender")
     public static void levelRenderFrontChainsAcrossJunction(GameTestHelper helper) {
         helper.runAfterDelay(5, () -> {
             var level = helper.getLevel();
@@ -2440,7 +2446,7 @@ public class PipesNPhysicsGameTests {
      * front fraction on the first (upstream) cell and delivery gated; repeated passes advance it
      * to the sink; delivery then releases with every cell's front full.
      */
-    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200, batch = "levelRender")
     public static void levelRenderFrontGatesDeliveryWithoutCreateProgress(GameTestHelper helper) {
         helper.runAfterDelay(5, () -> {
             var level = helper.getLevel();
@@ -2516,7 +2522,7 @@ public class PipesNPhysicsGameTests {
      * held cells keep their owned front rather than being blanked (mirrors the binary
      * {@code drySourcePumpRunKeepsChargedPipe}, on the level fields).
      */
-    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    @GameTest(template = "piping/charging_max_range", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200, batch = "levelRender")
     public static void levelRenderDrainTransientKeepsOwnedFront(GameTestHelper helper) {
         helper.runAfterDelay(5, () -> {
             var level = helper.getLevel();
@@ -2574,7 +2580,7 @@ public class PipesNPhysicsGameTests {
      * but the disk-save path ({@code clientPacket=false}) omits it. Stamps a cell, confirms the field
      * is live in memory, then saves the BE (the on-disk path) and asserts the "PnpLevel" key is absent.
      */
-    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    @GameTest(template = "piping/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100, batch = "levelRender")
     public static void levelDataNeverPersistsToSave(GameTestHelper helper) {
         fill(helper, new BlockPos(0, 1, 1), 8000);
         helper.runAfterDelay(10, () -> {
@@ -2976,14 +2982,8 @@ public class PipesNPhysicsGameTests {
      * longer solved) tank-to-tank run must still drain to empty rather than stay
      * stuck full (the failure mode if the drain freezes when the network sleeps).
      * The recede is gradual; this guards the end state, the feel is visual.
-     *
-     * Runs in its OWN batch: this test drives the LIVE engine over many ticks, and the
-     * {@code levelRender*} integration tests in the default batch drive {@code apply(...,true)}
-     * by hand (stamping {@link PipeLevelData} and mutating pipes) — shared-level residue from
-     * those perturbs this network's recede/sleep timing and wrongly reads it as stuck. A fresh
-     * batch level isolates it. (The recede product code is unchanged; this is a harness artifact.)
      */
-    @GameTest(template = "gravity/2_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1000, batch = "isolatedRecede")
+    @GameTest(template = "gravity/2_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 1000)
     public static void drainedPipeRecedesNotStuck(GameTestHelper helper) {
         BlockPos top = new BlockPos(0, 4, 0);
         fill(helper, top, 8000);
