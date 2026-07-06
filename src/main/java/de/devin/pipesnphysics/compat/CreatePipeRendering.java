@@ -118,6 +118,10 @@ public final class CreatePipeRendering {
         }
     }
 
+    private static void clearCell(Level level, BlockPos cell) {
+        sweepCell(level, cell, true, true);
+    }
+
     /**
      * Map a node's hydraulic head to the surface Create actually RENDERS for a fluid tank there, so
      * the pipe waterline lines up with the tank's visible fluid. Create's {@code FluidTankRenderer}
