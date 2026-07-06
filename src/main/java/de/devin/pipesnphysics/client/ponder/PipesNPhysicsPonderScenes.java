@@ -71,7 +71,7 @@ public final class PipesNPhysicsPonderScenes {
             if (level == null) return;
             Graph graph = GraphBuilder.build(level, seedPos);
             Solution solution = FlowSolver.solve(level, graph);
-            CreatePipeRendering.apply(level, graph, solution);
+            CreatePipeRendering.apply(level, graph, solution, true);
         });
     }
 
