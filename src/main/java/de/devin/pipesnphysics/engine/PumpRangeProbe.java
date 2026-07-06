@@ -53,7 +53,7 @@ public final class PumpRangeProbe {
         for (Edge edge : graph.edgesOf(pump.index())) {
             BlockPos toward = PipeGeometry.adjacentCell(graph, edge, pump.index());
             boolean push = toward.equals(pumpPos.relative(pump.pumpFacing()));
-            boolean pull = toward.equals(pumpPos.relative(pump.pumpFacing().getOpposite()));
+            boolean pull = toward.equals(pumpPos.relative(pump.effectivePullSide()));
             if (!push && !pull) continue;
 
             List<BlockPos> seed = new ArrayList<>();

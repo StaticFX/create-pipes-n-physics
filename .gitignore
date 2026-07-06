@@ -5,6 +5,9 @@
 *.iws
 out/
 
+# VS Code
+.vscode/
+
 # Kotlin
 .kotlin/
 
@@ -44,3 +47,7 @@ Thumbs.db
 # Claude Code
 .claude/
 CLAUDE.md
+
+# Local temp / decompile scratch
+tmp/
+tmp*

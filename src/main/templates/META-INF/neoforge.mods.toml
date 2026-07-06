@@ -15,6 +15,9 @@ config = "${mod_id}.mixins.json"
 [[mixins]]
 config = "${mod_id}.sable.mixins.json"
 
+[[mixins]]
+config = "${mod_id}.createfluid.mixins.json"
+
 [[dependencies.${mod_id}]]
 modId = "neoforge"
 type = "required"
@@ -47,5 +50,12 @@ side = "BOTH"
 modId = "sable"
 type = "optional"
 versionRange = "[1.2.0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.${mod_id}]]
+modId = "fluid"
+type = "optional"
+versionRange = "[2.0.0,)"
 ordering = "AFTER"
 side = "BOTH"
