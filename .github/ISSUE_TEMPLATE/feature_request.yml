@@ -1,0 +1,59 @@
+name: Feature request / suggestion
+description: Suggest a new mechanic, block, integration, or improvement.
+title: "[Suggestion]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Got an idea? Great. Because the mod models pipe networks as a hydraulic circuit,
+        it helps to describe the *behaviour* you want, not only the block — the engine tends
+        to make behaviours emerge rather than special-case them.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched existing issues and this has not already been suggested.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What are you trying to do today that is awkward, impossible, or unintuitive?
+      placeholder: There's no way to see how much lift a pump has left before the fluid stops climbing...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature or behaviour you'd like. In-game examples or sketches welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about, and why they fall short.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the mod does this touch?
+      options:
+        - Hydraulics / flow behaviour
+        - Pumps / valves
+        - Rendering / visuals
+        - Goggle / UI legibility
+        - Compatibility (Sable, other addons)
+        - Other
+    validations:
+      required: false

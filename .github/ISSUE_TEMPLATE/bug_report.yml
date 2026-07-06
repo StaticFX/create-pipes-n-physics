@@ -1,0 +1,87 @@
+name: Bug report
+description: Report something that is broken or behaves incorrectly.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please fill in as much as you can — version
+        numbers and a log almost always determine whether we can reproduce it.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched existing issues and this has not already been reported.
+          required: true
+        - label: I am using the latest version of the mod for my Minecraft version.
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. What did you expect to happen instead?
+      placeholder: The pump won't pull fluid from a cauldron next to it...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact setup so we can rebuild it in-game. Screenshots or a short clip help a lot.
+      placeholder: |
+        1. Place a tank, a pump, and a pipe run like ...
+        2. Power the pump at N RPM ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: mod-version
+    attributes:
+      label: Pipes n Physics version
+      placeholder: "2.1.1"
+    validations:
+      required: true
+
+  - type: input
+    id: create-version
+    attributes:
+      label: Create version
+      placeholder: "6.0.10"
+    validations:
+      required: true
+
+  - type: input
+    id: loader-version
+    attributes:
+      label: Minecraft + NeoForge version
+      placeholder: "1.21.1 / NeoForge 21.1.219"
+    validations:
+      required: true
+
+  - type: textarea
+    id: other-mods
+    attributes:
+      label: Other relevant mods
+      description: Especially Sable, Create Aeronautics, Create Propulsion, or any other Create addon that touches fluids.
+      placeholder: |
+        - Sable 1.2.2
+        - Create Propulsion 1.1.4
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / crash report
+      description: >
+        Paste the relevant log (`logs/latest.log`) or crash report, or link a gist/paste service.
+        This is rendered as code, so no backticks needed.
+      render: text
+    validations:
+      required: false
