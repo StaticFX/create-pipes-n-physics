@@ -23,8 +23,9 @@ import net.minecraft.core.Direction;
  *
  * {@code accessFace} is the face a HANDLER is reached through when it is SIDE-SPECIFIC (exposes no
  * side-agnostic {@code null} capability): the network resolves and transfers the handler through that
- * exact face, so a block with a different tank per side serves each side its own fluid. It is null for
- * an ordinary side-agnostic handler (resolved through {@code null}) and for every non-handler node.
+ * exact face, so a block with a different tank per side serves each side its own fluid. For pumps whose
+ * suction port is not opposite push (e.g. Create: Fluid's centrifugal pump), it stores the pull face.
+ * It is null for an ordinary side-agnostic handler and for pumps with inline push/pull.
  */
 public record Node(int index, BlockPos pos, Kind kind, double worldY,
                    Direction pumpFacing, Direction openFace, Direction accessFace) {
@@ -35,4 +36,11 @@ public record Node(int index, BlockPos pos, Kind kind, double worldY,
     public boolean isJunction() { return kind == Kind.JUNCTION; }
     public boolean isOpenEnd() { return kind == Kind.OPEN_END; }
     public boolean isClosedGate() { return kind == Kind.CLOSED_GATE; }
+
+    /** Suction port: explicit for orthogonal pumps, otherwise opposite of {@link #pumpFacing}. */
+    public Direction effectivePullSide() {
+        if (!isPump() || pumpFacing == null) return null;
+        if (accessFace != null) return accessFace;
+        return pumpFacing.getOpposite();
+    }
 }
