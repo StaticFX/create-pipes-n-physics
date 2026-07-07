@@ -1,7 +1,9 @@
 package de.devin.pipesnphysics.compat;
 
+import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.engine.FluidTankGeometry;
 import dev.ryanhcode.sable.api.physics.mass.MassTracker;
 import dev.ryanhcode.sable.companion.math.Pose3dc;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
@@ -18,13 +20,12 @@ public class SablePhysicsCompat {
 
     private static final Map<String, Double> lastAppliedMass = new HashMap<>();
 
-    public static void applyFluidWeight(ServerSubLevel subLevel, BlockPos controllerPos,
-                                        int width, int height, double fillFraction,
-                                        double massKg, double timeStep) {
+    public static void applyFluidWeight(ServerSubLevel subLevel, FluidTankBlockEntity controller,
+                                        double fillFraction, double massKg, double timeStep) {
         if (massKg <= 0) return;
 
         if (PipesNPhysicsConfig.EXPERIMENTAL_TANK_COG.get()) {
-            applyViaMassTracker(subLevel, controllerPos, fillFraction, massKg);
+            applyViaMassTracker(subLevel, controller, fillFraction, massKg);
         } else {
             applyViaForce(subLevel, massKg);
         }
@@ -42,12 +43,14 @@ public class SablePhysicsCompat {
 
     private static final Map<String, Vec3> lastAppliedOffset = new HashMap<>();
 
-    private static void applyViaMassTracker(ServerSubLevel subLevel, BlockPos controllerPos, double fillFraction, double massKg) {
+    private static void applyViaMassTracker(ServerSubLevel subLevel, FluidTankBlockEntity controller,
+                                            double fillFraction, double massKg) {
         MassTracker tracker = subLevel.getSelfMassTracker();
         if (tracker == null) return;
 
+        BlockPos controllerPos = controller.getBlockPos();
         String key = subLevel.getUniqueId() + ":" + controllerPos.toShortString();
-        Vec3 offset = tiltAwareOffset(subLevel, fillFraction);
+        Vec3 offset = tiltAwareOffset(subLevel, controller, fillFraction);
 
         Double prevMass = lastAppliedMass.get(key);
         if (prevMass != null && Math.abs(prevMass - massKg) < 0.001) return;
@@ -86,7 +89,7 @@ public class SablePhysicsCompat {
             var level = subLevel.getLevel();
             BlockState state = level.getBlockState(controllerPos);
             tracker.addBlockMass(level, state, controllerPos, -prevMass,
-                    prevOffset != null ? prevOffset : tiltAwareOffset(subLevel, 0));
+                    prevOffset != null ? prevOffset : tiltAwareOffset(subLevel, null, 0));
         } catch (Exception e) {
             PipesNPhysics.LOGGER.warn("Failed to withdraw fluid tank mass at {}", controllerPos, e);
         }
@@ -98,10 +101,23 @@ public class SablePhysicsCompat {
         lastAppliedOffset.clear();
     }
 
-    private static Vec3 tiltAwareOffset(ServerSubLevel subLevel, double fillFraction) {
-        double cx = 0.5;
-        double cy = fillFraction / 2.0;
-        double cz = 0.5;
+    private static Vec3 tiltAwareOffset(ServerSubLevel subLevel, FluidTankBlockEntity controller,
+                                      double fillFraction) {
+        double cx;
+        double cy;
+        double cz;
+        if (controller != null) {
+            FluidTankGeometry.RenderInterior interior = FluidTankGeometry.renderInterior(controller, 0f);
+            FluidTankGeometry.LocalExtents ext = FluidTankGeometry.localExtents(controller);
+            cx = interior.centerX() / ext.x();
+            float fluidTop = interior.yMin() + (float) (fillFraction * interior.fillSpanY());
+            cy = (interior.yMin() + fluidTop) * 0.5 / ext.y();
+            cz = interior.centerZ() / ext.z();
+        } else {
+            cx = 0.5;
+            cy = fillFraction / 2.0;
+            cz = 0.5;
+        }
 
         Pose3dc pose = subLevel.logicalPose();
         if (pose == null) return new Vec3(cx, cy, cz);

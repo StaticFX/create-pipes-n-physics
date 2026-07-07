@@ -18,6 +18,31 @@ import java.util.List;
 public final class FluidTankGeometry {
     private FluidTankGeometry() {}
 
+    /** End-cap thickness along the tank/vessel length axis (matches Create). */
+    public static final float CAP = 1 / 4f;
+    /** Puddle lip above the interior floor along the length axis. */
+    public static final float PUDDLE = 1 / 16f;
+    /** Glass hull wall thickness on cross-section axes. */
+    public static final float HULL = 1 / 16f + 1 / 128f;
+
+    /** Multiblock extent along each local axis from the controller origin, in blocks. */
+    public record LocalExtents(int x, int y, int z) {}
+
+    /**
+     * Inset fluid-interior box in controller-local block coordinates, plus the span along local Y
+     * used to map fill fraction to height when the tank is upright.
+     */
+    public record RenderInterior(
+            float xMin, float xMax,
+            float yMin, float yMax,
+            float zMin, float zMax,
+            float fillSpanY
+    ) {
+        public float centerX() { return (xMin + xMax) * 0.5f; }
+        public float centerY() { return (yMin + yMax) * 0.5f; }
+        public float centerZ() { return (zMin + zMax) * 0.5f; }
+    }
+
     public static boolean isHorizontal(FluidTankBlockEntity controller) {
         return controller.getMainConnectionAxis() != Direction.Axis.Y;
     }
@@ -68,6 +93,57 @@ public final class FluidTankGeometry {
         int width = ((FluidTankAccessor) (Object) controller).pipesnphysics$getWidth();
         int length = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
         return isHorizontal(controller) ? width : length;
+    }
+
+    public static LocalExtents localExtents(FluidTankBlockEntity controller) {
+        int width = ((FluidTankAccessor) (Object) controller).pipesnphysics$getWidth();
+        int length = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
+        Direction.Axis axis = controller.getMainConnectionAxis();
+        if (axis == Direction.Axis.Y) return new LocalExtents(width, length, width);
+        if (axis == Direction.Axis.X) return new LocalExtents(length, width, width);
+        return new LocalExtents(width, width, length);
+    }
+
+    /**
+     * Fluid-interior bounds for tilted rendering and center-of-mass offsets. Caps sit on the
+     * length axis (world Y for vertical tanks, X/Z for horizontal fluid vessels); hull walls sit
+     * on the cross-section axes.
+     */
+    public static RenderInterior renderInterior(FluidTankBlockEntity controller, float inset) {
+        int width = ((FluidTankAccessor) (Object) controller).pipesnphysics$getWidth();
+        int length = ((FluidTankAccessor) (Object) controller).pipesnphysics$getHeight();
+        Direction.Axis axis = controller.getMainConnectionAxis();
+
+        float yMin = HULL + inset;
+        float yMax = HULL + width - 2 * HULL - inset;
+        float hullSpanY = yMax - yMin;
+
+        if (axis == Direction.Axis.Y) {
+            float xMin = HULL + inset;
+            float xMax = HULL + width - 2 * HULL - inset;
+            float zMin = HULL + inset;
+            float zMax = HULL + width - 2 * HULL - inset;
+            float fillSpanY = length - 2 * CAP - PUDDLE;
+            float spanYMin = CAP + inset;
+            float spanYMax = CAP + PUDDLE + fillSpanY - inset;
+            return new RenderInterior(xMin, xMax, spanYMin, spanYMax, zMin, zMax, fillSpanY);
+        }
+
+        float lengthSpan = length - 2 * CAP - PUDDLE;
+        float xMin = HULL + inset;
+        float xMax = HULL + width - 2 * HULL - inset;
+        float zMin = HULL + inset;
+        float zMax = HULL + width - 2 * HULL - inset;
+
+        if (axis == Direction.Axis.X) {
+            float spanXMin = CAP + inset;
+            float spanXMax = CAP + PUDDLE + lengthSpan - inset;
+            return new RenderInterior(spanXMin, spanXMax, yMin, yMax, zMin, zMax, hullSpanY);
+        }
+
+        float spanZMin = CAP + inset;
+        float spanZMax = CAP + PUDDLE + lengthSpan - inset;
+        return new RenderInterior(xMin, xMax, yMin, yMax, spanZMin, spanZMax, hullSpanY);
     }
 
     /** World-Y of the bottom of the hydraulic column used by the solver. */

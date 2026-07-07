@@ -11,6 +11,7 @@ import de.devin.pipesnphysics.client.FluidRenderData.GridDims;
 import de.devin.pipesnphysics.client.FluidRenderData.SurfacePlane;
 import de.devin.pipesnphysics.client.FluidRenderData.TankBounds;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.engine.FluidTankGeometry;
 import dev.ryanhcode.sable.companion.ClientSubLevelAccess;
 import dev.ryanhcode.sable.companion.SableCompanion;
 import dev.ryanhcode.sable.companion.math.Pose3dc;
@@ -46,9 +47,6 @@ public class FluidTankRendererMixin {
 
     // --- Constants ---
     @Unique private static final float INSET = 0.003f;
-    @Unique private static final float CAP_HEIGHT = 1 / 4f;
-    @Unique private static final float HULL_WIDTH = 1 / 16f + 1 / 128f;
-    @Unique private static final float PUDDLE_HEIGHT = 1 / 16f;
 
     /** Box edge pairs for plane-box intersection. */
     @Unique private static final int[][] BOX_EDGES = {
@@ -149,9 +147,8 @@ public class FluidTankRendererMixin {
         FluidStack fluidStack = tank.getFluid();
         if (fluidStack.isEmpty()) return;
 
-        int width = acc.pipesnphysics$getWidth();
-        int height = acc.pipesnphysics$getHeight();
-        float totalHeight = height - 2 * CAP_HEIGHT - PUDDLE_HEIGHT;
+        FluidTankGeometry.RenderInterior interior = FluidTankGeometry.renderInterior(be, INSET);
+        float totalHeight = interior.fillSpanY();
 
         // Read actual fill fraction directly from the tank inventory.
         // Create's LerpedFloat may not tick on Sable sub-levels, causing laggy animation.
@@ -180,11 +177,11 @@ public class FluidTankRendererMixin {
         float clampedLevel = Mth.clamp(level * totalHeight, 0, totalHeight);
 
         // --- Tank bounds (inset to prevent z-fighting with tank glass) ---
-        float xMin = HULL_WIDTH + INSET, xMax = HULL_WIDTH + width - 2 * HULL_WIDTH - INSET;
-        float yMin = CAP_HEIGHT + INSET, yMax = CAP_HEIGHT + PUDDLE_HEIGHT + totalHeight - INSET;
-        float zMin = HULL_WIDTH + INSET, zMax = HULL_WIDTH + width - 2 * HULL_WIDTH - INSET;
+        float xMin = interior.xMin(), xMax = interior.xMax();
+        float yMin = interior.yMin(), yMax = interior.yMax();
+        float zMin = interior.zMin(), zMax = interior.zMax();
         float[] mins = {xMin, yMin, zMin}, maxs = {xMax, yMax, zMax};
-        float cx = (xMin + xMax) / 2f, cy = (yMin + yMax) / 2f, cz = (zMin + zMax) / 2f;
+        float cx = interior.centerX(), cy = interior.centerY(), cz = interior.centerZ();
         TankBounds bounds = new TankBounds(mins, maxs, new float[]{cx, cy, cz});
 
         // --- Surface plane: find where the fluid surface cuts through the tank box ---

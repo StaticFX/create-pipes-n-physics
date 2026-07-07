@@ -41,12 +41,8 @@ public class FluidTankMassMixin implements BlockEntitySubLevelActor {
         double fillFraction = TankMassFormulas.fillFraction(
                 fluidAmount, capacity);
 
-        int width = ((FluidTankAccessor) self).pipesnphysics$getWidth();
-        int height = ((FluidTankAccessor) self).pipesnphysics$getHeight();
-
         SablePhysicsCompat.applyFluidWeight(
-                subLevel, self.getBlockPos(), width, height, fillFraction,
-                massKg, timeStep
+                subLevel, self, fillFraction, massKg, timeStep
         );
     }
 }
