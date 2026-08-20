@@ -212,14 +212,23 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
         pipesnphysics$lang("gui.goggles.density")
                 .style(ChatFormatting.DARK_GRAY)
                 .add(pipesnphysics$text(LangNumberFormat.format(type.getDensity())).style(ChatFormatting.GRAY))
+                .add(pipesnphysics$lang("gui.goggles.density_unit"))
                 .forGoggles(tooltip, 2);
         // The EFFECTIVE viscosity the engine flows this fluid at HERE — a molten fluid reads
         // thinner in an ultrawarm dimension, so the number matches how the pipe behaves.
-        int viscosity = (int) Math.round(FlowSolver.effectiveViscosity(getLevel(), data.fluid()));
-        String tag = viscosity <= 1000 ? "thin" : viscosity <= 3000 ? "syrupy" : "thick";
+        Integer viscosity = (int) Math.round(FlowSolver.effectiveViscosity(getLevel(), data.fluid()));
+
+        String tag = switch (viscosity) {
+            case Integer v when v <= 1000 ->   "thin";
+            case Integer v when v <= 3000 ->   "syrupy";
+            case Integer v when v <= 15000 ->  "thick";
+            default ->                         "sluggish";
+        };
+
         pipesnphysics$lang("gui.goggles.viscosity")
                 .style(ChatFormatting.DARK_GRAY)
                 .add(pipesnphysics$text(LangNumberFormat.format(viscosity)).style(ChatFormatting.GRAY))
+                .add(pipesnphysics$lang("gui.goggles.viscosity_unit"))
                 .add(pipesnphysics$text(" (").style(ChatFormatting.DARK_GRAY))
                 .add(pipesnphysics$lang("gui.goggles.visc_" + tag).style(ChatFormatting.GRAY))
                 .add(pipesnphysics$text(")").style(ChatFormatting.DARK_GRAY))
