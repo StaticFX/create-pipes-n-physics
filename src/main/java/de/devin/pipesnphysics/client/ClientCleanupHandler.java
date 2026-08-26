@@ -46,6 +46,7 @@ public final class ClientCleanupHandler {
 
     private static void clearAll() {
         PumpRangeClient.clear();
+        PumpRangeRenderer.clear();
         PipeStatusClient.clear();
         GraphOverlay.clear();
         PipeFluidRenderer.clear();

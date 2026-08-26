@@ -4,8 +4,10 @@ import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.graph.PipeGeometry;
+import de.devin.pipesnphysics.engine.store.PipeGates;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import net.minecraft.core.BlockPos;
+import net.neoforged.neoforge.fluids.FluidStack;
 
 import java.util.Set;
 
@@ -96,7 +98,7 @@ public final class SettlePass {
             BlockPos adjacent = PipeGeometry.adjacentCell(network.graph, edge, node.index());
             if (adjacent == null || adjacent.equals(node.pos())) continue;
             PipeStore.Store cell = network.cellAt(adjacent);
-            if (cell == null) continue;
+            if (cell == null || !crosses(node, adjacent, slot, cell)) continue;
             // A one-way valve slot exchanges only ALONG its direction: pour toward the arrow,
             // pull from behind it — this is the settle's only cross-node path. Mostly shadowed
             // by the display-head sign discipline (a head never spreads backward through the
@@ -131,7 +133,7 @@ public final class SettlePass {
             BlockPos adjacent = PipeGeometry.adjacentCell(network.graph, edge, node.index());
             if (adjacent == null || adjacent.equals(node.pos())) continue;
             PipeStore.Store cell = network.cellAt(adjacent);
-            if (cell == null) continue;
+            if (cell == null || !crosses(node, adjacent, slot, cell)) continue;
             boolean pourAllowed = node.gateFlow() == null
                     || adjacent.equals(node.pos().relative(node.gateFlow()));
             boolean pullAllowed = node.gateFlow() == null
@@ -144,6 +146,17 @@ public final class SettlePass {
                 exchange(edge, cell, slot, Math.min(cell.amount(), rate));
             }
         }
+    }
+
+    /**
+     * Whether the fluid that would move between a node's slot and one adjacent cell may cross that
+     * boundary at all — a smart pipe's filter (or any pipe gate) walls the slot off from it, just
+     * as it walls a run in the solve. Only one of the two ever holds the crossing fluid: the slot
+     * when it pours, the cell when the slot pulls.
+     */
+    private boolean crosses(Node node, BlockPos adjacent, PipeStore.Store slot, PipeStore.Store cell) {
+        FluidStack crossing = slot.amount() > 0 ? slot.fluid() : cell.fluid();
+        return PipeGates.conducts(network.level, node.pos(), adjacent, crossing);
     }
 
     private void exchange(Edge edge, PipeStore.Store from, PipeStore.Store to, int amount) {

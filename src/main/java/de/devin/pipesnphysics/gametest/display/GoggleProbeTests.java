@@ -639,4 +639,124 @@ public class GoggleProbeTests {
             }
         });
     }
+
+    /**
+     * The same crest gate has to hold when the pump's suction flank is a JUNCTION. The graph
+     * contracts runs BETWEEN junctions, so that flank is an edge with NO cells and no crest of its
+     * own — and reading the crest per edge then reported the bare {@code pumpY − SUCTION_LIMIT}
+     * fallback, a full 8 blocks of reach on a bone-dry line, while the ordinary runs one hop away
+     * reported the true half-block. In a LATTICE, where nearly every pipe is a junction and nearly
+     * every edge is zero-length, that alternates along one flat run: adjacent pipes came out red
+     * next to green with nothing on screen to explain it (reported 2026-08-26, "half the pipes are
+     * red while the other are green — that makes no sense").
+     *
+     * The junction's own cell is a real pipe the column has to come up through, so it gates like
+     * any other ({@link FlowSolver#drawableFloorAt}), and the walk can only ever get MORE
+     * restrictive as it goes.
+     *
+     * Mutation check: drop the seed floor (or the max in {@code reachOn}) and the reach jumps from
+     * a fraction of a block to the whole suction limit.
+     */
+    @GameTest(template = "common/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void junctionSuctionFlankKeepsTheCrestGate(GameTestHelper helper) {
+        BlockPos pump = new BlockPos(2, 1, 1);
+        BlockPos flank = new BlockPos(1, 1, 1);  // the pump's suction-side pipe
+        // A third connection turns that flank pipe into a JUNCTION node, which makes the pump's
+        // own suction edge zero-length — the shape the gate used to fall through.
+        helper.setBlock(new BlockPos(1, 2, 1), pipeState(AllBlocks.FLUID_PIPE.get(), Direction.DOWN));
+        for (Direction side : Direction.values()) {
+            BlockPos abs = helper.absolutePos(flank).relative(side);
+            helper.getLevel().setBlock(abs, Block.updateFromNeighbourShapes(
+                    helper.getLevel().getBlockState(abs), helper.getLevel(), abs), 3);
+        }
+        // The rig's motor runs at 256 RPM, whose pulling share (a tenth of a 64-block head) is
+        // most of the suction limit anyway — dial it down so the gated answer and the ungated
+        // fallback are far apart and the assert below can tell them apart.
+        ScrollValueBehaviour motor = BlockEntityBehaviour.get(
+                helper.getLevel(), helper.absolutePos(new BlockPos(1, 1, 0)), ScrollValueBehaviour.TYPE);
+        if (motor != null) motor.setValue(16);
+        drain(helper, new BlockPos(0, 1, 1)); // bone dry, so the crest gate is the DRY one
+        drain(helper, new BlockPos(4, 1, 1));
+
+        helper.runAtTickTime(40, () -> {
+            var payload = PumpRangeProbe.probe(helper.getLevel(), helper.absolutePos(pump));
+            var pull = payload.paths().stream().filter(PumpRangePayload.RangePath::pull)
+                    .findFirst().orElse(null);
+            if (pull == null || pull.cells().isEmpty()) {
+                helper.fail("the pump reported no suction reach path" + dump(helper, pump));
+                return;
+            }
+            // The first entry is the pump itself: this run's whole reach, and the span its colour
+            // ramp normalizes over. A dry line gives the pump only its pulling share of head — a
+            // fraction of a block at 16 RPM, against the 8-block fallback of an ungated edge.
+            float reach = pull.cells().get(0).margin();
+            if (reach > 1) {
+                helper.fail("a junction suction flank claims " + reach + " blocks of reach on a dry"
+                        + " line — the zero-length edge skipped the crest gate" + dump(helper, pump));
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * You cannot reach the top of a run but not its middle. The pull floor is a RUNNING quantity —
+     * a supply here has to be lifted over every cell already crossed — so along one path a cell
+     * that is out of reach can never be followed by one that is in reach.
+     *
+     * Read per EDGE it was: one crest applied to every cell of its run, including the cells BELOW
+     * that crest, which are then measured against a floor their own crest puts ABOVE them. An
+     * ASCENDING suction run therefore came out with its lower half unpainted and its top painted —
+     * a hole in the middle of a painted run ("the pipe in the middle is not painted at all",
+     * 2026-08-26, `margin -0.47 of 0.52` on a cell standing a block ABOVE the pump).
+     *
+     * The invariant is asserted rather than a number, so it holds for any rig: mutation check —
+     * apply the edge-wide floor to every cell again and the lower cell of this riser reports out
+     * of reach while the one above it reports in reach.
+     */
+    @GameTest(template = "common/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void climbingSuctionRunHasNoUnreachableMiddle(GameTestHelper helper) {
+        BlockPos pump = new BlockPos(2, 1, 1);
+        BlockPos flank = new BlockPos(1, 1, 1);
+        // A two-cell run CLIMBING off the pump's suction flank, ending in an open mouth: the shape
+        // whose lower cell fell below its own crest's floor.
+        helper.setBlock(new BlockPos(1, 2, 1),
+                pipeState(AllBlocks.FLUID_PIPE.get(), Direction.UP, Direction.DOWN));
+        helper.setBlock(new BlockPos(1, 3, 1),
+                pipeState(AllBlocks.FLUID_PIPE.get(), Direction.UP, Direction.DOWN));
+        for (Direction side : Direction.values()) {
+            BlockPos abs = helper.absolutePos(flank).relative(side);
+            helper.getLevel().setBlock(abs, Block.updateFromNeighbourShapes(
+                    helper.getLevel().getBlockState(abs), helper.getLevel(), abs), 3);
+        }
+        // The rig's 256 RPM pump can establish 6.4 blocks down a dry line, which swamps a
+        // two-block riser and leaves nothing negative to catch. Dial it to where the allowance
+        // (0.4) is smaller than the run it climbs — the reporter's own 16 RPM.
+        ScrollValueBehaviour motor = BlockEntityBehaviour.get(
+                helper.getLevel(), helper.absolutePos(new BlockPos(1, 1, 0)), ScrollValueBehaviour.TYPE);
+        if (motor != null) motor.setValue(16);
+        drain(helper, new BlockPos(0, 1, 1));
+        drain(helper, new BlockPos(4, 1, 1));
+
+        helper.runAtTickTime(40, () -> {
+            var payload = PumpRangeProbe.probe(helper.getLevel(), helper.absolutePos(pump));
+            for (var path : payload.paths()) {
+                if (!path.pull()) continue;
+                PumpRangePayload.RangeCell out = null;
+                for (var cell : path.cells()) {
+                    if (cell.margin() < 0) {
+                        out = cell;
+                    } else if (out != null) {
+                        helper.fail("the suction walk reports " + BlockPos.of(out.pos())
+                                + " out of reach (" + out.margin() + ") but "
+                                + BlockPos.of(cell.pos()) + " further along it in reach ("
+                                + cell.margin() + ") — a hole in the middle of the run"
+                                + dump(helper, pump));
+                        return;
+                    }
+                }
+            }
+            helper.succeed();
+        });
+    }
 }

@@ -7,8 +7,8 @@ import com.simibubi.create.content.kinetics.base.IRotate.SpeedLevel;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
-import com.simibubi.create.foundation.blockEntity.behaviour.CenteredSideValueBoxTransform;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.client.DialSlot;
 import de.devin.pipesnphysics.client.GoggleText;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.net.PipeStatusClient;
@@ -115,7 +115,7 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity implements
         PumpModeBehaviour mode = new PumpModeBehaviour(
                 Component.translatable("pipesnphysics.gui.pump.mode"),
                 (SmartBlockEntity) (Object) this,
-                new CenteredSideValueBoxTransform(PumpBlockEntityMixin::pipesnphysics$isDialFace));
+                new DialSlot(PumpBlockEntityMixin::pipesnphysics$isDialFace));
         mode.withCallback(value -> pipesnphysics$wakeNetwork())
                 .onlyActiveWhen(PipesNPhysicsConfig.ENABLE_HYDRO_TURBINE);
         // A pump PLACED from now on decides its own role; one loaded from a save without the key

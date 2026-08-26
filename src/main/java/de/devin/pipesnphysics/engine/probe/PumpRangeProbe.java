@@ -37,7 +37,9 @@ import java.util.Set;
  *   when the pump sits AT its supply — a pump lifting out of a tank below it then
  *   promised reach it did not have (a 16 RPM pump 4 blocks over a tank at 56.59 reads
  *   a ceiling of 60.59, not 64.5, so a sink at 62 is out of reach and really NO_HEAD).
- * - the PULL floor is {@link FlowSolver#drawableFloor}, the solve's crest gate. NOT
+ * - the PULL floor is {@link FlowSolver#drawableFloorAt}, the solve's crest gate read cell by
+ *   cell and folded with max as the walk advances (a supply here must be lifted over
+ *   everything already crossed, so the floor only tightens). NOT
  *   {@code pumpY − SUCTION_LIMIT}, which ignores priming — a pump above the waterline
  *   with a DRY riser reaches only as deep as the small share of head it can spend
  *   sucking ({@link FlowSolver#pumpPrimeAllowance}, a tenth of its lift by default),
@@ -102,12 +104,17 @@ public final class PumpRangeProbe {
             boolean pull = toward.equals(pumpPos.relative(pump.pumpFacing().getOpposite()));
             if (!push && !pull) continue;
 
-            Reach seedReach = walker.reachOn(edge);
+            // The cell the pump actually draws through seeds the floor — for a zero-length edge
+            // that is the JUNCTION on its flank, which belongs to no run and so has no crest of
+            // its own. Without it the pump's own reach reads as the ungated fallback while the
+            // cells one hop away read the real gate (see FlowSolver.drawableFloorAt).
+            double seedFloor = FlowSolver.drawableFloorAt(level, toward, walker.primeAllowance);
+            Reach seedReach = walker.reachOn(edge, seedFloor);
             List<PumpRangePayload.RangeCell> seedPath = new ArrayList<>();
             seedPath.add(new PumpRangePayload.RangeCell(pumpPos.asLong(),
                     seedReach.marginAt(pump.worldY(), pull),
                     seedReach.aboveSupplyAt(pump.worldY()), false));
-            walker.walk(edge, pump.index(), seedPath, pull);
+            walker.walk(edge, pump.index(), seedPath, pull, seedFloor);
         }
         return new PumpRangePayload(pumpPos, walker.paths);
     }
@@ -128,9 +135,15 @@ public final class PumpRangeProbe {
      * The elevations one branch's reach is bounded by, both measured so the pump itself is the
      * inside of the range: the {@code pushCeiling} it can lift fluid up to, and the
      * {@code pullFloor} — the deepest a supply may sit and still be drawn ({@link
-     * FlowSolver#drawableFloor}, which is the solve's own crest gate, not a second copy of it).
+     * FlowSolver#drawableFloorAt}, the solve's own crest gate, not a second copy of it),
+     * which the walk tightens per cell through {@link #withFloor}.
      */
     private record Reach(double pumpY, double anchor, double pushCeiling, double pullFloor) {
+        /** The same reach with a tightened pull floor — the walk lowers no floor, only raises it. */
+        Reach withFloor(double floor) {
+            return floor == pullFloor ? this : new Reach(pumpY, anchor, pushCeiling, floor);
+        }
+
         /**
          * Blocks of reach left at elevation {@code y}: how far under the push ceiling climbing,
          * or how far above the pull floor descending. Negative past the limit.
@@ -175,12 +188,10 @@ public final class PumpRangeProbe {
 
         /**
          * This branch's reach: the push ceiling from its higher endpoint — the same winner rule
-         * the pipe goggle's lift line uses, so the two readouts agree cell for cell — and the
-         * pull floor from the solve's own crest gate.
+         * the pipe goggle's lift line uses, so the two readouts agree cell for cell — over the
+         * pull floor the walk already stands on, which the cells then tighten one at a time.
          */
-        Reach reachOn(Edge edge) {
-            double pullFloor = FlowSolver.drawableFloor(level, graph, edge, fallback.pullFloor(),
-                    primeAllowance);
+        Reach reachOn(Edge edge, double pullFloor) {
             Double a = solution.nodeCeilings().get(edge.a());
             Double b = solution.nodeCeilings().get(edge.b());
             if (a == null && b == null) {
@@ -193,20 +204,31 @@ public final class PumpRangeProbe {
                     solution.nodeCeilings().get(winner), pullFloor);
         }
 
-        void walk(Edge edge, int fromNode, List<PumpRangePayload.RangeCell> path, boolean pull) {
-            Reach reach = reachOn(edge);
+        void walk(Edge edge, int fromNode, List<PumpRangePayload.RangeCell> path, boolean pull,
+                  double floorSoFar) {
+            Reach reach = reachOn(edge, floorSoFar);
             List<BlockPos> ordered = fromNode == edge.a()
                     ? edge.pipes()
                     : edge.pipes().reversed();
+            // The pull floor is a RUNNING quantity: a supply here has to be lifted over every
+            // cell already crossed, so it tightens cell by cell and never relaxes. Read per EDGE
+            // instead — one crest applied to all of its cells — a riser came out with its LOWER
+            // half unpainted and its top painted: the cells below the crest were measured against
+            // a floor their own crest sets, which sits ABOVE them ("the pipe in the middle is not
+            // painted at all", 2026-08-26; the tell was `margin -0.47 of 0.52` on a cell standing
+            // a block ABOVE the pump). You cannot reach the top of a run but not its middle.
+            double floor = floorSoFar;
             for (BlockPos cell : ordered) {
                 if (visitedCells++ > MAX_CELLS) {
                     emit(path, pull);
                     return;
                 }
+                floor = Math.max(floor, FlowSolver.drawableFloorAt(level, cell, primeAllowance));
+                Reach here = reach.withFloor(floor);
                 double cellY = SableCompat.getWorldY(level, cell);
-                float margin = reach.marginAt(cellY, pull);
+                float margin = here.marginAt(cellY, pull);
                 path.add(new PumpRangePayload.RangeCell(
-                        cell.asLong(), margin, reach.aboveSupplyAt(cellY), true));
+                        cell.asLong(), margin, here.aboveSupplyAt(cellY), true));
                 if (beyondAllowance(margin, pull)) {
                     emit(path, pull);
                     return;
@@ -215,16 +237,23 @@ public final class PumpRangeProbe {
 
             int farIndex = edge.other(fromNode);
             Node far = graph.node(farIndex);
-            float farMargin = reach.marginAt(far.worldY(), pull);
-            // A junction or a shut valve IS a pipe cell and paints; a tank, pump, or open end is not.
+            // A junction or a shut valve IS a pipe cell and paints — and gates, being one more
+            // cell the column has to come up through; a tank, pump, or open end is neither.
+            boolean farIsCell = far.isJunction() || far.isClosedGate();
+            if (farIsCell) {
+                floor = Math.max(floor, FlowSolver.drawableFloorAt(level, far.pos(), primeAllowance));
+            }
+            Reach atFar = reach.withFloor(floor);
+            float farMargin = atFar.marginAt(far.worldY(), pull);
             path.add(new PumpRangePayload.RangeCell(far.pos().asLong(), farMargin,
-                    reach.aboveSupplyAt(far.worldY()), far.isJunction() || far.isClosedGate()));
+                    atFar.aboveSupplyAt(far.worldY()), farIsCell));
 
             if (far.isJunction() && !beyondAllowance(farMargin, pull) && visited.add(farIndex)) {
                 boolean branched = false;
+                double onward = floor;
                 for (Edge next : graph.edgesOf(farIndex)) {
                     if (next.index() == edge.index()) continue;
-                    walk(next, farIndex, new ArrayList<>(path), pull);
+                    walk(next, farIndex, new ArrayList<>(path), pull, onward);
                     branched = true;
                 }
                 if (branched) return;

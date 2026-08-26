@@ -28,7 +28,9 @@ import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.graph.PipeGeometry;
 import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
+import de.devin.pipesnphysics.engine.net.PumpRangePayload;
 import de.devin.pipesnphysics.engine.probe.PipeProbe;
+import de.devin.pipesnphysics.engine.probe.PumpRangeProbe;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
 import de.devin.pipesnphysics.engine.turbine.HydroTurbine;
@@ -336,6 +338,8 @@ public final class PipeGraphCommand {
         report.line("§e--- Pipe Graph ---");
         report.line("§7Nodes: §f" + g.nodes().size() + "  §7Edges: §f" + g.edges().size());
         report.line(locateTarget(g, target));
+        String reached = targetReach(level, g, target);
+        if (reached != null) report.line(reached);
         printNodes(report, level, g, s, target);
         sendFluidStats(report, level, g);
         report.line("§e--- Edges --- §8(recent = actual mB/t per solve, newest→oldest; → a→b, ← b→a, · no solved direction, … skipped ticks)");
@@ -365,6 +369,62 @@ public final class PipeGraphCommand {
         return "§6Flagged: §f" + target.toShortString() + " §7— §cnot part of this network";
     }
 
+    /**
+     * What the range overlay knows about the FLAGGED cell, from every pump that reaches it: the
+     * margin it carries, the span its colour ramp normalizes over, and how far it stands above the
+     * supply surface. That is the whole input to the tint, so a pipe that comes out an unexpected
+     * colour — or comes out bare in the middle of a painted run — can be read off the dump instead
+     * of guessed at from a screenshot. Null when no pump's walk reaches it, which is itself the
+     * answer for an unpainted cell: the walk never went there.
+     */
+    private static String targetReach(ServerLevel level, Graph g, BlockPos target) {
+        StringBuilder out = new StringBuilder();
+        for (Node pump : g.pumps()) {
+            PumpRangePayload range = PumpRangeProbe.probe(level, pump.pos());
+            for (PumpRangePayload.RangePath path : range.paths()) {
+                if (path.cells().isEmpty()) continue;
+                float span = path.cells().get(0).margin();
+                for (PumpRangePayload.RangeCell cell : path.cells()) {
+                    if (cell.pos() != target.asLong()) continue;
+                    out.append(String.format("      §7overlay: pump §f%s §7%s §7margin §f%+.2f§7"
+                                    + " of §f%.2f§7, above supply §f%+.2f§7%s",
+                            pump.pos().toShortString(), path.pull() ? "pull" : "push",
+                            cell.margin(), span, cell.aboveSupply(),
+                            cell.pipe() ? "" : " §8(not a pipe — never painted)"));
+                    return out.toString(); // one report is enough; a second path repeats it
+                }
+            }
+        }
+        return g.pumps().isEmpty() ? null
+                : "      §8overlay: no pump's reach walk visits this cell (so it is never painted)";
+    }
+
+    /**
+     * A pump's reach, read from the range probe itself rather than re-derived, so the dump and the
+     * overlay cannot disagree: how many blocks of margin each flank has AT THE PUMP (which is also
+     * the span its colour ramp normalizes over) and the elevation each one runs out at — the push
+     * CEILING above and the drawable FLOOR below. A stopped pump reaches nowhere and says so.
+     */
+    private static String pumpReachLine(ServerLevel level, Node pump) {
+        PumpRangePayload range = PumpRangeProbe.probe(level, pump.pos());
+        Float push = null;
+        Float pull = null;
+        for (PumpRangePayload.RangePath path : range.paths()) {
+            if (path.cells().isEmpty()) continue;
+            float margin = path.cells().get(0).margin();
+            if (path.pull()) {
+                if (pull == null) pull = margin;
+            } else if (push == null) {
+                push = margin;
+            }
+        }
+        if (push == null && pull == null) return "      §8reach: none (the pump is not turning)";
+        double y = pump.worldY();
+        return String.format("      §7reach: push §f%s §7· pull §f%s",
+                push == null ? "—" : String.format("%.2f ↑ (ceiling %.2f)", push, y + push),
+                pull == null ? "—" : String.format("%.2f ↓ (floor %.2f)", pull, y - pull));
+    }
+
     /** One chat line per node (position, kind, heads, RPM) plus its fluid/pulley/probe/dock detail lines. */
     private static void printNodes(Report report, ServerLevel level, Graph g, Solution s, BlockPos target) {
         MouthConditions mouths = MouthConditions.of(level, g);
@@ -384,6 +444,13 @@ public final class PipeGraphCommand {
                             ? String.format(" §aturbine §7su=§f%.0f", turbineStress(level, n)) : "",
                     n.isOneWayGate() ? " §done-way §f" + n.gateFlow() : "",
                     n.pos().equals(target) ? " §6← flagged" : ""));
+            // A pump's REACH — the very numbers the range overlay paints from. Without them a
+            // surprising tint ("why is half of this red?") can only be guessed at: both bounds
+            // are elevations, and no other line in the dump carries them.
+            if (n.isPump()) {
+                String reach = pumpReachLine(level, n);
+                if (reach != null) report.line(reach);
+            }
             BoundaryColumn column = columnOf(level, mouths, n);
             if (column != null && !column.contents().isEmpty() && column.contentMb() > 0) {
                 report.line("      §7" + (n.isOpenEnd()

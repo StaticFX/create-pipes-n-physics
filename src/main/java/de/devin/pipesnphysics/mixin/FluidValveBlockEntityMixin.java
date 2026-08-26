@@ -8,6 +8,7 @@ import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour
 import com.simibubi.create.foundation.blockEntity.behaviour.CenteredSideValueBoxTransform;
 import com.simibubi.create.foundation.blockEntity.behaviour.scrollValue.ScrollValueBehaviour;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.client.DialSlot;
 import de.devin.pipesnphysics.client.GoggleText;
 import de.devin.pipesnphysics.client.PipeStatusText;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
@@ -109,7 +110,7 @@ public abstract class FluidValveBlockEntityMixin extends KineticBlockEntity impl
         ValveDirectionBehaviour direction = new ValveDirectionBehaviour(
                 Component.translatable("pipesnphysics.gui.valve.flow_direction"),
                 (SmartBlockEntity) (Object) this,
-                new CenteredSideValueBoxTransform(FluidValveBlockEntityMixin::pipesnphysics$isFreeFace));
+                new DialSlot(FluidValveBlockEntityMixin::pipesnphysics$isFreeFace));
         direction.withCallback(value -> pipesnphysics$wakeNetwork())
                 .onlyActiveWhen(PipesNPhysicsConfig.ENABLE_VALVE_ONE_WAY);
         pipesnphysics$direction = direction;

@@ -1,7 +1,7 @@
 package de.devin.pipesnphysics.engine;
 
-import com.simibubi.create.content.fluids.FluidPropagator;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.api.EndpointApi;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.TransferPlanner.TransferPlan;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
@@ -14,9 +14,9 @@ import de.devin.pipesnphysics.engine.solve.NetworkSolver.BranchSpec;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver.NodeSpec;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver;
 import de.devin.pipesnphysics.engine.solve.UnionFind;
+import de.devin.pipesnphysics.engine.store.PipeGates;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.FluidType;
@@ -204,6 +204,11 @@ final class FluidPass {
      */
     private boolean participates(BoundaryColumn column) {
         IFluidHandler cap = column.handler(level);
+        // An addon may veto an endpoint for one fluid (a machine whose tank is only a valid target
+        // under conditions the engine cannot see) — the supported hook, so nothing has to mixin
+        // into this method. Asked after the handler resolve, which an open end depends on for its
+        // per-tick management. Reservoir asks the same veto, so the settle honors it too.
+        if (!EndpointApi.allows(level, column.identity(), sample)) return false;
         // An open end is decided from engine state, NEVER by probing the capability with
         // fill/drain(SIMULATE): those MUTATE the world — Create's OpenEndedPipe wipes a differing
         // buffered fluid and runs the spill-collision reaction (a lake block turning to stone)
@@ -518,28 +523,19 @@ final class FluidPass {
      * Honor per-cell fluid gates along a run: closed fluid valves and smart-pipe
      * filters reject fluids via {@code canPullFluidFrom}, exactly as Create's own
      * engine consults them. A run whose cells reject the fluid carries none of it.
+     *
+     * The same {@link PipeGates} predicate walls the EXECUTOR's moves, so the solve and the
+     * settle read one rule — they drifted once, the settle carrying a rejected fluid straight
+     * through a filter this branch had already refused.
      */
     private boolean runAcceptsFluid(Edge edge) {
-        if (edge.pipes().isEmpty()) return true;
-
-        BlockPos previous = graph.node(edge.a()).pos();
-        for (int i = 0; i < edge.pipes().size(); i++) {
-            BlockPos cell = edge.pipes().get(i);
-            BlockPos next = i + 1 < edge.pipes().size()
-                    ? edge.pipes().get(i + 1)
-                    : graph.node(edge.b()).pos();
-
-            var behaviour = FluidPropagator.getPipe(level, cell);
-            if (behaviour != null) {
-                var state = level.getBlockState(cell);
-                Direction fromPrevious = PipeGeometry.between(cell, previous);
-                Direction fromNext = PipeGeometry.between(cell, next);
-                if (fromPrevious != null && !behaviour.canPullFluidFrom(sample, state, fromPrevious)) return false;
-                if (fromNext != null && !behaviour.canPullFluidFrom(sample, state, fromNext)) return false;
-            }
-            previous = cell;
-        }
-        return true;
+        List<BlockPos> pipes = edge.pipes();
+        if (pipes.isEmpty()) return true;
+        // The END faces are one-sided: only the run's own cells carry a gate here, never the node
+        // they open onto (see PipeGates.admits).
+        return PipeGates.admits(level, pipes.getFirst(), graph.node(edge.a()).pos(), sample)
+                && PipeGates.conductsAlong(level, pipes, sample)
+                && PipeGates.admits(level, pipes.getLast(), graph.node(edge.b()).pos(), sample);
     }
 
     /**

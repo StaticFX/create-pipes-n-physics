@@ -85,8 +85,9 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                         .style(ChatFormatting.AQUA)
                         .forGoggles(tooltip, 1);
             }
-            // The cell's real stored volume — pipes hold fluid now, so make it inspectable.
-            if (isPlayerSneaking && data.holdsMb() > 0) {
+            // The cell's real stored volume. Pipes HOLD fluid, so this is a first-class fact about
+            // the block being looked at — not a detail to sneak for (owner call, 2026-08-26).
+            if (data.holdsMb() > 0) {
                 pipesnphysics$lang("gui.goggles.holds")
                         .style(ChatFormatting.GRAY)
                         .add(pipesnphysics$text(LangNumberFormat.format(data.holdsMb()))

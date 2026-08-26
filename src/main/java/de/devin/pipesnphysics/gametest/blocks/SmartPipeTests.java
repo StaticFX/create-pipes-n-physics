@@ -111,19 +111,76 @@ public class SmartPipeTests {
         });
     }
 
+    // blocks/smart_pipe_mouth pinned positions (template pos + (0,1,0)): a full tank feeding a
+    // flat run that ends in an OPEN MOUTH, with a smart pipe in the middle. No pump, no sink tank
+    // — the mouth is what makes the run drain, and the filter is all that stands in the way.
+    private static final BlockPos MOUTH_TANK = new BlockPos(0, 1, 0);
+    private static final BlockPos MOUTH_NEAR = new BlockPos(1, 1, 0);
+    private static final BlockPos MOUTH_SMART = new BlockPos(2, 1, 0);
+    private static final BlockPos MOUTH_FAR = new BlockPos(3, 1, 0);
+    private static final BlockPos MOUTH_SPACE = new BlockPos(4, 1, 0);
+
+    /**
+     * A smart pipe filtered to a fluid the line does NOT carry must wall it like a shut valve —
+     * at REST as much as under flow. The solve already refuses the run ({@code runAcceptsFluid}),
+     * so nothing SOLVES; what leaked was the settle, which knows only elevations: the open mouth
+     * contributes no resting line, so the whole run targeted the tank's own waterline, the
+     * hydrostatic draw walked fluid straight through the filter cell, and the mouth poured it into
+     * the world ("I placed the diesel in the basin and it went through the smart pipe" — the
+     * reported rig read basin → 4 cells → open end, everything empty afterwards).
+     *
+     * Fluid may still stand in the cell BETWEEN the tank and the filter — that is a pipe pressed
+     * against a shut valve — so the tank keeps everything but that one cell.
+     */
+    @GameTest(template = "blocks/smart_pipe_mouth", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void smartPipeWallsTheFluidItRejectsAtRest(GameTestHelper helper) {
+        setFilter(helper, MOUTH_SMART, Items.LAVA_BUCKET);
+
+        helper.runAtTickTime(200, () -> {
+            int past = pipeAmount(helper, MOUTH_SMART) + pipeAmount(helper, MOUTH_FAR);
+            if (past > 0) {
+                helper.fail(past + " mB of water crossed a lava-filtered smart pipe"
+                        + dump(helper, MOUTH_NEAR));
+                return;
+            }
+            if (helper.getLevel().getFluidState(helper.absolutePos(MOUTH_SPACE)).isSource()) {
+                helper.fail("the run spilled out of the mouth past a filter that rejects its fluid"
+                        + dump(helper, MOUTH_NEAR));
+                return;
+            }
+            int held = amount(helper, MOUTH_TANK);
+            if (held < 7700) {
+                helper.fail("the tank drained to " + held + " mB through a lava-filtered smart pipe"
+                        + dump(helper, MOUTH_NEAR));
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * The same rig with the filter set to the fluid it carries: the run must drain and spill. This
+     * is what keeps its twin above honest — a rig that never flows would pass that one vacuously.
+     */
+    @GameTest(template = "blocks/smart_pipe_mouth", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
+    public static void smartPipeDrainsOutTheMouthItAccepts(GameTestHelper helper) {
+        setFilter(helper, MOUTH_SMART, Items.WATER_BUCKET);
+
+        helper.succeedWhen(() -> {
+            if (amount(helper, MOUTH_TANK) >= 8000) helper.fail("the tank has not started draining");
+            if (!helper.getLevel().getFluidState(helper.absolutePos(MOUTH_SPACE)).isSource()) {
+                helper.fail("nothing reached the mouth through a water-filtered smart pipe");
+            }
+        });
+    }
+
     /** Swap in a smart fluid pipe along the rig's X axis and set its fluid filter. */
     private static void placeSmartPipe(GameTestHelper helper, BlockPos rel, net.minecraft.world.item.Item filter) {
         BlockState smart = AllBlocks.SMART_FLUID_PIPE.getDefaultState()
                 .setValue(FaceAttachedHorizontalDirectionalBlock.FACE, AttachFace.FLOOR)
                 .setValue(FaceAttachedHorizontalDirectionalBlock.FACING, Direction.EAST);
         helper.setBlock(rel, smart);
-        FilteringBehaviour behaviour = BlockEntityBehaviour.get(
-                helper.getLevel(), helper.absolutePos(rel), FilteringBehaviour.TYPE);
-        if (behaviour == null) {
-            helper.fail("no filtering behaviour on the smart pipe at " + rel);
-            return;
-        }
-        behaviour.setFilter(new ItemStack(filter));
+        setFilter(helper, rel, filter);
         // The neighbours were shaped against whatever stood here before, so recompute their own
         // connection state — setBlock only re-shapes outward.
         for (Direction side : Direction.values()) {
@@ -131,5 +188,16 @@ public class SmartPipeTests {
             helper.getLevel().setBlock(abs, Block.updateFromNeighbourShapes(
                     helper.getLevel().getBlockState(abs), helper.getLevel(), abs), 3);
         }
+    }
+
+    /** Set the fluid filter of the smart pipe already standing at this position. */
+    private static void setFilter(GameTestHelper helper, BlockPos rel, net.minecraft.world.item.Item filter) {
+        FilteringBehaviour behaviour = BlockEntityBehaviour.get(
+                helper.getLevel(), helper.absolutePos(rel), FilteringBehaviour.TYPE);
+        if (behaviour == null) {
+            helper.fail("no filtering behaviour on the smart pipe at " + rel);
+            return;
+        }
+        behaviour.setFilter(new ItemStack(filter));
     }
 }

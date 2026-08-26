@@ -14,6 +14,8 @@ import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour
 import com.simibubi.create.foundation.blockEntity.behaviour.fluid.SmartFluidTankBehaviour;
 import com.simibubi.create.foundation.blockEntity.behaviour.scrollValue.ScrollValueBehaviour;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.api.EndpointApi;
+import de.devin.pipesnphysics.api.EndpointFilter;
 import de.devin.pipesnphysics.api.FluidHandlerApi;
 import de.devin.pipesnphysics.api.FluidHandlerRole;
 import de.devin.pipesnphysics.client.PipeStatusText;
@@ -554,5 +556,58 @@ public class RelayHandlerTests {
         }
         RelayDetector.clear();
         helper.succeed();
+    }
+
+    /**
+     * An {@link EndpointApi} filter takes an endpoint out of the network for one fluid: the vetoed
+     * tank must neither RECEIVE nor GIVE, so its contents stand exactly where they were while its
+     * twin — which would otherwise equalize with it, as {@code tanksEqualizeAtEqualSurfaces} proves
+     * on this same rig — drains into the run below on its own.
+     *
+     * Holding fluid in the vetoed tank is what makes the assert cover BOTH enforcement points at
+     * once: without the solve's participation veto it GAINS (the pass equalizes the surfaces), and
+     * without the boundary veto in {@code Reservoir} it LOSES (the settle draws every wet end into
+     * the run below it, with no solved flow at all to gate).
+     *
+     * This is the supported hook that replaces mixing into the engine's own participation test —
+     * the coupling that crashed a server on update (issue #80: an addon's mixin still referenced
+     * {@code engine.BoundaryColumn}, which moved package in 3.0.0, so the class failed to attach at
+     * classload and took the tick down with it). The filter is scoped to ONE position, so even a
+     * leaked registration cannot reach another test's rig.
+     */
+    @GameTest(template = "common/simple_fluid_leveling", templateNamespace = PipesNPhysics.ID,
+            timeoutTicks = 300, batch = "endpointFilter")
+    public static void endpointFilterKeepsATankOutOfTheNetwork(GameTestHelper helper) {
+        BlockPos left = new BlockPos(0, 3, 0);
+        BlockPos right = new BlockPos(2, 3, 0);
+        BlockPos vetoed = helper.absolutePos(right);
+        EndpointFilter filter = (level, endpoint, fluid) -> !endpoint.equals(vetoed);
+        EndpointApi.registerFilter(filter);
+        fill(helper, left, 8000);
+        fill(helper, right, 4000);
+
+        helper.runAtTickTime(200, () -> {
+            try {
+                int held = amount(helper, right);
+                if (held != 4000) {
+                    helper.fail("a vetoed endpoint " + (held > 4000 ? "received" : "gave up")
+                            + " fluid: " + held + "/4000 mB left"
+                            + dump(helper, new BlockPos(1, 1, 0)));
+                    return;
+                }
+                // Nor may the SOLVE plan a flow the boundary then refuses: that is a permanent
+                // stall — scrolling pipes with nothing moving — which the amount alone cannot see.
+                Graph graph = GraphBuilder.build(
+                        helper.getLevel(), helper.absolutePos(new BlockPos(1, 1, 0)));
+                if (FlowSolver.solve(helper.getLevel(), graph).active()) {
+                    helper.fail("the solve planned flow through a vetoed endpoint"
+                            + dump(helper, new BlockPos(1, 1, 0)));
+                    return;
+                }
+                helper.succeed();
+            } finally {
+                EndpointApi.removeFilter(filter);
+            }
+        });
     }
 }

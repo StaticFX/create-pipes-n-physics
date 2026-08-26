@@ -9,6 +9,9 @@ import com.simibubi.create.foundation.model.BakedQuadHelper;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.net.PumpRangePayload;
+import it.unimi.dsi.fastutil.floats.FloatArrayList;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.block.model.BakedQuad;
@@ -64,11 +67,22 @@ import java.util.List;
  * The paint is each pipe's OWN baked model re-drawn a hair larger and tinted, rather than a
  * shell built around it — so elbows, connection stubs and encasing are all followed exactly,
  * which no hand-built geometry can manage. BOTH sides ramp green→amber→red toward their limit
- * ({@link Ramp}), shaded per vertex so the colour runs smoothly up the run rather than stepping
- * once per pipe. That ramp measures the reach LEFT — still the "how far does this pump go"
- * question, read at each elevation instead of only where the paint stops. It is not the encoding
+ * ({@link #rampColor}), one colour per cell taken from that cell's own reported margin. That ramp
+ * measures the reach LEFT — still the "how far does this pump go" question, read at every pipe
+ * instead of only where the paint stops. It is not the encoding
  * reverted on 2026-07-31: those ramped by how hard the pump was WORKING, competed with the
  * in-pipe fluid, and read as a promise about throughput.
+ *
+ * Reading those models is expensive and is therefore done ONCE PER ANSWER ({@link #bake}), not
+ * once per frame: a Create pipe caches no model data, so every {@code getModelData} rebuilds its
+ * rim attachments from the neighbourhood and every {@code getQuads} copies the model into a fresh
+ * list — seven of those per cell, plus a cut and four {@code Vec3}s per quad. At 60 fps over a
+ * large network that is millions of allocations a second, which is the lag reported in issue #81
+ * ("look at a pump with a lot of pipes connected and the game becomes laggy"). The answer only
+ * changes every ~10 ticks, so the geometry is baked flat then ({@link ReachMesh}) and each frame
+ * only streams vertices. The bake also paints each POSITION once: the walk hands every branch its
+ * own copy of the shared trunk, so a manifold's header arrived once per branch and was rebuilt,
+ * re-cut and re-drawn that many times over — and being translucent, double-painted too.
  */
 @EventBusSubscriber(modid = PipesNPhysics.ID, value = Dist.CLIENT)
 public final class PumpRangeRenderer {
@@ -85,7 +99,17 @@ public final class PumpRangeRenderer {
     private static final MultiBufferSource.BufferSource OWN_BUFFER =
             MultiBufferSource.immediate(new ByteBufferBuilder(2048));
 
+    /** The answer {@link #mesh} was baked from — by IDENTITY, since each answer is a fresh payload. */
+    private static PumpRangePayload bakedFrom;
+    private static ReachMesh mesh;
+
     private PumpRangeRenderer() {}
+
+    /** Drop the baked geometry — it holds the whole overlay's vertices (world change, logout). */
+    public static void clear() {
+        bakedFrom = null;
+        mesh = null;
+    }
 
     @SubscribeEvent
     public static void onRenderLevel(RenderLevelStageEvent event) {
@@ -111,24 +135,72 @@ public final class PumpRangeRenderer {
         if (payload == null || payload.paths().isEmpty()) return;
 
         float fade = PumpRangeClient.preserveFraction(now, preserveTicks);
-        paintReach(event.getPoseStack(), mc, payload.paths(), Math.max(0.15f, fade));
+        paintReach(event.getPoseStack(), mc, payload, Math.max(0.15f, fade));
     }
 
+    /**
+     * One frame: stream the baked vertices, applying only the camera offset and the fade's alpha
+     * (which is why alpha is the one thing NOT baked into the mesh).
+     */
     private static void paintReach(PoseStack poseStack, Minecraft mc,
-                                   List<PumpRangePayload.RangePath> paths, float fade) {
+                                   PumpRangePayload payload, float fade) {
+        ReachMesh baked = meshFor(mc, payload);
+        if (baked.colors().length == 0) return;
         Vec3 camera = mc.gameRenderer.getMainCamera().getPosition();
         float alpha = TINT_ALPHA * fade;
 
         poseStack.pushPose();
         poseStack.translate(-camera.x, -camera.y, -camera.z);
         VertexConsumer buf = OWN_BUFFER.getBuffer(PnpRenderTypes.REACH_TINT);
-        for (PumpRangePayload.RangePath path : paths) {
+        PoseStack.Pose pose = poseStack.last();
+        float[] vertices = baked.vertices();
+        for (int i = 0; i < baked.colors().length; i++) {
+            int at = i * ReachMesh.STRIDE;
+            int color = baked.colors()[i];
+            buf.addVertex(pose, vertices[at], vertices[at + 1], vertices[at + 2])
+                    .setColor(((color >> 16) & 0xFF) / 255f, ((color >> 8) & 0xFF) / 255f,
+                            (color & 0xFF) / 255f, alpha)
+                    .setUv(vertices[at + 3], vertices[at + 4])
+                    .setOverlay(OverlayTexture.NO_OVERLAY)
+                    .setLight(ArrowRender.FULL_BRIGHTNESS)
+                    .setNormal(pose, vertices[at + 5], vertices[at + 6], vertices[at + 7]);
+        }
+        OWN_BUFFER.endBatch();
+        poseStack.popPose();
+    }
+
+    /**
+     * One answer's tint geometry, baked flat: eight interleaved floats per vertex — world position,
+     * texture, normal — plus its packed colour. Alpha stays out of it: the preserve window fades it
+     * per frame while the geometry stands still.
+     */
+    private record ReachMesh(float[] vertices, int[] colors) {
+        static final int STRIDE = 8;
+    }
+
+    /** The mesh for this answer, baking it the first frame the answer is seen. */
+    private static ReachMesh meshFor(Minecraft mc, PumpRangePayload payload) {
+        if (payload == bakedFrom && mesh != null) return mesh;
+        bakedFrom = payload;
+        mesh = bake(mc, payload);
+        return mesh;
+    }
+
+    /**
+     * Read every reachable pipe's model once, cut it to its band, shade it off its ramp, and write
+     * the result out flat. Each POSITION is baked at most once — the walk gives every branch its
+     * own copy of the trunk they share, and painting a translucent tint twice both costs the work
+     * twice and comes out darker; the first path to reach a cell decides its cut and colour.
+     */
+    private static ReachMesh bake(Minecraft mc, PumpRangePayload payload) {
+        Bake bake = new Bake();
+        for (PumpRangePayload.RangePath path : payload.paths()) {
             // Both quantities arrive as ELEVATIONS measured from the cell's own centre, so they
             // read as block-local heights around 0.5.
             boolean push = !path.pull();
             List<PumpRangePayload.RangeCell> cells = path.cells();
             // The margin at the pump — the path's first entry — is this run's WHOLE reach, and so
-            // the span the colour ramp normalizes over (see Ramp).
+            // the span the colour ramp normalizes over (see rampColor).
             float reach = cells.get(0).margin();
             for (int i = 0; i < cells.size(); i++) {
                 PumpRangePayload.RangeCell cell = cells.get(i);
@@ -157,41 +229,71 @@ public final class PumpRangeRenderer {
                 } else if (cell.margin() < 0) {
                     continue; // level stretch, past the limit: out of reach, all of it
                 }
-                Ramp ramp = new Ramp(limit, reach, push);
-                tint(poseStack, mc, buf, BlockPos.of(cell.pos()), low, high, ramp, alpha);
+                if (!bake.first(cell.pos())) continue;
+                bakeCell(bake, mc, BlockPos.of(cell.pos()), low, high,
+                        rampColor(cell.margin(), reach));
             }
         }
-        OWN_BUFFER.endBatch();
-        poseStack.popPose();
+        return bake.done();
+    }
+
+    /** The growable vertex sink a bake writes into, and the set of positions it has already done. */
+    private static final class Bake {
+        private final FloatArrayList vertices = new FloatArrayList();
+        private final IntArrayList colors = new IntArrayList();
+        private final LongOpenHashSet painted = new LongOpenHashSet();
+
+        /** Whether this position is being painted for the first time this bake. */
+        boolean first(long pos) {
+            return painted.add(pos);
+        }
+
+        /** One vertex: model-local geometry lifted into world space, its texture, normal and colour. */
+        void vertex(Vec3 at, BlockPos cell, float u, float v, Direction facing, Rgb color) {
+            vertices.add((float) at.x + cell.getX());
+            vertices.add((float) at.y + cell.getY());
+            vertices.add((float) at.z + cell.getZ());
+            vertices.add(u);
+            vertices.add(v);
+            vertices.add(facing.getStepX());
+            vertices.add(facing.getStepY());
+            vertices.add(facing.getStepZ());
+            colors.add(color.r() << 16 | color.g() << 8 | color.b());
+        }
+
+        ReachMesh done() {
+            return new ReachMesh(vertices.toFloatArray(), colors.toIntArray());
+        }
     }
 
     /**
-     * The colour ramp over one cell: green where the pump stands, warming through amber to red at
-     * the limit — how much of the reach is spent by the time fluid is up (or down) here. Both
-     * bounds are elevations, so the colour is a function of ELEVATION and is evaluated PER VERTEX:
-     * the ramp runs continuously up the run instead of stepping once per pipe, and a cut cell
-     * fades into its cut edge rather than ending on a flat block of colour.
+     * One cell's colour: green where the pump stands, warming through amber to red at the limit —
+     * how much of this run's reach is spent by the time fluid is up (or down) HERE. {@code margin}
+     * is the blocks of reach left at the cell, {@code reach} the margin at the pump, which is the
+     * path's first entry and so this run's whole reach.
      *
-     * {@code limit} is the limit's height in the cell's own block-local frame and {@code reach}
-     * the blocks of margin at the pump — the path's first entry, which is THIS run's whole reach.
      * Normalizing over that, never a fixed band, is the trap the first ramp fell into (2026-07-31):
      * every cell more than the band's width clear of the limit clamped to full saturation, the
      * overlay read as one flat colour, and it silently swallowed a correct fix to the pull-side
      * quantity ("it looks exactly the same").
      *
-     * A consequence worth expecting: a LEVEL stretch is one uniform colour, because every cell of
-     * it really is equally far from the limit. The ramp develops as the run climbs or descends,
-     * which is exactly where the reach is being spent.
+     * A cell is ONE colour, taken from the very margin the walk reported for it — the number
+     * {@code /pipegraph} prints, so the tint and the dump can never say different things. Shading
+     * WITHIN a cell instead asks the ramp about the pipe's MODEL rather than about the run: a
+     * pipe's connection stubs span the whole block, so wherever the reach is SHORT one cell covers
+     * the entire green-to-red sweep. A dry suction line is exactly that — a pump establishes
+     * through one on a tenth of its head, half a block at 16 RPM — and a riser came out SAWTOOTHED,
+     * every pipe red at its foot and green at its head (2026-08-26, after a first pass that
+     * unified only LEVEL cells and left the climbing ones striped). The cost is that a long climb
+     * steps once per pipe instead of shading continuously; at any reach worth painting that is a
+     * fraction of the ramp per step and still reads as a gradient.
      */
-    private record Ramp(float limit, float reach, boolean push) {
-        Rgb colorAt(double blockLocalY) {
-            if (reach <= 1e-3) return LIMIT_COLOR;
-            double margin = push ? limit - blockLocalY : blockLocalY - limit;
-            double spent = 1 - Math.clamp(margin / reach, 0, 1);
-            return spent < 0.5
-                    ? mix(REACH_COLOR, HALFWAY_COLOR, spent * 2)
-                    : mix(HALFWAY_COLOR, LIMIT_COLOR, (spent - 0.5) * 2);
-        }
+    private static Rgb rampColor(float margin, float reach) {
+        if (reach <= 1e-3) return LIMIT_COLOR;
+        double spent = 1 - Math.clamp(margin / reach, 0, 1);
+        return spent < 0.5
+                ? mix(REACH_COLOR, HALFWAY_COLOR, spent * 2)
+                : mix(HALFWAY_COLOR, LIMIT_COLOR, (spent - 0.5) * 2);
     }
 
     /** Two colours blended {@code t} of the way from one to the other, per channel. */
@@ -219,9 +321,9 @@ public final class PumpRangeRenderer {
                 || (index + 1 < cells.size() && BlockPos.of(cells.get(index + 1).pos()).getY() != y);
     }
 
-    /** Re-emits one block's baked model, tinted and cut down to the band between two planes. */
-    private static void tint(PoseStack poseStack, Minecraft mc, VertexConsumer buf,
-                             BlockPos pos, float low, float high, Ramp ramp, float alpha) {
+    /** Bakes one block's model, tinted and cut down to the band between two planes. */
+    private static void bakeCell(Bake bake, Minecraft mc, BlockPos pos,
+                                 float low, float high, Rgb color) {
         BlockState state = mc.level.getBlockState(pos);
         if (state.isAir()) return;
         BakedModel model = mc.getBlockRenderer().getBlockModel(state);
@@ -233,21 +335,15 @@ public final class PumpRangeRenderer {
         // A null render type likewise takes ALL of the model's layers, not just one.
         ModelData data = model.getModelData(mc.level, pos, state, blockEntityData(mc, pos));
 
-        poseStack.pushPose();
-        poseStack.translate(pos.getX(), pos.getY(), pos.getZ());
-
         // Seeded exactly as the block itself renders, so a multi-variant model tints the variant
         // actually on screen rather than a different roll of the same model.
         RandomSource random = RandomSource.create();
         for (Direction face : Direction.values()) {
             random.setSeed(state.getSeed(pos));
-            emit(poseStack, buf, model.getQuads(state, face, random, data, null),
-                    low, high, ramp, alpha);
+            bakeQuads(bake, pos, model.getQuads(state, face, random, data, null), low, high, color);
         }
         random.setSeed(state.getSeed(pos));
-        emit(poseStack, buf, model.getQuads(state, null, random, data, null),
-                low, high, ramp, alpha);
-        poseStack.popPose();
+        bakeQuads(bake, pos, model.getQuads(state, null, random, data, null), low, high, color);
     }
 
     /** The block entity's own model data — the raw input a model enriches into its real data. */
@@ -259,13 +355,13 @@ public final class PumpRangeRenderer {
     }
 
     /**
-     * Emits the quads of one cell, each cut to the band and shaded PER VERTEX off the ramp, so the
-     * colour runs smoothly up the run instead of stepping once per pipe. Written vertex by vertex
-     * rather than through {@code putBulkData}, which takes ONE colour for the whole quad; the
-     * geometry, UVs and face normal are the model's own, only the colour is ours.
+     * Bakes the quads of one cell, each cut to its band and carrying the cell's own colour. Written
+     * vertex by vertex rather than through {@code putBulkData} (which takes one colour per quad and
+     * cannot feed a flat mesh); the geometry, UVs and face normal are the model's own, only the
+     * colour is ours.
      */
-    private static void emit(PoseStack poseStack, VertexConsumer buf, List<BakedQuad> quads,
-                             float low, float high, Ramp ramp, float alpha) {
+    private static void bakeQuads(Bake bake, BlockPos pos, List<BakedQuad> quads,
+                                  float low, float high, Rgb color) {
         for (BakedQuad quad : quads) {
             BakedQuad shown = cutAt(quad, low, false);
             if (shown != null) shown = cutAt(shown, high, true);
@@ -274,14 +370,8 @@ public final class PumpRangeRenderer {
             Direction facing = shown.getDirection();
             for (int i = 0; i < 4; i++) {
                 Vec3 at = BakedQuadHelper.getXYZ(vertices, i);
-                Rgb color = ramp.colorAt(at.y);
-                buf.addVertex(poseStack.last(), (float) at.x, (float) at.y, (float) at.z)
-                        .setColor(color.r() / 255f, color.g() / 255f, color.b() / 255f, alpha)
-                        .setUv(BakedQuadHelper.getU(vertices, i), BakedQuadHelper.getV(vertices, i))
-                        .setOverlay(OverlayTexture.NO_OVERLAY)
-                        .setLight(ArrowRender.FULL_BRIGHTNESS)
-                        .setNormal(poseStack.last(),
-                                facing.getStepX(), facing.getStepY(), facing.getStepZ());
+                bake.vertex(at, pos, BakedQuadHelper.getU(vertices, i),
+                        BakedQuadHelper.getV(vertices, i), facing, color);
             }
         }
     }

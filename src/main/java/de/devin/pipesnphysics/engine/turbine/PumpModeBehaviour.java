@@ -4,9 +4,11 @@ import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.BehaviourType;
 import com.simibubi.create.foundation.blockEntity.behaviour.ValueBoxTransform;
 import com.simibubi.create.foundation.blockEntity.behaviour.scrollValue.ScrollOptionBehaviour;
+import de.devin.pipesnphysics.client.DialSlot;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.item.ItemStack;
 
 /**
  * The Mechanical Pump's role dial: PUMP (the default) or TURBINE. A {@link ScrollOptionBehaviour}
@@ -52,5 +54,17 @@ public class PumpModeBehaviour extends ScrollOptionBehaviour<PumpMode> {
     @Override
     public int netId() {
         return 14;
+    }
+
+    /**
+     * Stand aside for Create's right-click placement: with a cogwheel (or anything else a
+     * placement helper acts on) in hand, the click is meant to place a block, not open this dial.
+     * Create asks this FIRST in its value-settings handler, so answering true leaves the event
+     * uncancelled and the item's own {@code onItemUseFirst} runs. {@link DialSlot} hides the box
+     * to match — see there for why both halves are needed.
+     */
+    @Override
+    public boolean bypassesInput(ItemStack mainhandItem) {
+        return DialSlot.wouldPlace(mainhandItem, blockEntity.getBlockState());
     }
 }

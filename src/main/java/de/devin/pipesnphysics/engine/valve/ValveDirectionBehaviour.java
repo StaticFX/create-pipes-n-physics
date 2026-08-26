@@ -9,6 +9,7 @@ import com.simibubi.create.foundation.blockEntity.behaviour.ValueSettingsBehavio
 import com.simibubi.create.foundation.blockEntity.behaviour.ValueSettingsBoard;
 import com.simibubi.create.foundation.blockEntity.behaviour.ValueSettingsFormatter.ScrollOptionSettingsFormatter;
 import com.simibubi.create.foundation.blockEntity.behaviour.scrollValue.ScrollOptionBehaviour;
+import de.devin.pipesnphysics.client.DialSlot;
 import de.devin.pipesnphysics.client.ValveArrowClient;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
@@ -16,6 +17,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
@@ -142,5 +144,11 @@ public class ValveDirectionBehaviour extends ScrollOptionBehaviour<ValveFlowMode
     @Override
     public String getClipboardKey() {
         return "ValveDirection";
+    }
+
+    /** Stand aside for Create's right-click placement, exactly as the pump's dial does. */
+    @Override
+    public boolean bypassesInput(ItemStack mainhandItem) {
+        return DialSlot.wouldPlace(mainhandItem, blockEntity.getBlockState());
     }
 }

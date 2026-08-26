@@ -6,6 +6,7 @@ import de.devin.pipesnphysics.engine.Solution;
 import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.graph.PipeGeometry;
+import de.devin.pipesnphysics.engine.store.PipeGates;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
@@ -87,6 +88,8 @@ final class SettlingRun {
     private final int hysteresisMb;
     /** Settling a lighter-than-air gas: every elevation below reads through the mirrored frame. */
     private boolean mirrored;
+    /** The fluid this run is settling — what the pipe GATES along it are asked about. */
+    private FluidStack medium = FluidStack.EMPTY;
 
     SettlingRun(FlowNetwork network, FlowLedger ledger, Solution solution, Edge edge, boolean fillOnly) {
         this.network = network;
@@ -113,7 +116,8 @@ final class SettlingRun {
         // Y, so the SAME target/walk machinery pools it upward and pours it into the vessel
         // ABOVE. A held (fill-only) gas column stays frozen — its packing target is the display
         // CEILING field, which mixes heads with elevations the mirror cannot read.
-        mirrored = lighterThanAir(settleMedium());
+        medium = settleMedium();
+        mirrored = lighterThanAir(medium);
         if (mirrored && fillOnly) return false;
 
         // A ZERO-CELL edge is a wire: it holds no column, so there is no profile to settle toward.
@@ -164,7 +168,8 @@ final class SettlingRun {
         // top toward the interface profile while the brigade flows — without this, flowing gas
         // rode at plug-flow depth and its hanging fill visibly missed the tank's interface until
         // the flow stopped ("the gas heights inside the pipe and the tank don't match").
-        mirrored = lighterThanAir(settleMedium());
+        medium = settleMedium();
+        mirrored = lighterThanAir(medium);
         Double lineA = restingLine(edge.a(), edge.b());
         Double lineB = restingLine(edge.b(), edge.a());
         if (lineA == null && lineB == null) return false;
@@ -193,7 +198,8 @@ final class SettlingRun {
      */
     boolean shed(int depthFloorMb) {
         if (cells.isEmpty()) return false;
-        mirrored = lighterThanAir(settleMedium());
+        medium = settleMedium();
+        mirrored = lighterThanAir(medium);
         if (mirrored) return false;
         // A pump-adjacent run is pressure/suction-driven, not a gravity conduit: a discharge
         // line legitimately packs full-bore and shedding a suction line back into its source
@@ -322,6 +328,7 @@ final class SettlingRun {
         for (int step = 0; step < cells.size(); step++) {
             int i = fromB ? cells.size() - 1 - step : step;
             BlockPos pos = cells.get(i);
+            if (!conductsInto(i, fromB, pressed)) return false;                // gated: never meet
             PipeStore.Store cell = network.cellAt(pos);
             if (cell == null || cell.amount() <= 0) return false;              // dry gap: no contact
             if (FluidStack.isSameFluidSameComponents(cell.fluid(), pressed)) continue; // own column
@@ -555,16 +562,20 @@ final class SettlingRun {
         if (reservoir == null || !reservoir.isFiniteReservoir() || !reservoir.holdsFluid()) return false;
         BlockPos endCell = fromB ? cells.getLast() : cells.getFirst();
         if (surfaceOf(reservoir) <= windowLow(endCell)) return false;
+        FluidStack supplied = settleFluid(reservoir);
         for (int step = 0; step < cells.size(); step++) {
             int i = fromB ? cells.size() - 1 - step : step;
             PipeStore.Store cell = network.cellAt(cells.get(i));
             if (cell == null || target[i] <= 0) return false; // dry-target cell: stops conducting
+            // What would cross this boundary: the cell's own column where it has one, else what
+            // the reservoir would put in it. A pipe gate rejecting it walls the walk right here.
+            FluidStack want = cell.amount() > 0 ? cell.fluid() : supplied;
+            if (!conductsInto(i, fromB, want)) return false;
             int deficit = target[i] - cell.amount();
             // The hysteresis band guards PARTIAL targets (they wobble with the tank's own
             // surface); a full-cell target is clamped and cannot wobble, so it tops off exactly —
             // otherwise a run whose flow stopped mid-fill sits forever a few mB short.
             if (deficit > hysteresisMb || (target[i] >= network.cellCapacity && deficit > 0)) {
-                FluidStack want = cell.amount() > 0 ? cell.fluid() : settleFluid(reservoir);
                 if (want.isEmpty() || cell.room(want) <= 0) return false;
                 int got = reservoir.drain(want, Math.min(deficit, rate));
                 if (got <= 0) return false;
@@ -592,6 +603,7 @@ final class SettlingRun {
             int i = fromB ? cells.size() - 1 - step : step;
             PipeStore.Store cell = network.cellAt(cells.get(i));
             if (cell == null) return false;
+            if (!conductsInto(i, fromB, cell.fluid())) return false; // a gate walls the pour here
             int excess = cell.amount() - target[i];
             if (excess > 0) {
                 int move = excess <= Reservoir.DREGS_MB ? excess : Math.min(excess, rate);
@@ -652,12 +664,16 @@ final class SettlingRun {
                 if (source == null || !pumpMayDraw(source, supply, nodeIndex)) continue;
                 fluid = cell.amount() > 0 ? cell.fluid() : source.contents();
                 if (fluid.isEmpty() || cell.room(fluid) <= 0) continue;
+                if (!endOpens(!atA, fluid)) continue;
                 got = source.drain(fluid, want);
             } else {
-                PipeStore.Store feed = network.cellAt(
-                        PipeGeometry.adjacentCell(network.graph, supply, nodeIndex));
+                BlockPos flank = PipeGeometry.adjacentCell(network.graph, supply, nodeIndex);
+                PipeStore.Store feed = network.cellAt(flank);
                 if (feed == null || feed.amount() <= 0) continue;
                 fluid = feed.fluid();
+                // A gate on either flank walls the pump exactly as it walls a run: it can neither
+                // lift a fluid its suction pipe rejects nor pack one its outlet pipe rejects.
+                if (!crossesPump(pump, flank, fluid) || !endOpens(!atA, fluid)) continue;
                 // A running pump packing its supply fluid into an outlet cell holding a DIFFERENT one
                 // is crossing the streams (a dead-headed pump has no brigade run to catch it).
                 if (network.collides(endCell, cell, fluid)) return true;
@@ -723,6 +739,9 @@ final class SettlingRun {
             PipeStore.Store feed = source != null ? null : feedCell(supply, pump.index());
             FluidStack fluid = column.isEmpty() ? offeredBy(source, feed) : column;
             if (fluid.isEmpty()) continue;
+            // Delivering ON THROUGH the outlet column crosses every one of its boundaries, so a
+            // gate anywhere along it stops the pump as hard as a shut valve would.
+            if (!conductsThroughRun(fluid)) continue;
             int want = sink.probeFill(fluid, cap);
             if (want <= 0) return false;
             int got;
@@ -755,12 +774,20 @@ final class SettlingRun {
      * behind it — the pump empties the cell at its flank every tick, and the anti-slosh gate then
      * refuses to hand the remainder across ("why does this pump not drain the pipe behind it
      * empty" ended at 4 mB in the far cell). The walk is {@link #firstWetCell}'s: it crosses
-     * emptied cells but never a dry rise.
+     * emptied cells but never a dry rise — nor a shut gate, here or at the pump's own flank.
      */
     private PipeStore.Store feedCell(Edge supply, int pumpIndex) {
         List<BlockPos> pipes = supply.pipes();
         BlockPos wet = firstWetCell(pumpIndex == supply.a() ? pipes : pipes.reversed());
-        return wet == null ? null : network.cellAt(wet);
+        if (wet == null) return null;
+        PipeStore.Store cell = network.cellAt(wet);
+        BlockPos flank = PipeGeometry.adjacentCell(network.graph, supply, pumpIndex);
+        return crossesPump(network.graph.node(pumpIndex), flank, cell.fluid()) ? cell : null;
+    }
+
+    /** Whether {@code fluid} may pass between a pump and the cell on one of its flanks. */
+    private boolean crossesPump(Node pump, BlockPos flank, FluidStack fluid) {
+        return flank != null && PipeGates.admits(network.level, flank, pump.pos(), fluid);
     }
 
     /**
@@ -813,6 +840,49 @@ final class SettlingRun {
         return moved;
     }
 
+    // ------------------------------------------------------------------- the pipe gates
+    // A cell that REJECTS a fluid — a smart pipe's filter, a shut valve, any pipe with an opinion
+    // of its own — is a WALL for it. The solve refuses to assemble a branch through such a run
+    // ({@code FluidPass.runAcceptsFluid}); the settle knows only elevations, so without the same
+    // wall it walked a rejected fluid straight through the filter cell and, with an open mouth at
+    // the far end, poured it into the world ("I put the diesel in the basin and it went through
+    // the smart pipe"). Every move here crosses a boundary, and every boundary asks this.
+
+    /** The position at run index {@code i}: a cell, or the end NODE just past either end. */
+    private BlockPos at(int i) {
+        if (i < 0) return network.graph.node(edge.a()).pos();
+        if (i >= cells.size()) return network.graph.node(edge.b()).pos();
+        return cells.get(i);
+    }
+
+    /**
+     * Whether {@code fluid} may cross between the adjacent run positions {@code i} and {@code j}.
+     * A boundary onto an END node is one-sided — only the run's own cell carries a gate there.
+     */
+    private boolean conducts(int i, int j, FluidStack fluid) {
+        if (i < 0 || i >= cells.size()) return PipeGates.admits(network.level, at(j), at(i), fluid);
+        if (j < 0 || j >= cells.size()) return PipeGates.admits(network.level, at(i), at(j), fluid);
+        return PipeGates.conducts(network.level, at(i), at(j), fluid);
+    }
+
+    /** Whether {@code fluid} may cross INTO cell {@code i} from the end the walk came in from. */
+    private boolean conductsInto(int i, boolean fromB, FluidStack fluid) {
+        return conducts(fromB ? i + 1 : i - 1, i, fluid);
+    }
+
+    /** Whether {@code fluid} may cross the opening between one END node and its own end cell. */
+    private boolean endOpens(boolean fromB, FluidStack fluid) {
+        return conductsInto(fromB ? cells.size() - 1 : 0, fromB, fluid);
+    }
+
+    /** Whether {@code fluid} may travel this whole run, end node to end node. */
+    private boolean conductsThroughRun(FluidStack fluid) {
+        for (int boundary = 0; boundary <= cells.size(); boundary++) {
+            if (!conducts(boundary - 1, boundary, fluid)) return false;
+        }
+        return true;
+    }
+
     // ---------------------------------------------------------------- single moves
 
     /** Move from an above-target cell into an adjacent below-target one, rate-limited. */
@@ -825,7 +895,7 @@ final class SettlingRun {
         if (excess <= 0 || deficit <= 0) return false;
         int move = Math.min(Math.min(excess, deficit), rate);
         if (excess <= Reservoir.DREGS_MB) move = Math.min(excess, deficit); // dregs leave at once
-        return moveBetween(from, to, move);
+        return moveBetween(fromPos, toPos, move);
     }
 
     /** Let a cell's above-target fluid fall into a strictly LOWER in-frame neighbour with room. */
@@ -836,7 +906,7 @@ final class SettlingRun {
         if (from == null || to == null) return false;
         int excess = from.amount() - fromTarget;
         if (excess <= 0) return false;
-        return moveBetween(from, to, Math.min(excess, rate));
+        return moveBetween(fromPos, toPos, Math.min(excess, rate));
     }
 
     /** Level out above-target fluid between SAME-HEIGHT neighbours (water runs flat). */
@@ -850,7 +920,7 @@ final class SettlingRun {
         int excess = from.amount() - fromTarget;
         int diff = from.amount() - to.amount();
         if (excess <= 0 || diff <= Reservoir.DREGS_MB) return false;
-        return moveBetween(from, to, Math.min(Math.min(excess, diff / 2), rate));
+        return moveBetween(fromPos, toPos, Math.min(Math.min(excess, diff / 2), rate));
     }
 
     /** A headless run's plain-gravity trickle (no targets: anything runs downhill in-frame). */
@@ -859,7 +929,7 @@ final class SettlingRun {
         PipeStore.Store from = network.cellAt(fromPos);
         PipeStore.Store to = network.cellAt(toPos);
         if (from == null || to == null) return false;
-        return moveBetween(from, to, Math.min(from.amount(), rate));
+        return moveBetween(fromPos, toPos, Math.min(from.amount(), rate));
     }
 
     /**
@@ -875,11 +945,12 @@ final class SettlingRun {
         int i = firstWetCellFrom(fromB);
         if (i < 0) return false;
         BlockPos pos = cells.get(i);
+        PipeStore.Store cell = network.cellAt(pos);
+        if (!endOpens(fromB, cell.fluid())) return false;
         double mouthY = cellMid(network.graph.node(nodeIndex).pos());
         if (mouthY > cellMid(pos) + SURFACE_EPS) {
             return false; // the mouth sits above in-frame: gravity keeps the fluid in the pipe
         }
-        PipeStore.Store cell = network.cellAt(pos);
         int move = cell.amount() <= Reservoir.DREGS_MB ? cell.amount() : Math.min(cell.amount(), rate);
         int poured = mouth.fill(cell.fluid(), move);
         if (poured <= 0) return false;
@@ -902,6 +973,7 @@ final class SettlingRun {
         if (i < 0) return false;
         BlockPos pos = cells.get(i);
         PipeStore.Store cell = network.cellAt(pos);
+        if (!endOpens(fromB, cell.fluid())) return false;
         double cellSurface = windowLow(pos)
                 + cell.amount() / (double) network.cellCapacity * network.windowHeight(pos);
         if (cellSurface <= surfaceOf(reservoir) + SURFACE_EPS) return false;
@@ -928,22 +1000,31 @@ final class SettlingRun {
      * level pair, so anything reading only the cell at its own end strands a film one cell short
      * of itself forever. The walk never climbs, though — an empty cell whose floor sits above the
      * wet cell it leads to is a dry rise the fluid cannot cross (an air gap, not a channel).
+     * Neither does it cross a shut GATE: an empty cell that rejects the fluid it would carry (a
+     * smart pipe's filter) walls the walk off exactly as a full one would.
      */
     private BlockPos firstWetCell(List<BlockPos> path) {
         double pathFloor = Double.NEGATIVE_INFINITY;
-        for (BlockPos pos : path) {
+        for (int i = 0; i < path.size(); i++) {
+            BlockPos pos = path.get(i);
             PipeStore.Store cell = network.cellAt(pos);
             if (cell == null) return null;
             if (cell.amount() > 0) {
-                return pathFloor > windowLow(pos) + SURFACE_EPS ? null : pos;
+                if (pathFloor > windowLow(pos) + SURFACE_EPS) return null;
+                return PipeGates.conductsAlong(network.level, path.subList(0, i + 1), cell.fluid())
+                        ? pos : null;
             }
             pathFloor = Math.max(pathFloor, windowLow(pos));
         }
         return null;
     }
 
-    private boolean moveBetween(PipeStore.Store from, PipeStore.Store to, int amount) {
-        return from.moveInto(to, amount) > 0;
+    /** The one cell-to-cell move: rate already decided, the boundary's own gate the last word. */
+    private boolean moveBetween(BlockPos fromPos, BlockPos toPos, int amount) {
+        if (!PipeGates.conducts(network.level, fromPos, toPos, medium)) return false;
+        PipeStore.Store from = network.cellAt(fromPos);
+        PipeStore.Store to = network.cellAt(toPos);
+        return from != null && to != null && from.moveInto(to, amount) > 0;
     }
 
     /** The fluid this run settles with: its own content, the solved rest fluid, or the reservoir's. */

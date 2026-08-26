@@ -378,30 +378,33 @@ public final class FlowSolver {
         return statics;
     }
 
+
     /**
-     * The DEEPEST elevation a supply may sit at and still be drawn through {@code edge}. This is
-     * the pull-side limit the pump reach overlay paints toward, and it lives here so it is the
-     * SAME rule the solve's crest gate applies ({@code NetworkSolver.crestFactor}) rather than a
-     * second copy of it drifting apart from it.
+     * The deepest elevation a supply may sit at for a pump drawing through ONE pipe cell: a WET
+     * cell already holds a column and sustains a full suction limit below it, a DRY one has to be
+     * ESTABLISHED, which a pump manages only on its pulling share and only below the cell's own
+     * weir LIP. This is the rule the solve's own crest gate applies ({@code NetworkSolver.crestFactor}),
+     * read one CELL at a time: a walk takes the running maximum over the cells it crosses, which for
+     * a single run is that run's crest and for a path across several is the worst of them.
      *
-     * A PRIMED column may hang the suction limit below the run's crest. A DRY one cannot be
-     * CREATED that way — suction holds a column, it never makes one — so nothing below the crest
-     * cell's lip is drawable except the little a running pump can evacuate on its own pulling
-     * share ({@code primeAllowance}, from {@link #pumpPrimeAllowance}). That difference is the
-     * whole reason a pump parked well above the waterline with a dry riser reaches nothing,
-     * however deep its nominal suction limit would allow. An edge with no cells has no crest and
-     * answers {@code fallback}.
-     *
-     * Multi-edge suction paths are approximated per edge: the binding crest is really the highest
-     * cell along the whole path, which for the single-run case (the common one) is the same thing.
+     * A JUNCTION is such a cell: it is a real pipe block holding a real slot, but the graph
+     * contracts runs BETWEEN junctions, so a hop from one junction to the next is an edge with no
+     * cells at all and no crest of its own. In a lattice — where every pipe has three or more
+     * connections, so nearly every edge is zero-length — reading the crest per edge therefore
+     * reported almost no gate at all (the bare {@code pumpY − SUCTION_LIMIT} fallback), while the
+     * few real runs beside them reported the true half-block. Adjacent pipes then came out red
+     * next to green with nothing to explain it (reported 2026-08-26; the tell is a `/pipegraph`
+     * pump reading `pull 8.00 ↓` on a bone-dry network).
      */
-    public static double drawableFloor(Level level, Graph graph, Edge edge, double fallback,
-                                       double primeAllowance) {
-        EdgeStatics statics = edgeStatics(level, graph, edge);
-        if (Double.isNaN(statics.crestHeight())) return fallback;
+    public static double drawableFloorAt(Level level, BlockPos cell, double primeAllowance) {
         double suction = PipesNPhysicsConfig.SUCTION_LIMIT.get();
-        if (statics.crestWet()) return statics.crestHeight() - suction;
-        return statics.crestFloor() - Math.min(primeAllowance, suction);
+        boolean wet = true;
+        if (PipeStore.capacityMb() > 0) {
+            PipeStore.Store store = PipeStore.at(level, cell);
+            wet = store != null && store.amount() > 0;
+        }
+        return wet ? SableCompat.getWorldY(level, cell) - suction
+                : PipeWindow.lipY(level, cell) - Math.min(primeAllowance, suction);
     }
 
     /**

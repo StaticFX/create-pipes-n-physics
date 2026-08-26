@@ -1,5 +1,6 @@
 package de.devin.pipesnphysics.engine.flow;
 
+import de.devin.pipesnphysics.api.EndpointApi;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
 import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
 import de.devin.pipesnphysics.engine.boundary.RelayDetector;
@@ -44,7 +45,7 @@ public final class Reservoir {
      * fluid from nothing) and only its own fluid (a foreign-fluid probe corrupts the mouth buffer).
      */
     int drain(FluidStack fluid, int amount) {
-        if (column.isBottomlessSink()) return 0;
+        if (column.isBottomlessSink() || vetoed(fluid)) return 0;
         if (column.isOpenEnd()) {
             if (!FluidStack.isSameFluidSameComponents(column.contents(), fluid)) return 0;
             amount = Math.min(amount, column.contentMb());
@@ -72,7 +73,7 @@ public final class Reservoir {
      * the anti-reclaim cooldown); one into a hose pulley pins it as a one-way output sink.
      */
     int fill(FluidStack fluid, int amount) {
-        if (column.isInfiniteSource()) return 0;
+        if (column.isInfiniteSource() || vetoed(fluid)) return 0;
         amount = Math.min(amount, takeRemaining);
         if (amount <= 0) return 0;
         IFluidHandler handler = column.handler(level);
@@ -103,6 +104,7 @@ public final class Reservoir {
      * "flows shortly, stops" limit cycle at the lip equilibrium).
      */
     int probeSupply(FluidStack fluid, int amount) {
+        if (vetoed(fluid)) return 0;
         if (column.isInfiniteSource()) return amount;
         if (column.isBottomlessSink()) return 0;
         IFluidHandler handler = column.handler(level);
@@ -116,7 +118,7 @@ public final class Reservoir {
 
     /** How much the sink side would still accept this tick (probe, no fluid moves). */
     int probeFill(FluidStack fluid, int amount) {
-        if (column.isInfiniteSource()) return 0; // one-way: never a sink (kept in step with fill)
+        if (column.isInfiniteSource() || vetoed(fluid)) return 0; // kept in step with fill
         amount = Math.min(amount, takeRemaining);
         if (amount <= 0) return 0;
         IFluidHandler handler = column.handler(level);
@@ -140,6 +142,18 @@ public final class Reservoir {
             if (!level.isClientSide()) RelayDetector.recordApplied(column.accessPos(), filled);
         }
         return filled;
+    }
+
+    /**
+     * Whether an addon's {@link EndpointApi} filter vetoes this fluid at this endpoint. Enforced
+     * HERE, where fluid crosses the boundary, and not only in the solve's participation test: the
+     * settle phases move fluid the solve never planned by design (a pump packing a dead-headed
+     * line, a run pouring back into its tank), so a solve-only veto would leak through them —
+     * the same lesson as the one-way columns and the pipe gates. A refund is exempt on purpose:
+     * it puts back fluid that never really left.
+     */
+    private boolean vetoed(FluidStack fluid) {
+        return !EndpointApi.allows(level, column.identity(), fluid);
     }
 
     /**
