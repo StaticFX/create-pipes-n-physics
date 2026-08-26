@@ -67,9 +67,9 @@ import java.util.List;
  * The paint is each pipe's OWN baked model re-drawn a hair larger and tinted, rather than a
  * shell built around it — so elbows, connection stubs and encasing are all followed exactly,
  * which no hand-built geometry can manage. BOTH sides ramp green→amber→red toward their limit
- * ({@link #rampColor}), one colour per cell taken from that cell's own reported margin. That ramp
- * measures the reach LEFT — still the "how far does this pump go" question, read at every pipe
- * instead of only where the paint stops. It is not the encoding
+ * ({@link #rampColor}), shaded smoothly up a climbing run and flat across a cell whose bound is
+ * its own ({@link #shadingFor}). That ramp measures the reach LEFT — still the "how far does this
+ * pump go" question, read at every pipe instead of only where the paint stops. It is not the encoding
  * reverted on 2026-07-31: those ramped by how hard the pump was WORKING, competed with the
  * in-pipe fluid, and read as a promise about throughput.
  *
@@ -231,7 +231,7 @@ public final class PumpRangeRenderer {
                 }
                 if (!bake.first(cell.pos())) continue;
                 bakeCell(bake, mc, BlockPos.of(cell.pos()), low, high,
-                        rampColor(cell.margin(), reach));
+                        shadingFor(cells, i, limit, reach, push));
             }
         }
         return bake.done();
@@ -296,6 +296,84 @@ public final class PumpRangeRenderer {
                 : mix(HALFWAY_COLOR, LIMIT_COLOR, (spent - 0.5) * 2);
     }
 
+    /**
+     * How one cell is coloured: SMOOTHLY, the ramp read per vertex so the colour runs continuously
+     * up a climbing run, or FLAT, one colour from the cell's own reported margin.
+     *
+     * Smooth is only meaningful where the quantity it interpolates is actually continuous, which
+     * takes both of the conditions in {@link #shadingFor}. Where it is not, per-vertex shading
+     * draws the discontinuity as a repeating sweep — a SAWTOOTHED riser, every pipe red at its
+     * foot and green at its head.
+     */
+    private record Shading(Rgb flat, float limit, float reach, boolean push) {
+        static Shading flat(Rgb color) {
+            return new Shading(color, 0, 0, false);
+        }
+
+        static Shading smooth(float limit, float reach, boolean push) {
+            return new Shading(null, limit, reach, push);
+        }
+
+        Rgb at(double blockLocalY) {
+            if (flat != null) return flat;
+            return rampColor((float) (push ? limit - blockLocalY : blockLocalY - limit), reach);
+        }
+    }
+
+    /**
+     * Whether this cell shades smoothly or takes one colour. TWO things have to hold, and each
+     * cost a report:
+     *
+     * (1) the run CLIMBS through it, so there is a real elevation change along the run to shade
+     * along. On a LEVEL cell the only thing varying is the pipe's own model — its connection stubs
+     * span the whole block — so shading there paints a vertical gradient onto a horizontal pipe,
+     * cell after cell down the stretch; and
+     *
+     * (2) the LIMIT is shared with a neighbour on the path. A bound that changes per cell makes
+     * the margin discontinuous at every boundary, and interpolating inside the cell then fabricates
+     * a full ramp per block. An ASCENDING SUCTION run is exactly that: the drawable floor tightens
+     * at every cell (each one raises the crest the column must come over), so every cell reports
+     * the same small margin and the honest picture is one uniform colour — which is what flat
+     * gives. A DESCENDING suction run keeps one floor and shades smoothly, as does any push run,
+     * whose ceiling never moves.
+     */
+    private static Shading shadingFor(List<PumpRangePayload.RangeCell> cells, int index,
+                                      float limit, float reach, boolean push) {
+        if (climbsThrough(cells, index) && sharesLimit(cells, index, push)) {
+            return Shading.smooth(limit, reach, push);
+        }
+        return Shading.flat(rampColor(cells.get(index).margin(), reach));
+    }
+
+    /** The world elevation a cell's paint is bounded by — its ceiling pushing, its floor pulling. */
+    private static double limitOf(PumpRangePayload.RangeCell cell, boolean push) {
+        double y = BlockPos.of(cell.pos()).getY() + 0.5;
+        return push ? y + cell.margin() : y - cell.margin();
+    }
+
+    /**
+     * Whether a neighbouring PIPE on the path is bounded by the same elevation, so the ramp really
+     * is continuous across this cell.
+     *
+     * Only pipes count. A tank, a pump or an open mouth is not a cell the column passes through, so
+     * it folds nothing into the floor and simply INHERITS the limit of the last pipe before it —
+     * which made the top cell of an ascending suction run look like it shared its bound and shade
+     * smoothly over a half-block span: red at its foot, green at its head, on the highest pipe of
+     * every pull run ("it starts from red and then becomes green, always the highest pipe on the
+     * pull side", 2026-08-26). A matching limit is only evidence of continuity when it was arrived
+     * at independently.
+     */
+    private static boolean sharesLimit(List<PumpRangePayload.RangeCell> cells, int index, boolean push) {
+        double limit = limitOf(cells.get(index), push);
+        return sharesLimit(cells, index - 1, limit, push) || sharesLimit(cells, index + 1, limit, push);
+    }
+
+    private static boolean sharesLimit(List<PumpRangePayload.RangeCell> cells, int neighbour,
+                                       double limit, boolean push) {
+        if (neighbour < 0 || neighbour >= cells.size() || !cells.get(neighbour).pipe()) return false;
+        return Math.abs(limitOf(cells.get(neighbour), push) - limit) < 1e-3;
+    }
+
     /** Two colours blended {@code t} of the way from one to the other, per channel. */
     private static Rgb mix(Rgb from, Rgb to, double t) {
         return new Rgb((int) Mth.lerp(t, from.r(), to.r()),
@@ -323,7 +401,7 @@ public final class PumpRangeRenderer {
 
     /** Bakes one block's model, tinted and cut down to the band between two planes. */
     private static void bakeCell(Bake bake, Minecraft mc, BlockPos pos,
-                                 float low, float high, Rgb color) {
+                                 float low, float high, Shading shading) {
         BlockState state = mc.level.getBlockState(pos);
         if (state.isAir()) return;
         BakedModel model = mc.getBlockRenderer().getBlockModel(state);
@@ -340,10 +418,10 @@ public final class PumpRangeRenderer {
         RandomSource random = RandomSource.create();
         for (Direction face : Direction.values()) {
             random.setSeed(state.getSeed(pos));
-            bakeQuads(bake, pos, model.getQuads(state, face, random, data, null), low, high, color);
+            bakeQuads(bake, pos, model.getQuads(state, face, random, data, null), low, high, shading);
         }
         random.setSeed(state.getSeed(pos));
-        bakeQuads(bake, pos, model.getQuads(state, null, random, data, null), low, high, color);
+        bakeQuads(bake, pos, model.getQuads(state, null, random, data, null), low, high, shading);
     }
 
     /** The block entity's own model data — the raw input a model enriches into its real data. */
@@ -361,7 +439,7 @@ public final class PumpRangeRenderer {
      * colour is ours.
      */
     private static void bakeQuads(Bake bake, BlockPos pos, List<BakedQuad> quads,
-                                  float low, float high, Rgb color) {
+                                  float low, float high, Shading shading) {
         for (BakedQuad quad : quads) {
             BakedQuad shown = cutAt(quad, low, false);
             if (shown != null) shown = cutAt(shown, high, true);
@@ -371,7 +449,7 @@ public final class PumpRangeRenderer {
             for (int i = 0; i < 4; i++) {
                 Vec3 at = BakedQuadHelper.getXYZ(vertices, i);
                 bake.vertex(at, pos, BakedQuadHelper.getU(vertices, i),
-                        BakedQuadHelper.getV(vertices, i), facing, color);
+                        BakedQuadHelper.getV(vertices, i), facing, shading.at(at.y));
             }
         }
     }
