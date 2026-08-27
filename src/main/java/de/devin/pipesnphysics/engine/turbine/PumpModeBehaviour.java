@@ -4,11 +4,17 @@ import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.BehaviourType;
 import com.simibubi.create.foundation.blockEntity.behaviour.ValueBoxTransform;
 import com.simibubi.create.foundation.blockEntity.behaviour.scrollValue.ScrollOptionBehaviour;
+import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.client.DialSlot;
+import de.devin.pipesnphysics.engine.EngineTickHandler;
+import de.devin.pipesnphysics.engine.pump.Pumps;
+import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
 
 /**
  * The Mechanical Pump's role dial: PUMP (the default) or TURBINE. A {@link ScrollOptionBehaviour}
@@ -66,5 +72,35 @@ public class PumpModeBehaviour extends ScrollOptionBehaviour<PumpMode> {
     @Override
     public boolean bypassesInput(ItemStack mainhandItem) {
         return DialSlot.wouldPlace(mainhandItem, blockEntity.getBlockState());
+    }
+
+    /**
+     * A dial for this pump, ready to be attached. Built here rather than at the attach site because
+     * {@link de.devin.pipesnphysics.mixin.PumpDialMixin} attaches it for every pump — including one
+     * whose block entity REPLACES {@code addBehaviours} instead of extending it, which is how TFMG's
+     * electric pump ended up with no dial at all.
+     */
+    public static PumpModeBehaviour create(SmartBlockEntity be) {
+        PumpModeBehaviour mode = new PumpModeBehaviour(
+                Component.translatable("pipesnphysics.gui.pump.mode"), be,
+                new DialSlot(PumpModeBehaviour::isDialFace));
+        // Dialing the mode re-shapes what the solver sees at this block (an EMF source becomes a
+        // one-way resistance), so the callback wakes the network rather than waiting the heartbeat.
+        mode.withCallback(value -> {
+            Level level = be.getLevel();
+            if (level != null && !level.isClientSide()) {
+                EngineTickHandler.markChanged(level, be.getBlockPos());
+            }
+        }).onlyActiveWhen(PipesNPhysicsConfig.ENABLE_HYDRO_TURBINE);
+        // A pump PLACED from now on decides its own role; one loaded from a save without the key
+        // reads 0 = PUMP, so nothing already built changes under the player.
+        mode.value = PumpMode.AUTO.ordinal();
+        return mode;
+    }
+
+    /** The four faces square to the pump's own axis — the only ones a value box can live on. */
+    private static boolean isDialFace(BlockState state, Direction side) {
+        Direction facing = Pumps.facing(state);
+        return facing != null && side.getAxis() != facing.getAxis();
     }
 }

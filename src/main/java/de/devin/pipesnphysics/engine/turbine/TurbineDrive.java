@@ -23,11 +23,10 @@ public final class TurbineDrive {
     /** Sample every turbine on {@code graph}; call once per solve, after the transfers execute. */
     public static void drive(Level level, Graph graph, Solution solution) {
         for (Node pump : graph.pumps()) {
-            if (!(level.getBlockEntity(pump.pos()) instanceof HydroTurbine turbine)) continue;
-            if (!turbine.pipesnphysics$isTurbine()) continue;
+            if (!Turbines.isTurbine(level, pump.pos())) continue;
             Edge outlet = outletEdge(graph, pump);
             int moved = outlet == null ? 0 : PipeProbe.actualEdgeFlow(graph, solution, outlet);
-            turbine.pipesnphysics$driveTurbine(moved);
+            Turbines.drive(level, pump.pos(), moved);
         }
     }
 

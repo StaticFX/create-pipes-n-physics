@@ -4,11 +4,11 @@ import com.mojang.blaze3d.vertex.ByteBufferBuilder;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.simibubi.create.content.equipment.goggles.GogglesItem;
-import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.foundation.model.BakedQuadHelper;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.engine.net.PumpRangePayload;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
@@ -125,7 +125,8 @@ public final class PumpRangeRenderer {
         long now = mc.level.getGameTime();
         if (mc.hitResult instanceof BlockHitResult blockHit
                 && mc.hitResult.getType() == HitResult.Type.BLOCK
-                && mc.level.getBlockState(blockHit.getBlockPos()).getBlock() instanceof PumpBlock) {
+                && Pumps.isPump(mc.level, blockHit.getBlockPos(),
+                        mc.level.getBlockState(blockHit.getBlockPos()))) {
             PumpRangeClient.looking(blockHit.getBlockPos(), now);
         }
 

@@ -1,9 +1,9 @@
 package de.devin.pipesnphysics.mixin;
 
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
-import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import de.devin.pipesnphysics.engine.store.PipeFluidCell;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.handler.NetworkEditHandler;
@@ -48,7 +48,7 @@ public abstract class PipeContentCarryMixin {
         Level level = self.getLevel();
         if (level == null || level.isClientSide() || self.isVirtual()) return;
         if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return;
-        if (self.getBlockState().getBlock() instanceof PumpBlock) return; // pumps store nothing
+        if (Pumps.isPump(level, self.getBlockPos(), self.getBlockState())) return; // pumps store nothing
         if (!(self.getBehaviour(FluidTransportBehaviour.TYPE) instanceof PipeFluidCell)) return;
         PipeStore.Store cell = PipeStore.at(level, self.getBlockPos());
         if (cell == null) return;

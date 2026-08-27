@@ -15,6 +15,7 @@ import com.simibubi.create.foundation.blockEntity.behaviour.fluid.SmartFluidTank
 import com.simibubi.create.foundation.blockEntity.behaviour.scrollValue.ScrollValueBehaviour;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.api.FluidHandlerApi;
+import de.devin.pipesnphysics.api.PumpApi;
 import de.devin.pipesnphysics.api.FluidHandlerRole;
 import de.devin.pipesnphysics.client.PipeStatusText;
 import de.devin.pipesnphysics.display.PipeDisplayMetric;
@@ -36,6 +37,7 @@ import de.devin.pipesnphysics.engine.graph.GraphBuilder;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import de.devin.pipesnphysics.engine.probe.PipeProbe;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.valve.ValveCharacteristic;
 import de.devin.pipesnphysics.engine.valve.ValveThrottle;
@@ -50,12 +52,15 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.FaceAttachedHorizontalDirectionalBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LayeredCauldronBlock;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.PipeBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.AttachFace;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.server.level.ServerLevel;
@@ -902,5 +907,181 @@ public class PumpTests {
             }
             helper.succeed();
         });
+    }
+
+    /**
+     * A pump from ANOTHER mod — a block the engine has only been TOLD is a pump — must develop head
+     * like a Mechanical Pump. Every pump on Create's pipe network states its strength the same way,
+     * whatever powers it: it writes that strength as PRESSURE onto its own connections, inbound on
+     * the flank it sucks from and outward on the flank it pushes into. Create's own pump publishes
+     * exactly its RPM there, so the engine can read an electric or centrifugal pump on that one
+     * scale without knowing the mod.
+     *
+     * The stand-in is a Create SMART PIPE declared through {@link PumpApi} and pressurized by hand —
+     * nothing else about it is a pump, so what is under test is precisely the declaration and the
+     * published pressure. The rig is the flat two-tank run, where gravity can only ever reach the
+     * halfway line: driving PAST it is the proof that head was developed.
+     *
+     * Its OWN batch: {@link PumpApi} is global and the declaration is held across ticks, so a smart
+     * pipe in a test running CONCURRENTLY would turn into a pump under it (the filtered separation
+     * lines did exactly that).
+     */
+    @GameTest(template = "common/single_pump", templateNamespace = PipesNPhysics.ID,
+            timeoutTicks = 600, batch = "foreignPump")
+    public static void declaredForeignPumpDevelopsHeadFromItsPublishedPressure(GameTestHelper helper) {
+        Block smartPipe = AllBlocks.SMART_FLUID_PIPE.get();
+        BlockPos source = new BlockPos(0, 1, 1);
+        BlockPos pump = new BlockPos(2, 1, 1);
+        BlockPos sink = new BlockPos(4, 1, 1);
+        PumpApi.declarePump(smartPipe);
+        placeStandInPipe(helper, pump, AttachFace.FLOOR, Direction.EAST);
+        fill(helper, source, 8000);
+        drain(helper, sink);
+
+        helper.runAfterDelay(5, () -> {
+            Level level = helper.getLevel();
+            BlockPos abs = helper.absolutePos(pump);
+            publishPumpPressure(helper, pump, Direction.EAST, 64f);
+            double strength = Pumps.strength(level, abs);
+            if (Math.abs(strength - 64) > 0.01) {
+                PumpApi.clearPump(smartPipe);
+                helper.fail("the engine read " + strength + " RPM off a pump publishing 64");
+                return;
+            }
+            Node node = GraphBuilder.build(level, abs).nodeAt(abs);
+            if (node == null || !node.isPump() || node.pumpFacing() != Direction.EAST) {
+                PumpApi.clearPump(smartPipe);
+                helper.fail("a declared pump did not join the graph as a PUMP node pushing east: "
+                        + (node == null ? "no node" : node.kind() + " facing " + node.pumpFacing()));
+            }
+        });
+
+        helper.succeedWhen(() -> {
+            publishPumpPressure(helper, pump, Direction.EAST, 64f);
+            int moved = amount(helper, sink);
+            if (moved <= 5000) {
+                helper.fail("a declared foreign pump moved " + moved + " of 8000 mB — no more than"
+                        + " the levels equalize to on their own, so it developed no head"
+                        + dump(helper, pump));
+            }
+            PumpApi.clearPump(smartPipe);
+        });
+    }
+
+
+    /**
+     * The addon pumps this dev runtime actually ships — TFMG's and Power Grid's electric pumps —
+     * against the real blocks: each must join the graph as a pump node facing the way it was placed,
+     * and the engine must read the strength it publishes. Neither can be POWERED inside a GameTest
+     * (one wants a voltage, the other a circuit), so the pressure they would publish is stated by
+     * hand and read back in the same tick, before their own tick restates it: the number is theirs
+     * to write, the reading is ours to get right. Whichever mod is absent is skipped.
+     */
+    @GameTest(template = "common/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void installedAddonPumpsAreDrivenByTheEngine(GameTestHelper helper) {
+        BlockPos pump = new BlockPos(2, 1, 1);
+        List<ResourceLocation> addonPumps = List.of(
+                ResourceLocation.fromNamespaceAndPath("tfmg", "electric_pump"),
+                ResourceLocation.fromNamespaceAndPath("powergrid", "electric_pump"));
+
+        int tick = 10;
+        for (ResourceLocation id : addonPumps) {
+            final int assertAt = tick;
+            helper.runAtTickTime(assertAt - 8, () -> placeAddonPump(helper, pump, id));
+            helper.runAtTickTime(assertAt, () -> checkAddonPump(helper, pump, id));
+            tick += 20;
+        }
+        helper.runAtTickTime(tick, helper::succeed);
+    }
+
+    /** Put the addon's pump into the rig facing east, if that mod is installed. */
+    private static void placeAddonPump(GameTestHelper helper, BlockPos rel, ResourceLocation id) {
+        Block block = BuiltInRegistries.BLOCK.get(id);
+        if (block == Blocks.AIR) return; // mod not installed
+        BlockState state = block.defaultBlockState();
+        if (state.hasProperty(BlockStateProperties.FACING)) {
+            state = state.setValue(BlockStateProperties.FACING, Direction.EAST);
+        }
+        placeRigBlock(helper, rel, state);
+    }
+
+    /** What the engine makes of it: a pump node pushing east, developing the strength it states. */
+    private static void checkAddonPump(GameTestHelper helper, BlockPos rel, ResourceLocation id) {
+        Block block = BuiltInRegistries.BLOCK.get(id);
+        if (block == Blocks.AIR) return; // mod not installed
+        Level level = helper.getLevel();
+        BlockPos abs = helper.absolutePos(rel);
+        BlockState state = level.getBlockState(abs);
+        if (!Pumps.isPump(level, abs, state)) {
+            helper.fail(id + " is not recognized as a pump (tag entry or PumpBlock kinship missing)");
+            return;
+        }
+        Node node = GraphBuilder.build(level, abs).nodeAt(abs);
+        if (node == null || !node.isPump() || node.pumpFacing() != Direction.EAST) {
+            helper.fail(id + " did not join the graph as a pump node pushing east: "
+                    + (node == null ? "no node" : node.kind() + " facing " + node.pumpFacing()));
+            return;
+        }
+        double scale = PipesNPhysicsConfig.FOREIGN_PUMP_STRENGTH_SCALE.get();
+        PipesNPhysicsConfig.FOREIGN_PUMP_STRENGTH_SCALE.set(1.0);
+        try {
+            publishPumpPressure(helper, rel, Direction.EAST, 64f);
+            double strength = Pumps.strength(level, abs);
+            if (Math.abs(strength - 64) > 0.01) {
+                helper.fail("the engine read " + strength + " RPM off " + id + " publishing 64");
+                return;
+            }
+            if (Pumps.pushSide(level, abs, state) != Direction.EAST) {
+                helper.fail(id + " resolved its push side as " + Pumps.pushSide(level, abs, state));
+            }
+        } finally {
+            PipesNPhysicsConfig.FOREIGN_PUMP_STRENGTH_SCALE.set(scale);
+        }
+    }
+
+    /**
+     * Under the engine a PIPE carries no Create pressure; only a pump's own flanks do, because that
+     * is how a pump states its strength and how the engine reads another mod's (§2). The reason is
+     * the other half of the CROWNS story: a foreign pump keeps distributing pressure down its run
+     * from its own tick, and that pressure is exactly what a peer which reimplements the pipe tick
+     * would move fluid on, invisibly beside us. Both halves are asserted here — the pipe is wiped,
+     * the pump keeps what it published — since wiping the pump too would read as a stopped pump.
+     */
+    @GameTest(template = "common/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 100)
+    public static void pipesCarryNoCreatePressureButPumpsKeepTheirs(GameTestHelper helper) {
+        BlockPos pipe = new BlockPos(1, 1, 1);
+        BlockPos pump = new BlockPos(2, 1, 1);
+
+        helper.runAtTickTime(4, () -> {
+            publishPumpPressure(helper, pipe, Direction.EAST, 64f); // as a neighbouring pump distributes
+            publishPumpPressure(helper, pump, Direction.EAST, 64f); // as the pump itself publishes
+        });
+
+        helper.runAtTickTime(10, () -> {
+            float onPipe = pressureAt(helper, pipe);
+            if (onPipe != 0) {
+                helper.fail("a pipe still carries " + onPipe + " of Create pressure — a peer that"
+                        + " reimplements the pipe tick would transport fluid on it");
+                return;
+            }
+            if (pressureAt(helper, pump) <= 0) {
+                helper.fail("the pump's own published pressure was cleared — that IS how a foreign"
+                        + " pump states its strength, so the engine would read it as stopped");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /** The strongest pressure standing on a cell's connections, in Create's own units. */
+    private static float pressureAt(GameTestHelper helper, BlockPos rel) {
+        FluidTransportBehaviour cell = FluidPropagator.getPipe(helper.getLevel(), helper.absolutePos(rel));
+        if (cell == null || cell.interfaces == null) return 0;
+        float strongest = 0;
+        for (PipeConnection connection : cell.interfaces.values()) {
+            strongest = Math.max(strongest, Math.max(connection.getPressure().getFirst(),
+                    connection.getPressure().getSecond()));
+        }
+        return strongest;
     }
 }

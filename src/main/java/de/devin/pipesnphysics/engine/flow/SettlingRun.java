@@ -381,7 +381,8 @@ final class SettlingRun {
      * ({@link #emptyFloorCap}). Anchoring the line at the floor froze runs solid: an empty tank
      * up a riser set targets ABOVE the run's whole content, so nothing was ever "excess" and the
      * pour/fall/spread machinery never engaged — a dreg beside an open mouth just sat there.
-     * With no live surface or head at either end the run is headless and gravity-pools.
+     * A {@link #wallsOffTheRun WALLED} end defers for the dual reason. With no live surface or
+     * head at either end the run is headless and gravity-pools.
      */
     private Double restingLine(int nodeIndex, int farNodeIndex) {
         Reservoir reservoir = network.reservoirAt(nodeIndex);
@@ -390,6 +391,7 @@ final class SettlingRun {
             // In the gas frame a vessel holding a LIQUID has no gas interface to contribute —
             // its line would be phantom; the exchange walks still fill it if it accepts the gas.
             if (mirrored && !lighterThanAir(reservoir.contents())) return null;
+            if (wallsOffTheRun(reservoir, nodeIndex)) return null;
             return surfaceOf(reservoir);
         }
         if (reservoir != null && reservoir.isOpenMouth()) return null; // read the far side instead
@@ -400,6 +402,29 @@ final class SettlingRun {
         if (!fillOnly) return head;
         Double ceiling = solution.nodeCeilings().get(nodeIndex);
         return ceiling != null ? ceiling : head;
+    }
+
+    /**
+     * Whether an end reservoir is a WALL rather than a resting line: it can give NOTHING through
+     * its opening here — its own fluid stands entirely below the end cell's window, the same gate
+     * {@link #drawFromReservoir} applies — and it can take nothing either, being brimming. Such an
+     * end is hydraulically absent, and reading its low surface as a line for the run flattens the
+     * whole column to "above the waterline" while nothing may ever actually drain there: the
+     * targets go to zero, so every draw is refused and nothing has a deficit to level toward, and
+     * on a BACKED-UP run — which may give nothing back either — the column then freezes exactly
+     * where it stands (a run out of a nearly-empty tank into a brimming one below sat at
+     * 57|235|56|232|228 forever, never leveling, never taking the supply tank's last 192 mB).
+     * With the wall deferring, the run rests at the end it can still exchange with.
+     *
+     * Both halves are required. A brimming end whose fluid DOES reach the opening is a real
+     * column pressed into the run and must keep setting its line (that is what fills a pipe
+     * submerged under a full tank); an end with ROOM is never a wall, however low it sits — the
+     * run drains into it, which is exactly what the flattened line is for.
+     */
+    private boolean wallsOffTheRun(Reservoir reservoir, int nodeIndex) {
+        BlockPos endCell = nodeIndex == edge.a() ? cells.getFirst() : cells.getLast();
+        return surfaceOf(reservoir) <= windowLow(endCell)
+                && reservoir.takesNothing(medium.isEmpty() ? reservoir.contents() : medium);
     }
 
     /** An empty reservoir's floor still caps its side of the line: fluid drains down toward it

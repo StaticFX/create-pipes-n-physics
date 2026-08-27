@@ -1,12 +1,17 @@
 package de.devin.pipesnphysics.mixin;
 
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
+import com.simibubi.create.content.fluids.PipeConnection;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.client.render.OpenEndParticles;
 import de.devin.pipesnphysics.engine.EngineTickHandler;
+import de.devin.pipesnphysics.engine.pump.Pumps;
+import net.createmod.catnip.data.Couple;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -54,5 +59,37 @@ public abstract class PipeHeartbeatMixin {
             return;
         }
         EngineTickHandler.markDirty(level, self.getBlockPos());
+        pipesnphysics$clearForeignPressure(level, self, pipe);
+    }
+
+    /**
+     * Under the engine a PIPE carries no Create pressure. Pressure is only ever meaningful where a
+     * pump publishes it on its own two flanks — that is how every pump states its strength and how
+     * the engine reads another mod's (§2) — so a pump cell is left alone and everything else is
+     * cleared here.
+     *
+     * What this is for: a foreign pump keeps distributing pressure DOWN the run from its own block
+     * entity's tick, which nothing of ours can cancel in general (the method lives on its class).
+     * That pressure is the one ingredient a peer which REIMPLEMENTS the pipe tick — CROWNS does,
+     * and can win the cancel race — needs to run a second, invisible transport beside ours, which
+     * is exactly the leak {@code PumpTransferTickMixin} closed for Create's own pump. Clearing it
+     * at HEAD of the uncancellable block-entity tick makes any such transport inert whoever wrote
+     * the pressure, instead of one mixin per addon pump. Nothing else of Create's reads it while
+     * the engine owns transport: the flow render is hidden, and {@code FluidPropagator}'s only use
+     * is a walk that stops at the pump range either way.
+     */
+    @Unique
+    private static void pipesnphysics$clearForeignPressure(Level level, SmartBlockEntity self,
+                                                           FluidTransportBehaviour pipe) {
+        if (!EngineTickHandler.suppressesCreateTransport(self)) return;
+        if (pipe.interfaces == null) return;
+        BlockPos pos = self.getBlockPos();
+        if (Pumps.isPump(level, pos, self.getBlockState())) return;
+        for (PipeConnection connection : pipe.interfaces.values()) {
+            Couple<Float> pressure = connection.getPressure();
+            if (pressure.getFirst() == 0 && pressure.getSecond() == 0) continue;
+            pressure.set(true, 0f);
+            pressure.set(false, 0f);
+        }
     }
 }

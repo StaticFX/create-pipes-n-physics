@@ -1,6 +1,5 @@
 package de.devin.pipesnphysics.engine.probe;
 
-import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.EdgeFlow;
@@ -14,6 +13,7 @@ import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.graph.PipeGeometry;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
@@ -379,9 +379,7 @@ public final class PipeProbe {
     public static Map<Integer, Byte> starvedDryEdges(ServerLevel level, Graph graph, Solution solution) {
         Map<Integer, Byte> dry = new HashMap<>();
         for (Node pump : graph.pumps()) {
-            float speed = level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
-                    ? kinetic.getSpeed() : 0;
-            if (Math.abs(speed) <= 0.01f || pump.pumpFacing() == null) continue;
+            if (Pumps.strength(level, pump.pos()) <= 0.01 || pump.pumpFacing() == null) continue;
             boolean movesNothing = true;
             for (Edge edge : graph.edgesOf(pump.index())) {
                 int idx = edge.index();

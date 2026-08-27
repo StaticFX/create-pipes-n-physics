@@ -92,7 +92,7 @@
   "pipesnphysics.gui.goggles.pumping": "Output: ",
   "pipesnphysics.gui.goggles.reach_limit": "Reach limit: raise the supply or add a pump",
   "pipesnphysics.gui.goggles.role": "Role: ",
-  "pipesnphysics.gui.goggles.role_auto_pump": "Automatic (its shaft is driving it)",
+  "pipesnphysics.gui.goggles.role_auto_pump": "Automatic (something is driving it)",
   "pipesnphysics.gui.goggles.role_auto_turbine": "Automatic (the fluid is turning it)",
   "pipesnphysics.gui.goggles.role_hint_dial": "Scroll the dial on its side: pump, turbine, or automatic",
   "pipesnphysics.gui.goggles.role_hint_turbine": "A turbine takes power out of a fall instead of spending it",

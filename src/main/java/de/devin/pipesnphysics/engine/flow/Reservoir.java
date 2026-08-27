@@ -212,6 +212,19 @@ public final class Reservoir {
     }
 
     /**
+     * Whether this reservoir can take NO more of {@code fluid} — a brimming tank, a one-way
+     * source, an endpoint an addon filter vetoes. Budget-free like {@link #rejects}: it asks the
+     * live handler, so an endpoint whose per-tick take budget is already spent still answers for
+     * what it physically IS rather than for what is left of this tick.
+     */
+    boolean takesNothing(FluidStack fluid) {
+        if (fluid.isEmpty()) return false;
+        if (column.isInfiniteSource() || vetoed(fluid)) return true;
+        IFluidHandler handler = column.handler(level);
+        return handler != null && handler.fill(fluid.copyWithAmount(1), FluidAction.SIMULATE) <= 0;
+    }
+
+    /**
      * Whether this reservoir is HARD-incompatible with {@code fluid} — its handler can NEITHER
      * accept it (a lava tank refusing water) NOR already hold it (so a tank OF that fluid, or a
      * multi-fluid basin carrying it, is not a collision). This is the crossing-the-streams test at

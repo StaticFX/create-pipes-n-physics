@@ -3,11 +3,11 @@ package de.devin.pipesnphysics.engine.graph;
 import com.simibubi.create.content.fluids.FluidPropagator;
 import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
-import com.simibubi.create.content.fluids.pump.PumpBlock;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.boundary.FluidCaps;
 import de.devin.pipesnphysics.engine.boundary.FluidTankGeometry;
 import de.devin.pipesnphysics.engine.boundary.HandlerRoles;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import de.devin.pipesnphysics.engine.valve.ValveThrottle;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -117,10 +117,7 @@ public final class GraphBuilder {
             Direction gateFlow = null;
             if (discovery.pumps.contains(pos)) {
                 kind = Node.Kind.PUMP;
-                BlockState bs = level.getBlockState(pos);
-                if (bs.getBlock() instanceof PumpBlock) {
-                    facing = bs.getValue(PumpBlock.FACING);
-                }
+                facing = Pumps.pushSide(level, pos, level.getBlockState(pos));
             } else if (discovery.handlers.contains(pos)) {
                 kind = Node.Kind.HANDLER;
                 accessFace = discovery.handlerFaces.get(pos); // non-null only for a side-specific handler
@@ -230,7 +227,7 @@ public final class GraphBuilder {
             }
 
             BlockState curState = level.getBlockState(cur);
-            boolean isPump = curState.getBlock() instanceof PumpBlock;
+            boolean isPump = Pumps.isPump(level, cur, curState);
             if (isPump) discovery.pumps.add(cur);
             else discovery.pipes.add(cur);
 
@@ -255,7 +252,7 @@ public final class GraphBuilder {
         if (!level.isLoaded(neighbor)) return;
         BlockState nState = level.getBlockState(neighbor);
 
-        if (nState.getBlock() instanceof PumpBlock) {
+        if (Pumps.isPump(level, neighbor, nState)) {
             discovery.pumps.add(neighbor.immutable());
             conns.add(neighbor.immutable());
             frontier.add(neighbor.immutable());
@@ -404,7 +401,7 @@ public final class GraphBuilder {
             BlockPos neighbor = cur.relative(face);
             if (!level.isLoaded(neighbor)) continue;
 
-            if (level.getBlockState(neighbor).getBlock() instanceof PumpBlock) {
+            if (Pumps.isPump(level, neighbor, level.getBlockState(neighbor))) {
                 discovery.pumps.add(neighbor.immutable());
                 conns.add(neighbor.immutable());
                 frontier.add(neighbor.immutable());

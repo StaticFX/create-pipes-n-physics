@@ -1,7 +1,6 @@
 package de.devin.pipesnphysics.handler;
 
 import com.simibubi.create.content.fluids.FluidPropagator;
-import com.simibubi.create.content.fluids.pump.PumpBlock;
 import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.infrastructure.config.AllConfigs;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
@@ -11,6 +10,7 @@ import de.devin.pipesnphysics.engine.boundary.FluidTankGeometry;
 import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
 import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.graph.GraphCache;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -113,7 +113,7 @@ public final class NetworkEditHandler {
         for (Direction dir : Direction.values()) {
             if (remaining <= 0) return 0;
             BlockPos neighborPos = pos.relative(dir);
-            if (level.getBlockState(neighborPos).getBlock() instanceof PumpBlock) continue;
+            if (Pumps.isPump(level, neighborPos, level.getBlockState(neighborPos))) continue;
             PipeStore.Store neighbor = PipeStore.at(level, neighborPos);
             if (neighbor != null) {
                 remaining -= neighbor.insert(content, remaining);

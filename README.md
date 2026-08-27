@@ -12,7 +12,8 @@ A Create mod addon for pipes and physics. Built with **Java** and **NeoForge 1.2
 ## For developers — depending on the API
 
 Pipes'n Physics exposes a small public API under `de.devin.pipesnphysics.api` so other mods
-can define how their fluids behave in the network (centrifuge separations, handler roles).
+can define how their fluids behave in the network (centrifuge separations, handler roles,
+pumps).
 
 ### 1. Add the dependency (compile-time)
 
@@ -92,6 +93,41 @@ are registered.
 ```java
 FluidHandlerApi.setRole(MyBlocks.FLUID_DRUM.get(), FluidHandlerRole.RESERVOIR);
 ```
+
+**Pumps from other mods** (`PumpApi` / `FluidPump`): the engine drives any pump that moves fluid
+through Create's pipes, not just the Mechanical Pump. A pump that extends Create's own is picked up
+automatically; anything else is named once, either by a datapack tag or in code:
+
+```json
+// data/pipesnphysics/tags/block/pumps.json — in your mod or any datapack
+{ "replace": false, "values": [ { "id": "yourmod:electric_pump", "required": false } ] }
+```
+
+```java
+PumpApi.declarePump(MyBlocks.ELECTRIC_PUMP.get());
+```
+
+How hard it pumps is then read from the pressure it already publishes to Create's pipe network —
+the same scale as a Mechanical Pump's RPM, so an electric pump twice Create's pressure lifts twice
+as high. Implement `FluidPump` on your pump's block entity instead if you want to state its strength
+and push side outright. Pack authors can scale every foreign pump with `foreignPumpStrengthScale`.
+
+**Turbines** (`TurbineApi` / `TurbineAdapter`): the other direction — the engine takes head out of
+the line at your block and hands you the fluid that fell through it, and you turn that into whatever
+power your mod deals in. This one needs an adapter (a pump publishes its strength in a currency
+Create already understands; power going *out* does not), but nothing else: the hydraulics, including
+refusing to pass fluid until the fall clears the rated head, are the engine's.
+
+```java
+TurbineApi.registerTurbine(MyBlocks.WATER_TURBINE.get(), (level, pos, flowMb) -> {
+    if (level.getBlockEntity(pos) instanceof MyTurbineBlockEntity be) be.spin(flowMb);
+});
+```
+
+The rated fall, the flow it swallows and the side it discharges through default to the engine's
+config and the block's own facing; override `ratedHead`, `swallowMb` or `pushSide` on the adapter to
+state your own. Driving Create rotation from it? Debounce the start/stop yourself — Create destroys
+a generator whose speed flickers.
 
 ## License
 

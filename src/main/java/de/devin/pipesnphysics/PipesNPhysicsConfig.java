@@ -36,6 +36,8 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.EnumValue<ValveCharacteristic> VALVE_CHARACTERISTIC;
     public static final ModConfigSpec.BooleanValue ENABLE_VALVE_ONE_WAY;
     public static final ModConfigSpec.BooleanValue AUTO_DETECT_RELAY_HANDLERS;
+    public static final ModConfigSpec.BooleanValue ENABLE_FOREIGN_PUMPS;
+    public static final ModConfigSpec.DoubleValue FOREIGN_PUMP_STRENGTH_SCALE;
     public static final ModConfigSpec.BooleanValue ENABLE_NETWORK_CACHE;
     public static final ModConfigSpec.BooleanValue ENABLE_DYNAMIC_TANK_MASS;
     public static final ModConfigSpec.BooleanValue EXPERIMENTAL_TANK_COG;
@@ -127,6 +129,22 @@ public class PipesNPhysicsConfig {
                         "sink_only (receive-only), or ignore_fluid_handler (skip); Create tanks and basins",
                         "are never demoted.")
                 .define("autoDetectRelayHandlers", true);
+        ENABLE_FOREIGN_PUMPS = server
+                .comment("Drive pumps from OTHER mods with the hydraulic engine — an electric pump, a",
+                        "centrifugal one, anything that pumps through Create's pipes. Such a pump states",
+                        "how hard it pushes as pipe PRESSURE (the currency Create's own transport runs on,",
+                        "and the same scale as a Mechanical Pump's RPM), so the engine reads that and gives",
+                        "it head and throughput like any pump. A pump that extends Create's own is always",
+                        "recognized; anything else has to be named by the block tag pipesnphysics:pumps or",
+                        "registered through the mod's API. Off = they act as plain pipe again (fluid passes",
+                        "through them, but they add no head).")
+                .define("enableForeignPumps", true);
+        FOREIGN_PUMP_STRENGTH_SCALE = server
+                .comment("Scales how strong another mod's pump is, on top of the pressure it publishes.",
+                        "1.0 keeps whatever that mod intended relative to a Mechanical Pump — a pump that",
+                        "pushes twice Create's pressure lifts twice as high here. Lower it to rein in an",
+                        "addon pump that dwarfs the rest of your plumbing.")
+                .defineInRange("foreignPumpStrengthScale", 1.0, 0.0, 100.0);
         ENABLE_NETWORK_CACHE = server
                 .comment("Reuse each pipe network's discovered graph across ticks instead of re-scanning",
                         "it from the world every solve. Every edit that can change a network's shape",

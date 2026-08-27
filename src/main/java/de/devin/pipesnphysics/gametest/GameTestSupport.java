@@ -50,12 +50,14 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.FaceAttachedHorizontalDirectionalBlock;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LayeredCauldronBlock;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.PipeBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.AttachFace;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.server.level.ServerLevel;
@@ -223,5 +225,49 @@ public final class GameTestSupport {
                 Capabilities.FluidHandler.BLOCK, helper.absolutePos(relativePos), null);
         if (handler == null) helper.fail("no fluid handler at " + relativePos);
         return handler;
+    }
+
+    /**
+     * Publish a pump's strength the way every pump on Create's pipe network does: inbound pressure on
+     * the flank it draws from, outward pressure on the flank it pushes into. Stating it by hand is how
+     * a test stands in for the power a real addon pump would need (a voltage, a circuit) — its own tick
+     * restates it the tick after, so read it back in the same tick.
+     */
+    public static void publishPumpPressure(GameTestHelper helper, BlockPos rel, Direction push, float rpm) {
+        FluidTransportBehaviour pipe = FluidPropagator.getPipe(helper.getLevel(), helper.absolutePos(rel));
+        PipeConnection outlet = pipe == null ? null : pipe.getConnection(push);
+        PipeConnection intake = pipe == null ? null : pipe.getConnection(push.getOpposite());
+        if (outlet == null || intake == null) {
+            helper.fail("the pump at " + rel + " has no pipe connection on its " + push.getAxis() + " flanks");
+            return;
+        }
+        outlet.getPressure().set(false, rpm);
+        intake.getPressure().set(true, rpm);
+    }
+
+    /**
+     * Swap a SMART PIPE into a rig — the stand-in for another mod's pipe device (a foreign pump, an
+     * adapted turbine). It is the one Create pipe with a settable orientation and no rig of its own
+     * uses it, and {@code AttachFace.WALL} makes its run VERTICAL where the rig needs a riser.
+     */
+    public static void placeStandInPipe(GameTestHelper helper, BlockPos rel,
+                                        AttachFace face, Direction facing) {
+        placeRigBlock(helper, rel, AllBlocks.SMART_FLUID_PIPE.getDefaultState()
+                .setValue(FaceAttachedHorizontalDirectionalBlock.FACE, face)
+                .setValue(FaceAttachedHorizontalDirectionalBlock.FACING, facing));
+    }
+
+    /**
+     * Swap a block into a rig and re-shape the cells around it: {@code setBlock} only re-shapes
+     * OUTWARD, so the neighbours would keep the connection state they had against whatever stood
+     * here before and the run would not join up.
+     */
+    public static void placeRigBlock(GameTestHelper helper, BlockPos rel, BlockState state) {
+        helper.setBlock(rel, state);
+        for (Direction side : Direction.values()) {
+            BlockPos abs = helper.absolutePos(rel).relative(side);
+            helper.getLevel().setBlock(abs, Block.updateFromNeighbourShapes(
+                    helper.getLevel().getBlockState(abs), helper.getLevel(), abs), 3);
+        }
     }
 }

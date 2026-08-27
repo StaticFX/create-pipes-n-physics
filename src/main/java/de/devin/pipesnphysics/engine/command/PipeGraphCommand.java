@@ -7,7 +7,6 @@ import com.simibubi.create.content.fluids.FluidTransportBehaviour;
 import com.simibubi.create.content.fluids.hosePulley.HosePulleyBlockEntity;
 import com.simibubi.create.content.fluids.pipes.VanillaFluidTargets;
 import com.simibubi.create.content.fluids.pump.PumpBlock;
-import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.EdgeFlow;
@@ -31,9 +30,11 @@ import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import de.devin.pipesnphysics.engine.net.PumpRangePayload;
 import de.devin.pipesnphysics.engine.probe.PipeProbe;
 import de.devin.pipesnphysics.engine.probe.PumpRangeProbe;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
 import de.devin.pipesnphysics.engine.turbine.HydroTurbine;
+import de.devin.pipesnphysics.engine.turbine.Turbines;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
@@ -314,7 +315,7 @@ public final class PipeGraphCommand {
             BlockPos neighbor = pos.relative(face);
             if (!level.isLoaded(neighbor)) continue;
             BlockState nState = level.getBlockState(neighbor);
-            if (nState.getBlock() instanceof PumpBlock) {
+            if (Pumps.isPump(level, neighbor, nState)) {
                 report.line("§7  " + face + ": §badjacent pump");
                 any = true;
                 if (seed == null) seed = neighbor.immutable();
@@ -440,8 +441,7 @@ public final class PipeGraphCommand {
                     ceiling != null ? String.format(" §7ceil=§b%.2f", ceiling) : " §8ceil=∅",
                     n.pumpFacing() != null ? " §7face=§f" + n.pumpFacing() : "",
                     n.isPump() ? String.format(" §7rpm=§f%.0f", pumpSpeed(level, n)) : "",
-                    n.isPump() && FlowSolver.isTurbine(level, n)
-                            ? String.format(" §aturbine §7su=§f%.0f", turbineStress(level, n)) : "",
+                    n.isPump() && FlowSolver.isTurbine(level, n) ? turbineTag(level, n) : "",
                     n.isOneWayGate() ? " §done-way §f" + n.gateFlow() : "",
                     n.pos().equals(target) ? " §6← flagged" : ""));
             // A pump's REACH — the very numbers the range overlay paints from. Without them a
@@ -738,14 +738,22 @@ public final class PipeGraphCommand {
         return level.getBlockState(n.pos()).getBlock().getName().getString();
     }
 
-    /** A pump node's current rotation speed (RPM), 0 if it is not a kinetic block. */
-    private static float pumpSpeed(ServerLevel level, Node n) {
-        return level.getBlockEntity(n.pos()) instanceof KineticBlockEntity k ? k.getSpeed() : 0;
+    /** How hard a pump node is pushing (RPM) — the shaft's speed, or a foreign pump's own rating. */
+    private static double pumpSpeed(ServerLevel level, Node n) {
+        return Pumps.strength(level, n.pos());
     }
 
-    /** What a turbine node is currently producing, so a dialed-but-idle one is distinguishable. */
-    private static double turbineStress(ServerLevel level, Node n) {
-        return level.getBlockEntity(n.pos()) instanceof HydroTurbine t ? t.pipesnphysics$turbineStress() : 0;
+    /**
+     * What a turbine node is doing, so a dialed-but-idle one is distinguishable. Our own turbine
+     * reports the stress it makes; an ADAPTED one (another mod's block, §5.4) produces power we have
+     * no units for, so its line carries the fall we take out of the line instead of a fake 0.
+     */
+    private static String turbineTag(ServerLevel level, Node n) {
+        if (level.getBlockEntity(n.pos()) instanceof HydroTurbine t) {
+            return String.format(" \u00a7aturbine \u00a77su=\u00a7f%.0f", t.pipesnphysics$turbineStress());
+        }
+        return String.format(" \u00a7aturbine \u00a77adapted fall=\u00a7f%.2f",
+                Turbines.ratedHead(level, n.pos()));
     }
 
     /**
@@ -923,7 +931,7 @@ public final class PipeGraphCommand {
                         : "open end";
             }
             case PUMP -> {
-                float rpm = level.getBlockEntity(n.pos()) instanceof KineticBlockEntity k ? k.getSpeed() : 0;
+                double rpm = Pumps.strength(level, n.pos());
                 yield String.format("%.0f RPM%s", rpm, n.pumpFacing() != null ? " →" + n.pumpFacing() : "");
             }
             case CLOSED_GATE -> "valve shut";

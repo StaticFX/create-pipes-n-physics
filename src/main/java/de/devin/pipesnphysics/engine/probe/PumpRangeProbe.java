@@ -1,6 +1,5 @@
 package de.devin.pipesnphysics.engine.probe;
 
-import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.FlowSolver;
@@ -12,6 +11,7 @@ import de.devin.pipesnphysics.engine.graph.GraphCache;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.graph.PipeGeometry;
 import de.devin.pipesnphysics.engine.net.PumpRangePayload;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.neoforge.fluids.FluidStack;
@@ -79,10 +79,9 @@ public final class PumpRangeProbe {
             return new PumpRangePayload(pumpPos, List.of());
         }
 
-        float speed = level.getBlockEntity(pumpPos) instanceof KineticBlockEntity kinetic
-                ? kinetic.getSpeed() : 0;
-        if (Math.abs(speed) < 0.01f) return new PumpRangePayload(pumpPos, List.of());
-        double pumpHead = Math.abs(speed) * PipesNPhysicsConfig.PUMP_HEAD_PER_RPM.get();
+        double rpm = Pumps.strength(level, pumpPos);
+        if (rpm < 0.01) return new PumpRangePayload(pumpPos, List.of());
+        double pumpHead = rpm * PipesNPhysicsConfig.PUMP_HEAD_PER_RPM.get();
         double suction = PipesNPhysicsConfig.SUCTION_LIMIT.get();
 
         Solution solution = cached != null ? cached : FlowSolver.solve(level, graph);

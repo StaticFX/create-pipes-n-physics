@@ -263,4 +263,79 @@ public class EqualizationTests {
             });
         });
     }
+
+    /**
+     * A run dropping into a BRIMMING tank from above must still settle: take the last of the
+     * supply tank over it and level out its own level stretch. The brimming end can give nothing
+     * (its visible fluid stands a block below the pipe's opening) and take nothing (it is full),
+     * so it is hydraulically a WALL — but the settle read its low surface as the run's resting
+     * line anyway, flattening every target to zero. Nothing then had a deficit to level toward,
+     * every draw off the supply was refused, and because the solve calls such a dead conduit
+     * SINK_FULL (fill-only, it may give nothing back either) the column FROZE: the reported rig
+     * sat at 57|235|56|232|228 across its five cells forever while the supply kept its 192 mB,
+     * {@code /pipegraph} showing {@code stalled solved=0 actual=0} and a flat {@code recent 0 …}
+     * strip. With the wall deferring, the run rests at the only end it can exchange with.
+     */
+    @GameTest(template = "physics/drop_into_full_tank", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void runIntoABrimmingTankStillLevelsAndTakesItsSupply(GameTestHelper helper) {
+        // drop_into_full_tank: supply tank - glass riser - 4-cell level run - brimming tank BELOW
+        BlockPos supply = new BlockPos(0, 4, 0);
+        BlockPos brimming = new BlockPos(3, 1, 0);
+        BlockPos riser = new BlockPos(0, 3, 0);
+        List<BlockPos> level = List.of(new BlockPos(0, 2, 0), new BlockPos(1, 2, 0),
+                new BlockPos(2, 2, 0), new BlockPos(3, 2, 0));
+        int supplyStart = 192;
+        int[] preloaded = {57, 235, 56, 232, 228}; // the reported profile, riser first
+        int stored = Arrays.stream(preloaded).sum();
+
+        helper.runAfterDelay(5, () -> {
+            fill(helper, brimming, 8000);
+            fill(helper, supply, supplyStart);
+            List<BlockPos> run = new ArrayList<>(List.of(riser));
+            run.addAll(level);
+            for (int i = 0; i < run.size(); i++) {
+                PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(run.get(i)));
+                cell.insert(new FluidStack(Fluids.WATER, preloaded[i]), preloaded[i]);
+                cell.flush();
+            }
+
+            helper.runAfterDelay(300, () -> {
+                int supplyMb = amount(helper, supply);
+                int brimmingMb = amount(helper, brimming);
+                int pipeMb = cellMb(helper.getLevel(), helper.absolutePos(riser));
+                int low = Integer.MAX_VALUE, high = 0;
+                for (BlockPos rel : level) {
+                    int mb = cellMb(helper.getLevel(), helper.absolutePos(rel));
+                    pipeMb += mb;
+                    low = Math.min(low, mb);
+                    high = Math.max(high, mb);
+                }
+                if (supplyMb + brimmingMb + pipeMb != supplyStart + 8000 + stored) {
+                    helper.fail("fluid not conserved: supply " + supplyMb + " + brimming "
+                            + brimmingMb + " + pipes " + pipeMb);
+                    return;
+                }
+                if (brimmingMb != 8000) {
+                    helper.fail("the brimming tank must neither gain nor give: " + brimmingMb + " mB");
+                    return;
+                }
+                if (supplyMb != 0) {
+                    helper.fail("the supply tank still holds " + supplyMb
+                            + " mB — the run below it refused to take it");
+                    return;
+                }
+                // The spread's anti-slosh gate leaves up to DREGS_MB standing at each of the
+                // stretch's 3 boundaries, so 12 mB end to end is the settled state — against
+                // the 179 mB (56 vs 235) the frozen column reported.
+                if (high - low > 12) {
+                    helper.fail("the level stretch never leveled: " + low + "…" + high + " mB"
+                            + " (riser " + cellMb(helper.getLevel(), helper.absolutePos(riser))
+                            + ", cells " + level.stream()
+                                    .map(r -> String.valueOf(cellMb(helper.getLevel(), helper.absolutePos(r))))
+                                    .toList() + ")");
+                }
+                helper.succeed();
+            });
+        });
+    }
 }

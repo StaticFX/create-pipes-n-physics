@@ -6,6 +6,7 @@
   "refmap": "pipesnphysics.refmap.json",
   "mixins": [
     "PumpBlockEntityMixin",
+    "PumpDialMixin",
     "PumpTransferTickMixin",
     "FluidValveBlockEntityMixin",
     "FluidValveAccessor",

@@ -1,0 +1,7 @@
+{
+  "replace": false,
+  "values": [
+    { "id": "fluid:centrifugal_pump", "required": false },
+    { "id": "powergrid:electric_pump", "required": false }
+  ]
+}

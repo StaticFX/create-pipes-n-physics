@@ -1,12 +1,12 @@
 package de.devin.pipesnphysics.display;
 
-import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import com.simibubi.create.content.redstone.displayLink.DisplayLinkContext;
 import com.simibubi.create.content.redstone.displayLink.target.DisplayTargetStats;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.display.PipeDisplayMetric.Readout;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import de.devin.pipesnphysics.engine.probe.PipeProbe;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.level.ServerLevel;
@@ -39,9 +39,9 @@ public class PipeNetworkDisplaySource extends MetricDisplaySource {
 
         double cap = 0, canLift = 0;
         if (pump) {
-            float speed = level.getBlockEntity(pos) instanceof KineticBlockEntity k ? Math.abs(k.getSpeed()) : 0f;
-            cap = speed * PipesNPhysicsConfig.PUMP_FLOW_PER_RPM.get();
-            canLift = speed * PipesNPhysicsConfig.PUMP_HEAD_PER_RPM.get();
+            double rpm = Pumps.strength(level, pos);
+            cap = rpm * PipesNPhysicsConfig.PUMP_FLOW_PER_RPM.get();
+            canLift = rpm * PipesNPhysicsConfig.PUMP_HEAD_PER_RPM.get();
         }
         return metrics.get(metricIndex(context)).format(new Readout(data, cap, canLift));
     }

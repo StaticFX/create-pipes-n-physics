@@ -1,6 +1,5 @@
 package de.devin.pipesnphysics.engine;
 
-import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.boundary.BoundaryColumn;
@@ -8,11 +7,11 @@ import de.devin.pipesnphysics.engine.boundary.RelayDetector;
 import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Graph;
 import de.devin.pipesnphysics.engine.graph.Node;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import de.devin.pipesnphysics.engine.solve.NetworkSolver;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import de.devin.pipesnphysics.engine.store.PipeWindow;
-import de.devin.pipesnphysics.engine.turbine.HydroTurbine;
-import de.devin.pipesnphysics.engine.turbine.TurbineRating;
+import de.devin.pipesnphysics.engine.turbine.Turbines;
 import de.devin.pipesnphysics.engine.valve.ValveThrottle;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -282,13 +281,11 @@ public final class FlowSolver {
         for (Node pump : graph.pumps()) {
             if (isTurbine(level, pump)) {
                 pumps.put(pump.index(), new PumpState(pump.pumpFacing() != null,
-                        -TurbineRating.ratedHead(), pump.pumpFacing(),
-                        TurbineRating.internalConductance(), false));
+                        -Turbines.ratedHead(level, pump.pos()), pump.pumpFacing(),
+                        Turbines.internalConductance(level, pump.pos()), false));
                 continue;
             }
-            float speed = level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
-                    ? kinetic.getSpeed() : 0;
-            double head = Math.abs(speed) * headPerRpm;
+            double head = Pumps.strength(level, pump.pos()) * headPerRpm;
             pumps.put(pump.index(), new PumpState(isPumpRunning(level, pump), head, pump.pumpFacing(),
                     flowPerRpm / headPerRpm, true));
         }
@@ -302,8 +299,7 @@ public final class FlowSolver {
      * lifting an open mouth into suction — applies.
      */
     public static boolean isTurbine(Level level, Node pump) {
-        return level.getBlockEntity(pump.pos()) instanceof HydroTurbine turbine
-                && turbine.pipesnphysics$isTurbine();
+        return Turbines.isTurbine(level, pump.pos());
     }
 
     /**
@@ -317,8 +313,7 @@ public final class FlowSolver {
     public static boolean isPumpRunning(Level level, Node pump) {
         if (pump.pumpFacing() == null) return false;
         if (isTurbine(level, pump)) return false;
-        return level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
-                && Math.abs(kinetic.getSpeed()) > MIN_PUMP_SPEED;
+        return Pumps.strength(level, pump.pos()) > MIN_PUMP_SPEED;
     }
 
     /**
@@ -329,9 +324,8 @@ public final class FlowSolver {
      */
     public static int pumpFlowCapMb(Level level, Node pump) {
         if (!isPumpRunning(level, pump)) return 0;
-        float speed = level.getBlockEntity(pump.pos()) instanceof KineticBlockEntity kinetic
-                ? kinetic.getSpeed() : 0;
-        return (int) Math.floor(Math.abs(speed) * PipesNPhysicsConfig.PUMP_FLOW_PER_RPM.get());
+        return (int) Math.floor(Pumps.strength(level, pump.pos())
+                * PipesNPhysicsConfig.PUMP_FLOW_PER_RPM.get());
     }
 
     /**

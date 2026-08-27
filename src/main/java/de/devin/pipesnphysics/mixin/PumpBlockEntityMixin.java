@@ -14,6 +14,7 @@ import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.net.PipeStatusClient;
 import de.devin.pipesnphysics.engine.net.PipeStatusPayload;
 import de.devin.pipesnphysics.engine.turbine.HydroTurbine;
+import de.devin.pipesnphysics.engine.pump.Pumps;
 import de.devin.pipesnphysics.engine.turbine.PumpMode;
 import de.devin.pipesnphysics.engine.turbine.PumpModeBehaviour;
 import de.devin.pipesnphysics.engine.turbine.TurbineRating;
@@ -72,8 +73,6 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity implements
     @Unique
     private Direction pipesnphysics$lastFacing = null;
     @Unique
-    private PumpModeBehaviour pipesnphysics$mode;
-    @Unique
     private boolean pipesnphysics$generating;
     @Unique
     private float pipesnphysics$capacityPerRpm;
@@ -108,28 +107,15 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity implements
         pipesnphysics$lastFacing = front;
     }
 
-    @Inject(method = "addBehaviours", at = @At("TAIL"))
-    private void pipesnphysics$addModeDial(List<BlockEntityBehaviour> behaviours, CallbackInfo ci) {
-        // Dialing the mode re-shapes what the solver sees at this block (an EMF source becomes a
-        // one-way resistance), so the callback wakes the network rather than waiting the heartbeat.
-        PumpModeBehaviour mode = new PumpModeBehaviour(
-                Component.translatable("pipesnphysics.gui.pump.mode"),
-                (SmartBlockEntity) (Object) this,
-                new DialSlot(PumpBlockEntityMixin::pipesnphysics$isDialFace));
-        mode.withCallback(value -> pipesnphysics$wakeNetwork())
-                .onlyActiveWhen(PipesNPhysicsConfig.ENABLE_HYDRO_TURBINE);
-        // A pump PLACED from now on decides its own role; one loaded from a save without the key
-        // reads 0 = PUMP, so nothing already built changes under the player.
-        mode.value = PumpMode.AUTO.ordinal();
-        pipesnphysics$mode = mode;
-        behaviours.add(mode);
-    }
-
-    /** The pump's four faces square to its pipe axis — the only ones a value box can live on. */
+    /**
+     * The dial, looked up rather than held in a field: a pump that REPLACES {@code addBehaviours}
+     * instead of extending it (TFMG's electric pump) gets its dial from {@link PumpDialMixin}, and a
+     * field set in the inject above would still read null for it — leaving the block permanently
+     * unable to turbine.
+     */
     @Unique
-    private static boolean pipesnphysics$isDialFace(BlockState state, Direction side) {
-        return state.getBlock() instanceof PumpBlock
-                && side.getAxis() != state.getValue(PumpBlock.FACING).getAxis();
+    private PumpModeBehaviour pipesnphysics$mode() {
+        return ((SmartBlockEntity) (Object) this).getBehaviour(PumpModeBehaviour.TYPE);
     }
 
     @Unique
@@ -156,19 +142,36 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity implements
      * comes up as — resolves off ONE fact: is something else turning this block. A driven pump is a
      * pump; an undriven one is a turbine, and needs no head measurement to say so, because a fall
      * short of the rating passes nothing anyway (the branch is NO_HEAD, which is the same wall an
-     * unpowered pump always gave). {@code hasSource()} is false while WE are the source, so a
-     * turbine that is already turning keeps its role.
+     * unpowered pump always gave). "Driving" means a shaft OR the strength an electric pump
+     * publishes — see {@code drivenWithoutAShaft}. {@code hasSource()} is false while WE are the
+     * source, so a turbine that is already turning keeps its role.
      */
     @Override
     public boolean pipesnphysics$isTurbine() {
         if (!PipesNPhysicsConfig.ENABLE_ENGINE.get()) return false;
         if (!PipesNPhysicsConfig.ENABLE_HYDRO_TURBINE.get()) return false;
-        if (pipesnphysics$mode == null) return false;
-        return switch (pipesnphysics$mode.mode()) {
+        PumpModeBehaviour dial = pipesnphysics$mode();
+        if (dial == null) return false;
+        return switch (dial.mode()) {
             case TURBINE -> true;
-            case AUTO -> !hasSource();
+            case AUTO -> !hasSource() && !pipesnphysics$drivenWithoutAShaft();
             case PUMP -> false;
         };
+    }
+
+    /**
+     * Whether something OTHER than a shaft is running this pump — an electric one's power, say.
+     * AUTO asks "is anything driving this block", and asking it as {@code hasSource()} alone was
+     * only ever right for a pump a shaft drives: an electric pump has no kinetic source EVER, so it
+     * came up AUTO and resolved to TURBINE, refusing to pump however much power it had.
+     *
+     * Reads the pump's PUBLISHED strength (§2), never its shaft speed — a turbine we are already
+     * spinning turns its own shaft, and counting that would flip it back to a pump the moment it
+     * started, then back again once it stopped.
+     */
+    @Unique
+    private boolean pipesnphysics$drivenWithoutAShaft() {
+        return level != null && Pumps.publishedStrength(level, worldPosition) > 0;
     }
 
     @Override
@@ -494,7 +497,8 @@ public abstract class PumpBlockEntityMixin extends KineticBlockEntity implements
     @Unique
     private void pipesnphysics$addRoleLines(List<Component> tooltip, boolean isPlayerSneaking,
                                             boolean turbine) {
-        PumpMode mode = pipesnphysics$mode == null ? PumpMode.PUMP : pipesnphysics$mode.mode();
+        PumpModeBehaviour dial = pipesnphysics$mode();
+        PumpMode mode = dial == null ? PumpMode.PUMP : dial.mode();
         String roleKey = switch (mode) {
             case PUMP -> "gui.goggles.role_pump";
             case TURBINE -> "gui.goggles.role_turbine";
