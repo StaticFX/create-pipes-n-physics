@@ -10,9 +10,11 @@ import java.util.Set;
 /**
  * Conditionally applies Sable-dependent mixins based on which Sable components are installed.
  * <ul>
- *   <li>{@code FluidTankRendererMixin} — needs Sable Companion (tilted fluid rendering)</li>
+ *   <li>{@code FluidTankRendererMixin} and {@code BlockEntityRenderDispatcherMixin} — need Sable
+ *       Companion (tilted fluid rendering, for Create's own tanks and for tank derivatives that
+ *       ship their own renderer)</li>
  *   <li>{@code FluidTankMassMixin} — needs Sable Full (dynamic tank mass via physics API)</li>
- *   <li>{@code FluidTankWeightGoggleMixin} — goggle weight readout for the mass feature,
+ *   <li>{@code GoggleFluidWeightMixin} — goggle weight readout for the mass feature,
  *       so it follows Sable Full as well</li>
  * </ul>
  * Without this, loading the mixin classes would crash with NoClassDefFoundError
@@ -49,10 +51,10 @@ public class SableMixinPlugin implements IMixinConfigPlugin {
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
         // The mass feature and its goggle readout need full Sable (physics API).
         if (mixinClassName.endsWith("FluidTankMassMixin")
-                || mixinClassName.endsWith("FluidTankWeightGoggleMixin")) {
+                || mixinClassName.endsWith("GoggleFluidWeightMixin")) {
             return SABLE_FULL_PRESENT;
         }
-        // All other mixins in this config (FluidTankRendererMixin) need Sable Companion
+        // The remaining mixins in this config (the two tilted-fluid hooks) need Sable Companion
         return SABLE_COMPANION_PRESENT;
     }
 

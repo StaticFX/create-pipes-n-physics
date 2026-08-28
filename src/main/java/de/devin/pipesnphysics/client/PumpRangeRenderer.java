@@ -7,6 +7,7 @@ import com.simibubi.create.content.equipment.goggles.GogglesItem;
 import com.simibubi.create.foundation.model.BakedQuadHelper;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.compat.SubLevelFrame;
 import de.devin.pipesnphysics.engine.net.PumpRangePayload;
 import de.devin.pipesnphysics.engine.pump.Pumps;
 import it.unimi.dsi.fastutil.floats.FloatArrayList;
@@ -83,6 +84,13 @@ import java.util.List;
  * only streams vertices. The bake also paints each POSITION once: the walk hands every branch its
  * own copy of the shared trunk, so a manifold's header arrived once per branch and was rebuilt,
  * re-cut and re-drawn that many times over — and being translucent, double-painted too.
+ *
+ * On a Sable contraption those positions are PLOT coordinates and the pipes are drawn through the
+ * contraption's pose, so the answer is placed through {@link SubLevelDraw#cameraRelative} rather
+ * than a bare camera offset — with only the offset the tint was emitted ~30M blocks out and the
+ * overlay simply never appeared on a ship. The mesh is therefore baked RELATIVE TO THE PUMP: at
+ * plot distances a float vertex is only accurate to a few blocks, so a mesh of absolute positions
+ * dissolves into a cloud of junk hanging around the player.
  */
 @EventBusSubscriber(modid = PipesNPhysics.ID, value = Dist.CLIENT)
 public final class PumpRangeRenderer {
@@ -101,6 +109,8 @@ public final class PumpRangeRenderer {
 
     /** The answer {@link #mesh} was baked from — by IDENTITY, since each answer is a fresh payload. */
     private static PumpRangePayload bakedFrom;
+    /** Whether that bake could cut its cells — a contraption rolling out of level invalidates it. */
+    private static boolean bakedUpright;
     private static ReachMesh mesh;
 
     private PumpRangeRenderer() {}
@@ -140,18 +150,23 @@ public final class PumpRangeRenderer {
     }
 
     /**
-     * One frame: stream the baked vertices, applying only the camera offset and the fade's alpha
-     * (which is why alpha is the one thing NOT baked into the mesh).
+     * One frame: stream the baked vertices, applying only the placement transform and the fade's
+     * alpha (which is why alpha is the one thing NOT baked into the mesh).
+     *
+     * A network never spans two Sable sub-levels — the graph BFS is single-level spatial adjacency —
+     * so the whole answer rides ONE frame, taken at the pump. Off a contraption that frame is null
+     * and this is the plain camera offset it always was.
      */
     private static void paintReach(PoseStack poseStack, Minecraft mc,
                                    PumpRangePayload payload, float fade) {
-        ReachMesh baked = meshFor(mc, payload);
+        SubLevelFrame frame = SubLevelDraw.frameAt(payload.pumpPos());
+        ReachMesh baked = meshFor(mc, payload, frame == null || frame.upright());
         if (baked.colors().length == 0) return;
         Vec3 camera = mc.gameRenderer.getMainCamera().getPosition();
         float alpha = TINT_ALPHA * fade;
 
         poseStack.pushPose();
-        poseStack.translate(-camera.x, -camera.y, -camera.z);
+        SubLevelDraw.cameraRelative(poseStack, camera, frame, payload.pumpPos());
         VertexConsumer buf = OWN_BUFFER.getBuffer(PnpRenderTypes.REACH_TINT);
         PoseStack.Pose pose = poseStack.last();
         float[] vertices = baked.vertices();
@@ -180,10 +195,11 @@ public final class PumpRangeRenderer {
     }
 
     /** The mesh for this answer, baking it the first frame the answer is seen. */
-    private static ReachMesh meshFor(Minecraft mc, PumpRangePayload payload) {
-        if (payload == bakedFrom && mesh != null) return mesh;
+    private static ReachMesh meshFor(Minecraft mc, PumpRangePayload payload, boolean upright) {
+        if (payload == bakedFrom && upright == bakedUpright && mesh != null) return mesh;
         bakedFrom = payload;
-        mesh = bake(mc, payload);
+        bakedUpright = upright;
+        mesh = bake(mc, payload, upright);
         return mesh;
     }
 
@@ -192,8 +208,14 @@ public final class PumpRangeRenderer {
      * the result out flat. Each POSITION is baked at most once — the walk gives every branch its
      * own copy of the trunk they share, and painting a translucent tint twice both costs the work
      * twice and comes out darker; the first path to reach a cell decides its cut and colour.
+     *
+     * {@code upright} is whether block-local Y is still a world elevation. On a TILTED contraption
+     * it is not: the reach limit is a world-horizontal plane, which cutting along the model's own Y
+     * would slice at the wrong angle, and the climb tests behind the smooth shading read plot Y. So
+     * a tilted run is painted whole cells in flat colour — the margins themselves are world
+     * elevations either way, so what the paint SAYS stays true; only the sub-block refinement drops.
      */
-    private static ReachMesh bake(Minecraft mc, PumpRangePayload payload) {
+    private static ReachMesh bake(Minecraft mc, PumpRangePayload payload, boolean upright) {
         Bake bake = new Bake();
         for (PumpRangePayload.RangePath path : payload.paths()) {
             // Both quantities arrive as ELEVATIONS measured from the cell's own centre, so they
@@ -213,8 +235,11 @@ public final class PumpRangeRenderer {
                 // stays bare. PULLING, that same surface would hide the answer — how deep the
                 // pump can draw is a question about pipe BELOW it — so the floor alone bounds
                 // that side. (The surface only ever decides WHETHER a cell is painted either
-                // way, never where its paint starts; see the class comment.)
-                if (push && 0.5f - cell.aboveSupply() >= 1) continue;
+                // way, never where its paint starts; see the class comment.) A NaN margin means
+                // no reservoir anchored the field, so there is no surface to be under and the
+                // test fails OPEN — comparing against the self-anchor fiction at the pump would
+                // blank a whole descending push run for no reason a player could see.
+                if (push && cell.aboveSupply() <= -0.5f) continue;
 
                 // The limit — the ceiling overhead when pushing, the drawable floor below when
                 // pulling — cuts the pipe only where the run CLIMBS through it. On a level
@@ -223,7 +248,7 @@ public final class PumpRangeRenderer {
                 float limit = push ? 0.5f + cell.margin() : 0.5f - cell.margin();
                 float low = Float.NEGATIVE_INFINITY;
                 float high = Float.POSITIVE_INFINITY;
-                if (climbsThrough(cells, i)) {
+                if (upright && climbsThrough(cells, i)) {
                     low = push ? Float.NEGATIVE_INFINITY : limit;
                     high = push ? limit : Float.POSITIVE_INFINITY;
                     if (low >= 1 || high <= 0) continue; // the band misses this cell entirely
@@ -231,8 +256,9 @@ public final class PumpRangeRenderer {
                     continue; // level stretch, past the limit: out of reach, all of it
                 }
                 if (!bake.first(cell.pos())) continue;
-                bakeCell(bake, mc, BlockPos.of(cell.pos()), low, high,
-                        shadingFor(cells, i, limit, reach, push));
+                bakeCell(bake, mc, BlockPos.of(cell.pos()), payload.pumpPos(), low, high,
+                        upright ? shadingFor(cells, i, limit, reach, push)
+                                : Shading.flat(rampColor(cell.margin(), reach)));
             }
         }
         return bake.done();
@@ -249,11 +275,15 @@ public final class PumpRangeRenderer {
             return painted.add(pos);
         }
 
-        /** One vertex: model-local geometry lifted into world space, its texture, normal and colour. */
-        void vertex(Vec3 at, BlockPos cell, float u, float v, Direction facing, Rgb color) {
-            vertices.add((float) at.x + cell.getX());
-            vertices.add((float) at.y + cell.getY());
-            vertices.add((float) at.z + cell.getZ());
+        /**
+         * One vertex: model-local geometry placed at its cell, RELATIVE to the mesh's origin — the
+         * pump. The offset is integer block arithmetic and stays small, which is what keeps the
+         * mesh usable on a Sable plot 30M blocks out (see {@link SubLevelDraw#cameraRelative}).
+         */
+        void vertex(Vec3 at, BlockPos cell, BlockPos origin, float u, float v, Direction facing, Rgb color) {
+            vertices.add((float) at.x + (cell.getX() - origin.getX()));
+            vertices.add((float) at.y + (cell.getY() - origin.getY()));
+            vertices.add((float) at.z + (cell.getZ() - origin.getZ()));
             vertices.add(u);
             vertices.add(v);
             vertices.add(facing.getStepX());
@@ -401,7 +431,7 @@ public final class PumpRangeRenderer {
     }
 
     /** Bakes one block's model, tinted and cut down to the band between two planes. */
-    private static void bakeCell(Bake bake, Minecraft mc, BlockPos pos,
+    private static void bakeCell(Bake bake, Minecraft mc, BlockPos pos, BlockPos origin,
                                  float low, float high, Shading shading) {
         BlockState state = mc.level.getBlockState(pos);
         if (state.isAir()) return;
@@ -419,10 +449,10 @@ public final class PumpRangeRenderer {
         RandomSource random = RandomSource.create();
         for (Direction face : Direction.values()) {
             random.setSeed(state.getSeed(pos));
-            bakeQuads(bake, pos, model.getQuads(state, face, random, data, null), low, high, shading);
+            bakeQuads(bake, pos, origin, model.getQuads(state, face, random, data, null), low, high, shading);
         }
         random.setSeed(state.getSeed(pos));
-        bakeQuads(bake, pos, model.getQuads(state, null, random, data, null), low, high, shading);
+        bakeQuads(bake, pos, origin, model.getQuads(state, null, random, data, null), low, high, shading);
     }
 
     /** The block entity's own model data — the raw input a model enriches into its real data. */
@@ -439,7 +469,7 @@ public final class PumpRangeRenderer {
      * cannot feed a flat mesh); the geometry, UVs and face normal are the model's own, only the
      * colour is ours.
      */
-    private static void bakeQuads(Bake bake, BlockPos pos, List<BakedQuad> quads,
+    private static void bakeQuads(Bake bake, BlockPos pos, BlockPos origin, List<BakedQuad> quads,
                                   float low, float high, Shading shading) {
         for (BakedQuad quad : quads) {
             BakedQuad shown = cutAt(quad, low, false);
@@ -449,7 +479,7 @@ public final class PumpRangeRenderer {
             Direction facing = shown.getDirection();
             for (int i = 0; i < 4; i++) {
                 Vec3 at = BakedQuadHelper.getXYZ(vertices, i);
-                bake.vertex(at, pos, BakedQuadHelper.getU(vertices, i),
+                bake.vertex(at, pos, origin, BakedQuadHelper.getU(vertices, i),
                         BakedQuadHelper.getV(vertices, i), facing, shading.at(at.y));
             }
         }

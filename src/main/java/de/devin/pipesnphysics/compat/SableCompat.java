@@ -10,6 +10,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.List;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 
@@ -92,6 +93,24 @@ public class SableCompat {
         return PROVIDER.atOverlappingContraptions(level, origin, reader);
     }
 
+    /**
+     * How the sub-level containing this position maps onto the screen THIS frame, or null when the
+     * position is not on one (and always without Sable). CLIENT ONLY — it reads the interpolated
+     * render pose, which is what an overlay has to match to land on the contraption a player sees.
+     */
+    public static SubLevelFrame clientFrame(Level level, BlockPos pos, float partialTicks) {
+        return PROVIDER.clientFrame(level, pos, partialTicks);
+    }
+
+    /**
+     * The render frame of every contraption within {@code radius} of a world point — how a renderer
+     * that sweeps the world around the camera finds the plot chunks it would otherwise never reach.
+     */
+    public static List<SubLevelFrame> clientFramesNear(Level level, Vec3 center, double radius,
+                                                       float partialTicks) {
+        return PROVIDER.clientFramesNear(level, center, radius, partialTicks);
+    }
+
     public static double getWorldY(Level level, BlockPos pos) {
         return PROVIDER.getWorldY(level, pos);
     }
@@ -164,6 +183,17 @@ public class SableCompat {
         @Override
         public <T> T atOverlappingContraptions(Level level, BlockPos origin, BiFunction<Level, BlockPos, T> reader) {
             return null; // no sub-levels without Sable: nothing overlaps
+        }
+
+        @Override
+        public SubLevelFrame clientFrame(Level level, BlockPos pos, float partialTicks) {
+            return null; // every block is drawn where it stands
+        }
+
+        @Override
+        public List<SubLevelFrame> clientFramesNear(Level level, Vec3 center, double radius,
+                                                    float partialTicks) {
+            return List.of();
         }
 
         @Override

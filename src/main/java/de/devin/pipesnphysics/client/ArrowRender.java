@@ -8,7 +8,6 @@ import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.Direction;
-import net.minecraft.world.phys.Vec3;
 
 /**
  * The shared baked-arrow emitter behind every in-world arrow overlay (the pump range paths,
@@ -26,12 +25,16 @@ public final class ArrowRender {
         return model == null || model == mc.getModelManager().getMissingModel() ? null : model;
     }
 
-    /** Emit the arrow model centered at world-space (x, y, z), pointing {@code dir}, tinted. */
+    /**
+     * Emit the arrow model centered at (x, y, z) RELATIVE to the pose's own origin, pointing
+     * {@code dir}, tinted. The caller has already placed that origin — the camera offset on the
+     * main level, a contraption's own frame on a Sable sub-level (see SubLevelDraw).
+     */
     public static void emit(PoseStack poseStack, Minecraft mc, VertexConsumer consumer,
-                            BakedModel model, Vec3 camera, double x, double y, double z,
+                            BakedModel model, double x, double y, double z,
                             Direction dir, float r, float g, float b, float alpha) {
         poseStack.pushPose();
-        poseStack.translate(x - camera.x - 0.5, y - camera.y - 0.5, z - camera.z - 0.5);
+        poseStack.translate(x - 0.5, y - 0.5, z - 0.5);
         poseStack.translate(0.5, 0.5, 0.5);
         applyDirectionRotation(poseStack, dir);
         poseStack.translate(-0.5, -0.5, -0.5);

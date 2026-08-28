@@ -7,22 +7,23 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.client.Rgb;
 import de.devin.pipesnphysics.client.RodRender;
+import de.devin.pipesnphysics.client.SubLevelDraw;
+import de.devin.pipesnphysics.compat.SubLevelFrame;
 import de.devin.pipesnphysics.engine.net.GraphOverlayPayload;
 import de.devin.pipesnphysics.engine.net.GraphOverlayRequest;
-import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderStateShard;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.debug.DebugRenderer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 import org.joml.Matrix4f;
-import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -122,15 +123,8 @@ public final class GraphOverlay {
             }
         }
 
-        Camera cam = event.getCamera();
-        Vector3f camOff = new Vector3f(
-                (float) -cam.getPosition().x,
-                (float) -cam.getPosition().y,
-                (float) -cam.getPosition().z);
-
+        Vec3 camera = event.getCamera().getPosition();
         PoseStack pose = event.getPoseStack();
-        pose.pushPose();
-        pose.translate(camOff.x, camOff.y, camOff.z);
 
         MultiBufferSource.BufferSource buffers = Minecraft.getInstance()
                 .renderBuffers().bufferSource();
@@ -140,9 +134,25 @@ public final class GraphOverlay {
         // next lines.addVertex throws "Not building!".
         VertexConsumer lines = buffers.getBuffer(RenderType.lines());
         for (ActiveOverlay overlay : ACTIVE) {
-            drawNodes(pose, lines, overlay.payload, lifeFraction(overlay, now));
-            drawSurfaceMarkers(pose, lines, overlay.payload, lifeFraction(overlay, now));
-            drawFlag(pose, lines, overlay.payload, lifeFraction(overlay, now));
+            float fade = lifeFraction(overlay, now);
+            SubLevelFrame frame = frameOf(overlay);
+            // Every node, edge and box is emitted RELATIVE to the seed — on a Sable plot 30M blocks
+            // out, absolute coordinates in a float matrix are accurate to a few blocks at best.
+            BlockPos origin = BlockPos.of(overlay.payload.seed());
+            pose.pushPose();
+            SubLevelDraw.cameraRelative(pose, camera, frame, origin);
+            drawNodes(pose, lines, overlay.payload, fade, origin);
+            drawFlag(pose, lines, overlay.payload, fade, origin);
+            pose.popPose();
+
+            // A surface marker is a WORLD elevation the engine computed, not a plot one, so it is
+            // drawn in world space at the node's projected footprint rather than inside the
+            // contraption's frame — on a tilt it would otherwise lean with the hull and stop
+            // meaning "this is the height fluid settles to".
+            pose.pushPose();
+            SubLevelDraw.cameraRelative(pose, camera, null, BlockPos.ZERO);
+            drawSurfaceMarkers(pose, lines, overlay.payload, fade, frame);
+            pose.popPose();
         }
         buffers.endBatch(RenderType.lines());
 
@@ -151,20 +161,32 @@ public final class GraphOverlay {
         RenderType rodType = rodRenderType();
         VertexConsumer rods = buffers.getBuffer(rodType);
         for (ActiveOverlay overlay : ACTIVE) {
-            drawEdges(pose, rods, overlay.payload, lifeFraction(overlay, now));
+            BlockPos origin = BlockPos.of(overlay.payload.seed());
+            pose.pushPose();
+            SubLevelDraw.cameraRelative(pose, camera, frameOf(overlay), origin);
+            drawEdges(pose, rods, overlay.payload, lifeFraction(overlay, now), origin);
+            pose.popPose();
         }
         buffers.endBatch(rodType);
 
-        pose.popPose();
-
         for (ActiveOverlay overlay : ACTIVE) {
             float fade = lifeFraction(overlay, now);
-            drawEdgeLabels(buffers, overlay.payload, fade);
-            drawNodeLabels(buffers, overlay.payload, fade);
-            drawSurfaceLabels(buffers, overlay.payload, fade);
-            drawFlagLabel(buffers, overlay.payload, fade);
+            SubLevelFrame frame = frameOf(overlay);
+            drawEdgeLabels(buffers, overlay.payload, fade, frame);
+            drawNodeLabels(buffers, overlay.payload, fade, frame);
+            drawSurfaceLabels(buffers, overlay.payload, fade, frame);
+            drawFlagLabel(buffers, overlay.payload, fade, frame);
         }
         buffers.endBatch();
+    }
+
+    /**
+     * The frame this overlay's network is drawn through. A network never spans two Sable
+     * sub-levels — the graph BFS is single-level spatial adjacency — so the seed answers for the
+     * whole snapshot, and off a contraption it answers null (a plain camera offset).
+     */
+    private static SubLevelFrame frameOf(ActiveOverlay overlay) {
+        return SubLevelDraw.frameAt(BlockPos.of(overlay.payload.seed()));
     }
 
     /** The gold-flag color shared by the flagged cell's box and its floating coordinates. */
@@ -176,9 +198,10 @@ public final class GraphOverlay {
      * so this is what ties the command back to the exact pipe the player was aiming at.
      */
     private static void drawFlag(PoseStack pose, VertexConsumer buf,
-                                 GraphOverlayPayload payload, float alpha) {
+                                 GraphOverlayPayload payload, float alpha, BlockPos origin) {
         BlockPos p = BlockPos.of(payload.seed());
-        drawBox(pose.last().pose(), buf, p.getX() + 0.5f, p.getY() + 0.5f, p.getZ() + 0.5f,
+        drawBox(pose.last().pose(), buf, p.getX() - origin.getX() + 0.5f,
+                p.getY() - origin.getY() + 0.5f, p.getZ() - origin.getZ() + 0.5f,
                 0.4f, FLAG_COLOR, alpha);
     }
 
@@ -187,12 +210,12 @@ public final class GraphOverlay {
      * edge labels) — the flag must be findable through walls, that is its whole job.
      */
     private static void drawFlagLabel(MultiBufferSource buffers,
-                                      GraphOverlayPayload payload, float fade) {
+                                      GraphOverlayPayload payload, float fade, SubLevelFrame frame) {
         BlockPos p = BlockPos.of(payload.seed());
         int alpha = (int) (255 * Math.max(0.25f, fade));
+        Vec3 at = SubLevelDraw.project(frame, p.getX() + 0.5, p.getY() + 1.6, p.getZ() + 0.5);
         DebugRenderer.renderFloatingText(new PoseStack(), buffers, "⚑ " + p.toShortString(),
-                p.getX() + 0.5, p.getY() + 1.6, p.getZ() + 0.5,
-                (alpha << 24) | 0xFFD23C, 0.025f, true, 0, true);
+                at.x, at.y, at.z, (alpha << 24) | 0xFFD23C, 0.025f, true, 0, true);
     }
 
     /**
@@ -202,7 +225,7 @@ public final class GraphOverlay {
      * the whole base's labels bleeding through terrain).
      */
     private static void drawEdgeLabels(MultiBufferSource buffers,
-                                       GraphOverlayPayload payload, float fade) {
+                                       GraphOverlayPayload payload, float fade, SubLevelFrame frame) {
         List<? extends GraphOverlayPayload.EdgeEntry> edges = payload.edges();
         for (int ei = 0; ei < edges.size(); ei++) {
             List<Long> pts = edges.get(ei).points();
@@ -210,14 +233,15 @@ public final class GraphOverlay {
 
             BlockPos midHigh = BlockPos.of(pts.get(pts.size() / 2));
             BlockPos midLow = BlockPos.of(pts.get(Math.max(0, (pts.size() - 1) / 2)));
-            double x = (midHigh.getX() + midLow.getX()) / 2.0 + 0.5;
-            double y = (midHigh.getY() + midLow.getY()) / 2.0 + 1.15;
-            double z = (midHigh.getZ() + midLow.getZ()) / 2.0 + 0.5;
+            Vec3 at = SubLevelDraw.project(frame,
+                    (midHigh.getX() + midLow.getX()) / 2.0 + 0.5,
+                    (midHigh.getY() + midLow.getY()) / 2.0 + 1.15,
+                    (midHigh.getZ() + midLow.getZ()) / 2.0 + 0.5);
 
             int alpha = (int) (255 * Math.max(0.25f, fade));
             int color = (alpha << 24) | 0xFFFF55;
             DebugRenderer.renderFloatingText(new PoseStack(), buffers,
-                    GraphOverlayPayload.edgeLetter(ei), x, y, z, color,
+                    GraphOverlayPayload.edgeLetter(ei), at.x, at.y, at.z, color,
                     0.025f, true, 0, false);
         }
     }
@@ -228,16 +252,18 @@ public final class GraphOverlay {
      * so the overlay stays readable. Mirrors {@link #drawEdgeLabels}' billboarding.
      */
     private static void drawNodeLabels(MultiBufferSource buffers,
-                                       GraphOverlayPayload payload, float fade) {
+                                       GraphOverlayPayload payload, float fade, SubLevelFrame frame) {
         for (var n : payload.nodes()) {
             if (n.label().isEmpty()) continue;
             String[] lines = n.label().split("\n");
-            double x = n.x() + 0.5, top = n.y() + 1.35, z = n.z() + 0.5;
             int alpha = (int) (255 * Math.max(0.25f, fade));
             for (int i = 0; i < lines.length; i++) {
                 int rgb = i == 0 ? nodeRgb(n.kind()) : 0xD0D0D0;
+                // Stack the lines in the world, not in the plot: a label column that leaned with a
+                // tilted hull would read as part of the ship rather than as text above the node.
+                Vec3 at = SubLevelDraw.project(frame, n.x() + 0.5, n.y() + 1.35, n.z() + 0.5);
                 DebugRenderer.renderFloatingText(new PoseStack(), buffers, lines[i],
-                        x, top - i * 0.19, z, (alpha << 24) | rgb, 0.02f, true, 0, false);
+                        at.x, at.y - i * 0.19, at.z, (alpha << 24) | rgb, 0.02f, true, 0, false);
             }
         }
     }
@@ -270,14 +296,16 @@ public final class GraphOverlay {
      * either the pipe (our bug) or Create's tank render being bumped off our surface.
      */
     private static void drawSurfaceMarkers(PoseStack pose, VertexConsumer buf,
-                                           GraphOverlayPayload payload, float alpha) {
+                                           GraphOverlayPayload payload, float alpha,
+                                           SubLevelFrame frame) {
         Matrix4f m = pose.last().pose();
         for (var n : payload.nodes()) {
             if (Float.isNaN(n.surfaceY())) continue;
             float y = n.surfaceY();
+            Vec3 at = SubLevelDraw.project(frame, n.x() + 0.5, n.y() + 0.5, n.z() + 0.5);
             // Slightly overhang the block so the line clears the tank walls and stays visible.
-            float x0 = n.x() - 0.05f, x1 = n.x() + 1.05f;
-            float z0 = n.z() - 0.05f, z1 = n.z() + 1.05f;
+            float x0 = (float) at.x - 0.55f, x1 = (float) at.x + 0.55f;
+            float z0 = (float) at.z - 0.55f, z1 = (float) at.z + 0.55f;
             line(m, buf, x0, y, z0, x1, y, z0, SURFACE_COLOR, alpha);
             line(m, buf, x1, y, z0, x1, y, z1, SURFACE_COLOR, alpha);
             line(m, buf, x1, y, z1, x0, y, z1, SURFACE_COLOR, alpha);
@@ -287,20 +315,21 @@ public final class GraphOverlay {
 
     /** The surface elevation value floating at the marker, SEE-THROUGH so it reads against the tank. */
     private static void drawSurfaceLabels(MultiBufferSource buffers,
-                                          GraphOverlayPayload payload, float fade) {
+                                          GraphOverlayPayload payload, float fade, SubLevelFrame frame) {
         for (var n : payload.nodes()) {
             if (Float.isNaN(n.surfaceY())) continue;
             int alpha = (int) (255 * Math.max(0.25f, fade));
+            Vec3 at = SubLevelDraw.project(frame, n.x() + 0.5, n.y() + 0.5, n.z() + 0.5);
             DebugRenderer.renderFloatingText(new PoseStack(), buffers,
                     String.format("surface %.2f", n.surfaceY()),
-                    n.x() + 0.5, n.surfaceY() + 0.05, n.z() + 0.5,
+                    at.x, n.surfaceY() + 0.05, at.z,
                     (alpha << 24) | 0x00E6E6, 0.02f, true, 0, true);
         }
     }
 
     /** Node markers — a small wireframe box per node, colored by kind (depth-tested lines). */
     private static void drawNodes(PoseStack pose, VertexConsumer buf,
-                                  GraphOverlayPayload payload, float alpha) {
+                                  GraphOverlayPayload payload, float alpha, BlockPos origin) {
         Matrix4f m = pose.last().pose();
         for (var n : payload.nodes()) {
             Rgb color = switch (n.kind()) {
@@ -309,7 +338,8 @@ public final class GraphOverlay {
                 case GraphOverlayPayload.NodeEntry.KIND_OPEN_END -> new Rgb(80, 180, 255);
                 default -> new Rgb(255, 255, 255);
             };
-            drawBox(m, buf, n.x() + 0.5f, n.y() + 0.5f, n.z() + 0.5f, 0.25f, color, alpha);
+            drawBox(m, buf, n.x() - origin.getX() + 0.5f, n.y() - origin.getY() + 0.5f,
+                    n.z() - origin.getZ() + 0.5f, 0.25f, color, alpha);
         }
     }
 
@@ -320,7 +350,7 @@ public final class GraphOverlay {
      * visible through the pipe body.
      */
     private static void drawEdges(PoseStack pose, VertexConsumer buf,
-                                  GraphOverlayPayload payload, float alpha) {
+                                  GraphOverlayPayload payload, float alpha, BlockPos origin) {
         Matrix4f m = pose.last().pose();
         for (var e : payload.edges()) {
             boolean flowing = e.direction() == GraphOverlayPayload.EdgeEntry.DIR_FORWARD;
@@ -337,15 +367,17 @@ public final class GraphOverlay {
                 Rgb startColor = gradient ? pressureColor(pressures.get(i - 1)) : fallback;
                 Rgb endColor = gradient ? pressureColor(pressures.get(i)) : fallback;
                 rodSegment(m, buf,
-                        p0.getX() + 0.5f, p0.getY() + 0.5f, p0.getZ() + 0.5f,
-                        p1.getX() + 0.5f, p1.getY() + 0.5f, p1.getZ() + 0.5f,
+                        p0.getX() - origin.getX() + 0.5f, p0.getY() - origin.getY() + 0.5f,
+                        p0.getZ() - origin.getZ() + 0.5f,
+                        p1.getX() - origin.getX() + 0.5f, p1.getY() - origin.getY() + 0.5f,
+                        p1.getZ() - origin.getZ() + 0.5f,
                         startColor, endColor, alpha);
             }
             if (flowing && pts.size() >= 2) {
                 Rgb tip = gradient ? pressureColor(pressures.get(pts.size() - 1)) : fallback;
                 BlockPos last = BlockPos.of(pts.get(pts.size() - 1));
                 BlockPos prev = BlockPos.of(pts.get(pts.size() - 2));
-                drawArrowheadRod(m, buf, prev, last, tip, alpha);
+                drawArrowheadRod(m, buf, prev.subtract(origin), last.subtract(origin), tip, alpha);
             }
         }
     }

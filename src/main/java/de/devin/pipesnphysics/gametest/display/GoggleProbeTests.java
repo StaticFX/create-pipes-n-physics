@@ -598,6 +598,47 @@ public class GoggleProbeTests {
     }
 
     /**
+     * With NOTHING supplying a pump, the push side must be painted by its REACH alone: the supply
+     * surface that normally keeps a flat push run honest does not exist, and the reach field's
+     * self-anchor fiction (§6, at the pump's own centre) must not be mistaken for one. A cell then
+     * reports NO supply — not "level with it" — so the paint's `below the supply is gravity's work`
+     * rule cannot fire and blank a run standing under the pump.
+     *
+     * The rig dead-ends its suction in a capped pipe, so no source endpoint participates and no
+     * reservoir anchors the field — the same fiction that once capped the PULL side's paint at one
+     * block regardless of RPM, still live on the push side until 2026-08-27.
+     *
+     * Mutation check: anchor the fallback at the pump's own head again and the cells report a real
+     * (0-ish) above-supply figure instead of none. NOT covered by a rig: the visible consequence
+     * needs a push run standing a block or more BELOW the pump, which no template has.
+     */
+    @GameTest(template = "physics/pump_dead_suction", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void unfedPushRunIsPaintedByReachNotByAPhantomSupply(GameTestHelper helper) {
+        BlockPos pump = new BlockPos(2, 1, 1);
+
+        helper.succeedWhen(() -> {
+            var payload = PumpRangeProbe.probe(helper.getLevel(), helper.absolutePos(pump));
+            var push = payload.paths().stream().filter(p -> !p.pull()).findFirst().orElse(null);
+            if (push == null) {
+                helper.fail("the pump reported no push-side reach path" + dump(helper, pump));
+                return;
+            }
+            var cell = push.cells().stream().filter(PumpRangePayload.RangeCell::pipe)
+                    .findFirst().orElse(null);
+            if (cell == null) {
+                helper.fail("the push path carries no pipe cell to paint" + dump(helper, pump));
+                return;
+            }
+            if (!Float.isNaN(cell.aboveSupply())) {
+                helper.fail("the outlet cell at " + BlockPos.of(cell.pos()) + " reports standing "
+                        + cell.aboveSupply() + " above a supply surface, but nothing supplies this"
+                        + " pump — that phantom surface blanks a push run below it"
+                        + dump(helper, pump));
+            }
+        });
+    }
+
+    /**
      * A pump parked above the waterline with a DRY suction riser reaches NOTHING down it, however
      * deep its nominal suction limit would allow: suction HOLDS a column, it never creates one, so
      * the solve's crest gate refuses the branch outright until the supply itself rises to the

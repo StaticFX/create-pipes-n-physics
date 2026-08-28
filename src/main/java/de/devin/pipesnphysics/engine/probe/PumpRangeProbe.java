@@ -92,8 +92,15 @@ public final class PumpRangeProbe {
 
         Double known = solution.nodeHeads().get(pump.index());
         double supplyHead = known != null ? known : pump.worldY();
+        // The fallback's anchor is NaN, NOT the pump's own head: an anchor is a SUPPLY SURFACE, and
+        // when no reservoir seeded the field there is no surface — only the self-anchor fiction at
+        // the pump's own centre (§6). Saying "here" would make the push side hide every cell that
+        // stands below the PUMP as gravity's work, which is the same fiction that once capped the
+        // pull side's paint at one block. NaN fails the paint's supply test open, so a run with
+        // nothing supplying it is painted by its reach alone. The push CEILING still seeds from
+        // supplyHead — that one is a real elevation either way.
         Reach fallback = new Reach(
-                pump.worldY(), supplyHead, supplyHead + pumpHead, pump.worldY() - suction);
+                pump.worldY(), Double.NaN, supplyHead + pumpHead, pump.worldY() - suction);
 
         Walker walker = new Walker(level, graph, solution, fallback, suction,
                 FlowSolver.pumpPrimeAllowance(pumpHead));
@@ -154,7 +161,9 @@ public final class PumpRangeProbe {
         /**
          * How far {@code y} stands ABOVE the supply surface — the head the pump is actually
          * paying for there (§6: consumed = lift above the anchor). Negative below it, where
-         * gravity moves the fluid and the pump's reach is not being spent at all.
+         * gravity moves the fluid and the pump's reach is not being spent at all. NaN when no
+         * reservoir anchored the field at all: there is then no surface to be above or below, and
+         * the paint must not pretend the pump's own elevation is one.
          */
         float aboveSupplyAt(double y) {
             return (float) (y - anchor);

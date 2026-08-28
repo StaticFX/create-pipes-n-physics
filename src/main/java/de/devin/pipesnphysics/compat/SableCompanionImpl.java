@@ -3,14 +3,19 @@ package de.devin.pipesnphysics.compat;
 import dev.ryanhcode.sable.companion.ClientSubLevelAccess;
 import dev.ryanhcode.sable.companion.SableCompanion;
 import dev.ryanhcode.sable.companion.SubLevelAccess;
+import dev.ryanhcode.sable.companion.math.BoundingBox3d;
+import dev.ryanhcode.sable.companion.math.BoundingBox3dc;
 import dev.ryanhcode.sable.companion.math.Pose3dc;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Quaterniond;
 import org.joml.Vector3d;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.BiFunction;
 
 class SableCompanionImpl implements SableCompatProvider {
@@ -27,6 +32,40 @@ class SableCompanionImpl implements SableCompatProvider {
         Vec3 center = new Vec3(origin.getX() + 0.5, origin.getY() + 0.5, origin.getZ() + 0.5);
         return SableCompanion.INSTANCE.runIncludingSubLevels(level, center, false, subA,
                 (SubLevelAccess subB, BlockPos plotPosB) -> subB == null ? null : reader.apply(level, plotPosB));
+    }
+
+    @Override
+    public SubLevelFrame clientFrame(Level level, BlockPos pos, float partialTicks) {
+        SubLevelAccess sub = SableCompanion.INSTANCE.getContaining(level, pos);
+        return sub instanceof ClientSubLevelAccess client ? frameOf(client, partialTicks) : null;
+    }
+
+    @Override
+    public List<SubLevelFrame> clientFramesNear(Level level, Vec3 center, double radius,
+                                                float partialTicks) {
+        BoundingBox3d bounds = new BoundingBox3d(
+                center.x - radius, center.y - radius, center.z - radius,
+                center.x + radius, center.y + radius, center.z + radius);
+        List<SubLevelFrame> frames = new ArrayList<>();
+        for (SubLevelAccess sub : SableCompanion.INSTANCE.getAllIntersecting(level, bounds)) {
+            if (!(sub instanceof ClientSubLevelAccess client)) continue;
+            SubLevelFrame frame = frameOf(client, partialTicks);
+            if (frame != null) frames.add(frame);
+        }
+        return frames;
+    }
+
+    /** Sable's render pose copied into our own plain-math frame; null for a pose not yet built. */
+    private static SubLevelFrame frameOf(ClientSubLevelAccess sub, float partialTicks) {
+        Pose3dc pose = sub.renderPose(partialTicks);
+        if (pose == null) return null;
+        BoundingBox3dc bounds = sub.boundingBox();
+        double dx = bounds.maxX() - bounds.minX();
+        double dy = bounds.maxY() - bounds.minY();
+        double dz = bounds.maxZ() - bounds.minZ();
+        return new SubLevelFrame(new Vector3d(pose.position()), new Quaterniond(pose.orientation()),
+                new Vector3d(pose.scale()), new Vector3d(pose.rotationPoint()),
+                0.5 * Math.sqrt(dx * dx + dy * dy + dz * dz));
     }
 
     @Override

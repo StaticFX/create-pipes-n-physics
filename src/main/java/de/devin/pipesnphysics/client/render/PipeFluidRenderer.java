@@ -9,6 +9,8 @@ import com.simibubi.create.content.fluids.pipes.AxisPipeBlock;
 import com.simibubi.create.content.fluids.pipes.StraightPipeBlockEntity;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.client.SubLevelDraw;
+import de.devin.pipesnphysics.compat.SubLevelFrame;
 import de.devin.pipesnphysics.engine.store.PipeFluidCell;
 import de.devin.pipesnphysics.engine.store.PipeStore;
 import net.createmod.catnip.animation.AnimationTickHolder;
@@ -55,8 +57,9 @@ import java.util.Map;
  * Backend-agnostic by design: it draws from {@link RenderLevelStageEvent} rather than a BER,
  * because under Flywheel Create's pipe BER is suppressed — an event hook always runs. It is a
  * deliberately simple per-frame scan of nearby {@link StraightPipeBlockEntity}s — complete,
- * because only straight/glass pipes have a window (opaque pipes hide their contents). Sable plot
- * chunks sit outside the camera-chunk scan, so sub-level pipes are a known render gap. The
+ * because only straight/glass pipes have a window (opaque pipes hide their contents). A Sable
+ * contraption's pipes are NOT in the chunks around the camera, so each nearby contraption's own
+ * plot is swept as well and its cells drawn through its frame ({@link SubLevelDraw}). The
  * animation cache is cleared by {@code ClientCleanupHandler} on logout/dimension change, which
  * is what prevents ghost fluid from a previous world.
  */
@@ -163,20 +166,16 @@ public final class PipeFluidRenderer {
         float now = AnimationTickHolder.getTicks() + AnimationTickHolder.getPartialTicks();
         boolean drewAny = false;
 
-        int camChunkX = SectionPos.blockToSectionCoord(Mth.floor(camera.x));
-        int camChunkZ = SectionPos.blockToSectionCoord(Mth.floor(camera.z));
-        for (int dx = -SCAN_RADIUS_CHUNKS; dx <= SCAN_RADIUS_CHUNKS; dx++) {
-            for (int dz = -SCAN_RADIUS_CHUNKS; dz <= SCAN_RADIUS_CHUNKS; dz++) {
-                if (!(level.getChunk(camChunkX + dx, camChunkZ + dz, ChunkStatus.FULL, false)
-                        instanceof LevelChunk chunk)) {
-                    continue;
-                }
-                for (BlockEntity be : chunk.getBlockEntities().values()) {
-                    if (be instanceof StraightPipeBlockEntity pipe) {
-                        drewAny |= renderCell(level, pipe, capacity, camera, poseStack, now);
-                    }
-                }
-            }
+        drewAny = scanAround(level, camera, SCAN_RADIUS_CHUNKS, null, capacity, camera, poseStack, now);
+        // A contraption's pipes are NOT in the chunks around the camera — they live at plot
+        // coordinates far outside the world and are drawn through the contraption's pose. Sweep each
+        // nearby contraption's own plot instead, centred on where the camera stands inside it and
+        // only as wide as the contraption really is (a ship is a few chunks; sweeping the full view
+        // distance per ship would cost more than every ship in sight is worth).
+        for (SubLevelFrame frame : SubLevelDraw.framesNear(camera, SCAN_RADIUS_CHUNKS * 16.0)) {
+            int radius = Math.min(SCAN_RADIUS_CHUNKS, frame.chunkRadius());
+            drewAny |= scanAround(level, frame.unproject(camera), radius, frame, capacity, camera,
+                    poseStack, now);
         }
 
         ANIMS.entrySet().removeIf(e -> now - e.getValue().lastSeen > CellAnim.FADE_TICKS + 4f);
@@ -184,9 +183,32 @@ public final class PipeFluidRenderer {
         if (drewAny) OWN_BUFFER.endBatch();
     }
 
+    /** Draw every straight pipe in the chunks around {@code center}, returning whether any emitted. */
+    private static boolean scanAround(ClientLevel level, Vec3 center, int radiusChunks,
+                                      SubLevelFrame frame, int capacity,
+                                      Vec3 camera, PoseStack poseStack, float now) {
+        boolean drewAny = false;
+        int centerChunkX = SectionPos.blockToSectionCoord(Mth.floor(center.x));
+        int centerChunkZ = SectionPos.blockToSectionCoord(Mth.floor(center.z));
+        for (int dx = -radiusChunks; dx <= radiusChunks; dx++) {
+            for (int dz = -radiusChunks; dz <= radiusChunks; dz++) {
+                if (!(level.getChunk(centerChunkX + dx, centerChunkZ + dz, ChunkStatus.FULL, false)
+                        instanceof LevelChunk chunk)) {
+                    continue;
+                }
+                for (BlockEntity be : chunk.getBlockEntities().values()) {
+                    if (be instanceof StraightPipeBlockEntity pipe) {
+                        drewAny |= renderCell(level, pipe, capacity, camera, frame, poseStack, now);
+                    }
+                }
+            }
+        }
+        return drewAny;
+    }
+
     /** Draw one pipe cell's stored fluid, returning whether anything was emitted. */
     private static boolean renderCell(ClientLevel level, StraightPipeBlockEntity be, int capacity,
-                                      Vec3 camera, PoseStack poseStack, float now) {
+                                      Vec3 camera, SubLevelFrame frame, PoseStack poseStack, float now) {
         BlockState state = be.getBlockState();
         if (!state.hasProperty(AxisPipeBlock.AXIS)) return false;
 
@@ -275,7 +297,9 @@ public final class PipeFluidRenderer {
 
         int light = LevelRenderer.getLightColor(level, cellPos);
         poseStack.pushPose();
-        poseStack.translate(cellPos.getX() - camera.x, cellPos.getY() - camera.y, cellPos.getZ() - camera.z);
+        // The box below is block-local (0..1), so the cell IS the origin — nothing large ever
+        // reaches the matrix (SubLevelDraw).
+        SubLevelDraw.cameraRelative(poseStack, camera, frame, cellPos);
         renderBox(fluid, x0, y0, z0, x1, y1, z1, light, axis, anim.phase(), poseStack,
                 FluidRenderHelper.getFluidBuilder(OWN_BUFFER));
         poseStack.popPose();

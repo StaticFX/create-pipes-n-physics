@@ -8,6 +8,7 @@ import com.simibubi.create.content.equipment.goggles.GogglesItem;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import de.devin.pipesnphysics.compat.SubLevelFrame;
 import de.devin.pipesnphysics.engine.valve.ValveDirectionBehaviour;
 import net.createmod.catnip.animation.AnimationTickHolder;
 import net.minecraft.client.Minecraft;
@@ -66,7 +67,12 @@ public final class ValveArrowRenderer {
         VertexConsumer consumer = OWN_BUFFER.getBuffer(PnpRenderTypes.ARROWS);
         PoseStack poseStack = event.getPoseStack();
         for (BlockPos pos : ValveArrowClient.positions()) {
-            if (pos.getCenter().distanceToSqr(camera) > MAX_DISTANCE_SQ) continue;
+            // Range-gate on where the valve is DRAWN, not on its raw coordinates: a valve on a
+            // contraption stands at plot coordinates far outside the world, which fails any
+            // distance test and hid every arrow on a ship.
+            SubLevelFrame frame = SubLevelDraw.frameAt(pos);
+            Vec3 drawnAt = SubLevelDraw.project(frame, pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+            if (drawnAt.distanceToSqr(camera) > MAX_DISTANCE_SQ) continue;
             ValveDirectionBehaviour dial =
                     BlockEntityBehaviour.get(mc.level, pos, ValveDirectionBehaviour.TYPE);
             Direction dir = dial == null ? null : dial.oneWayFlow();
@@ -74,13 +80,18 @@ public final class ValveArrowRenderer {
                 ValveArrowClient.untrack(pos); // broken, replaced, or dialed back to both ways
                 continue;
             }
-            // The arrow slides once through the valve block along its allowed direction.
+            // The arrow slides once through the valve block along its allowed direction — in the
+            // valve's OWN frame, so on a ship it stays inside the pipe as the ship turns. Emitted
+            // block-local around the valve, which is the origin of that frame (SubLevelDraw).
             double along = slide - 0.5;
-            ArrowRender.emit(poseStack, mc, consumer, model, camera,
-                    pos.getX() + 0.5 + dir.getStepX() * along,
-                    pos.getY() + 0.5 + dir.getStepY() * along,
-                    pos.getZ() + 0.5 + dir.getStepZ() * along,
+            poseStack.pushPose();
+            SubLevelDraw.cameraRelative(poseStack, camera, frame, pos);
+            ArrowRender.emit(poseStack, mc, consumer, model,
+                    0.5 + dir.getStepX() * along,
+                    0.5 + dir.getStepY() * along,
+                    0.5 + dir.getStepZ() * along,
                     dir, COLOR[0], COLOR[1], COLOR[2], alpha);
+            poseStack.popPose();
         }
         OWN_BUFFER.endBatch();
     }

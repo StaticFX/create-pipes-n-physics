@@ -6,10 +6,13 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.List;
 import java.util.function.BiFunction;
 
 interface SableCompatProvider {
     <T> T atOverlappingContraptions(Level level, BlockPos origin, BiFunction<Level, BlockPos, T> reader);
+    SubLevelFrame clientFrame(Level level, BlockPos pos, float partialTicks);
+    List<SubLevelFrame> clientFramesNear(Level level, Vec3 center, double radius, float partialTicks);
     String getSubLevelId(Level level, BlockPos pos);
     boolean isOnSubLevel(Level level, BlockPos pos);
     boolean isSubLevelReady(Level level, BlockPos pos);

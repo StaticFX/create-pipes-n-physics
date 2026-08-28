@@ -109,6 +109,43 @@ public class EqualizationTests {
         });
     }
 
+    /**
+     * A Create: Connected fluid vessel is a Create tank DERIVATIVE, so the engine must read it as an
+     * ordinary reservoir with no compat of its own — same handler node, same column, same
+     * equalization (issue #79). The rig's right tank is swapped for a real vessel and the left
+     * tank's water must level out between the two; skipped when that mod is not installed.
+     */
+    @GameTest(template = "common/simple_fluid_leveling", templateNamespace = PipesNPhysics.ID, timeoutTicks = 800)
+    public static void fluidVesselEqualizesLikeATank(GameTestHelper helper) {
+        Block vessel = BuiltInRegistries.BLOCK.get(
+                ResourceLocation.fromNamespaceAndPath("create_connected", "fluid_vessel"));
+        if (vessel == Blocks.AIR) {
+            helper.succeed(); // mod not installed
+            return;
+        }
+        BlockPos left = new BlockPos(0, 3, 0);
+        BlockPos right = new BlockPos(2, 3, 0);
+
+        helper.runAtTickTime(1, () -> placeRigBlock(helper, right, vessel.defaultBlockState()));
+        helper.runAtTickTime(5, () -> {
+            Level level = helper.getLevel();
+            BlockPos abs = helper.absolutePos(right);
+            Node node = GraphBuilder.build(level, helper.absolutePos(new BlockPos(2, 2, 0))).nodeAt(abs);
+            if (node == null || !node.isHandler()) {
+                helper.fail("the vessel did not join the network as a handler node: "
+                        + (node == null ? "no node" : node.kind()));
+                return;
+            }
+            fill(helper, left, 8000);
+        });
+        helper.succeedWhen(() -> {
+            int a = amount(helper, left);
+            int b = amount(helper, right);
+            if (a == 8000) helper.fail("the vessel took nothing: tank still holds " + a);
+            if (Math.abs(a - b) > 800) helper.fail("not equalized yet: " + a + " vs " + b);
+        });
+    }
+
     /** A raised tank must drain completely into the tank below it, no pump needed. */
     @GameTest(template = "common/2_drop_fall", templateNamespace = PipesNPhysics.ID, timeoutTicks = 600)
     public static void gravityDrainsUpperTankCompletely(GameTestHelper helper) {

@@ -6,11 +6,12 @@
   "refmap": "pipesnphysics.refmap.json",
   "plugin": "de.devin.pipesnphysics.mixin.SableMixinPlugin",
   "mixins": [
-    "FluidTankMassMixin",
-    "FluidTankWeightGoggleMixin"
+    "FluidTankMassMixin"
   ],
   "client": [
-    "FluidTankRendererMixin"
+    "FluidTankRendererMixin",
+    "BlockEntityRenderDispatcherMixin",
+    "GoggleFluidWeightMixin"
   ],
   "injectors": {
     "defaultRequire": 1

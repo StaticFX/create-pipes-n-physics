@@ -387,10 +387,14 @@ public final class PipeGraphCommand {
                 float span = path.cells().get(0).margin();
                 for (PumpRangePayload.RangeCell cell : path.cells()) {
                     if (cell.pos() != target.asLong()) continue;
+                    // A NaN above-supply is not missing data: it is the answer "no reservoir
+                    // anchored this field", which is why the cell is painted regardless of height.
+                    String aboveSupply = Float.isNaN(cell.aboveSupply()) ? "no supply"
+                            : String.format("%+.2f", cell.aboveSupply());
                     out.append(String.format("      §7overlay: pump §f%s §7%s §7margin §f%+.2f§7"
-                                    + " of §f%.2f§7, above supply §f%+.2f§7%s",
+                                    + " of §f%.2f§7, above supply §f%s§7%s",
                             pump.pos().toShortString(), path.pull() ? "pull" : "push",
-                            cell.margin(), span, cell.aboveSupply(),
+                            cell.margin(), span, aboveSupply,
                             cell.pipe() ? "" : " §8(not a pipe — never painted)"));
                     return out.toString(); // one report is enough; a second path repeats it
                 }
