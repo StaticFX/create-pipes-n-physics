@@ -73,6 +73,9 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.IntValue FLUID_SURFACE_RESOLUTION;
     public static final ModConfigSpec.BooleanValue FLUID_DEBUG_RENDER;
     public static final ModConfigSpec.BooleanValue FLUID_HIDE_TEXTURE;
+    public static final ModConfigSpec.BooleanValue FLYWHEEL_TANK_VISUAL;
+    public static final ModConfigSpec.BooleanValue FLUID_OPAQUE;
+    public static final ModConfigSpec.DoubleValue FLUID_RESTING_WAVES;
 
     static {
         ModConfigSpec.Builder server = new ModConfigSpec.Builder();
@@ -465,14 +468,33 @@ public class PipesNPhysicsConfig {
                 .comment("Enable wavy fluid surface mesh on Sable sub-levels.")
                 .define("fluidWaveMesh", true);
         FLUID_SURFACE_RESOLUTION = client
-                .comment("Grid resolution for the fluid surface mesh.")
-                .defineInRange("fluidSurfaceResolution", 64, 2, 128);
+                .comment("Grid resolution for the fluid surface mesh. The mesh is rebuilt on the CPU every",
+                        "frame, so this is the dominant cost of a tank in view: 16 costs a sixteenth of 64",
+                        "and the waves are amplitude-clamped far below what 64 could express.")
+                .defineInRange("fluidSurfaceResolution", 16, 2, 128);
         FLUID_DEBUG_RENDER = client
                 .comment("Show debug wireframe, corner dots, and grid lines on fluid surfaces.")
                 .define("fluidDebugRender", false);
         FLUID_HIDE_TEXTURE = client
                 .comment("Hide fluid textures, showing only debug wireframe.")
                 .define("fluidHideTexture", false);
+        FLUID_RESTING_WAVES = client
+                .comment("How lively the fluid looks when its tank is sitting still, as a share of how it",
+                        "looks being thrown about. 0 is a mirror, 1 never settles. Only the resting end:",
+                        "a tank in motion ripples the same whatever this says.")
+                .defineInRange("fluidRestingWaves", 0.10, 0.0, 1.0);
+        FLUID_OPAQUE = client
+                .comment("Draw tank fluid solid rather than see-through. Taste, not correctness: opaque",
+                        "reads like Create's own tank fluid, translucent shows the far wall through the",
+                        "near one but lets a wavy surface blend against itself at grazing angles.")
+                .define("fluidOpaque", false);
+        FLYWHEEL_TANK_VISUAL = client
+                .comment("SPIKE: draw a Flywheel-instanced marker cube at every Create tank, to find out",
+                        "whether a Flywheel visual reaches a tank on a moving Sable contraption at the right",
+                        "place. Purely additive — the tank still renders itself. Not a player-facing feature,",
+                        "and default ON only while the spike is being run: turn it off before release, or",
+                        "delete it along with TankFluidVisual once the question is answered.")
+                .define("flywheelTankVisual", true);
         client.pop();
         client.pop(); // sable
         CLIENT_SPEC = client.build();

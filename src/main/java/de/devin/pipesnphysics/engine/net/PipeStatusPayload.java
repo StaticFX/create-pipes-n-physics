@@ -64,6 +64,8 @@ public record PipeStatusPayload(
     public static final byte DETAIL_CHECK_VALVE = 10;
     /** A run into a TURBINE whose fall is short of the turbine's rating — nothing turns it. */
     public static final byte DETAIL_TURBINE_FALL = 11;
+    /** A run another fluid is standing in: a pipe carries one at a time, so this one waits. */
+    public static final byte DETAIL_OTHER_FLUID = 12;
 
     public static final Type<PipeStatusPayload> TYPE =
             new Type<>(PipesNPhysics.asResource("pipe_status"));

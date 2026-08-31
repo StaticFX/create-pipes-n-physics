@@ -6,6 +6,7 @@ import com.simibubi.create.content.fluids.tank.FluidTankBlockEntity;
 import com.simibubi.create.content.contraptions.ContraptionWorld;
 import net.createmod.catnip.levelWrappers.WrappedLevel;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
+import dev.engine_room.flywheel.api.backend.BackendManager;
 import de.devin.pipesnphysics.mixin.FluidTankAccessor;
 import de.devin.pipesnphysics.client.FluidRenderData.FluidStyle;
 import de.devin.pipesnphysics.client.FluidRenderData.GridDims;
@@ -29,7 +30,7 @@ import org.joml.Matrix4f;
 import org.joml.Vector3d;
 
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -73,15 +74,18 @@ public final class TiltedTankFluid {
             {1,0.3f,0.3f},{0.3f,1,0.3f},{0.3f,0.3f,1},{1,1,0.3f},{0.3f,1,1},{1,0.3f,1}
     };
 
+    // Concurrent because a GPU-path visual resolves from Flywheel's WORKER THREADS — several tanks at
+    // once — while the CPU path resolves on the render thread. A plain HashMap resized under that will
+    // hand back garbage fill levels, which reads on screen as the water jumping about.
     // --- Wave simulation state per tank ---
-    private static final Map<BlockPos, float[]> WAVE_CUR = new HashMap<>();
-    private static final Map<BlockPos, float[]> WAVE_PREV = new HashMap<>();
-    private static final Map<BlockPos, Long> WAVE_TICK = new HashMap<>();
-    private static final Map<BlockPos, float[]> WAVE_LAST_UP = new HashMap<>();
-    private static final Map<BlockPos, float[]> WAVE_LAST_POS = new HashMap<>();
-    private static final Map<BlockPos, float[]> WAVE_LAST_VEL = new HashMap<>();
-    private static final Map<BlockPos, float[]> WAVE_LAST_QUAT = new HashMap<>();
-    private static final Map<BlockPos, Float> SMOOTH_LEVEL = new HashMap<>();
+    private static final Map<BlockPos, float[]> WAVE_CUR = new ConcurrentHashMap<>();
+    private static final Map<BlockPos, float[]> WAVE_PREV = new ConcurrentHashMap<>();
+    private static final Map<BlockPos, Long> WAVE_TICK = new ConcurrentHashMap<>();
+    private static final Map<BlockPos, float[]> WAVE_LAST_UP = new ConcurrentHashMap<>();
+    private static final Map<BlockPos, float[]> WAVE_LAST_POS = new ConcurrentHashMap<>();
+    private static final Map<BlockPos, float[]> WAVE_LAST_VEL = new ConcurrentHashMap<>();
+    private static final Map<BlockPos, float[]> WAVE_LAST_QUAT = new ConcurrentHashMap<>();
+    private static final Map<BlockPos, Float> SMOOTH_LEVEL = new ConcurrentHashMap<>();
 
     /**
      * Wall-clock of each tank's last render, so the per-tank wave state above is evicted once a tank
@@ -89,7 +93,7 @@ public final class TiltedTankFluid {
      * the maps are keyed by bare BlockPos and were never pruned. Eviction only drops unused cache
      * entries; a tank that renders again just rebuilds a fresh (calm) wave, so nothing looks different.
      */
-    private static final Map<BlockPos, Long> WAVE_LAST_SEEN = new HashMap<>();
+    private static final Map<BlockPos, Long> WAVE_LAST_SEEN = new ConcurrentHashMap<>();
     private static long lastPruneMs = 0;
     private static final long WAVE_PRUNE_INTERVAL_MS = 2000;
     private static final long WAVE_STALE_MS = 5000;
@@ -119,43 +123,78 @@ public final class TiltedTankFluid {
     // ========================================================================
 
     /**
-     * Draw this tank's fluid in the WORLD's frame rather than the contraption's, at the block-local
-     * pose a block-entity renderer is handed. Returns whether it took the tank over — the caller
-     * must then suppress the tank's own fluid, which would otherwise draw a second surface glued to
-     * the hull. False means this is not our case at all (feature off, no window, not on a
-     * sub-level, empty) and the tank should render itself exactly as it always did.
+     * A tank's fluid surface resolved from the world: the interior box, the WORLD-level plane cutting
+     * through it at the right volume, and what fills it. Everything downstream — this class's mesh, and
+     * the GPU path's per-instance fields — is a way of DRAWING this, so it is deliberately one shared
+     * answer: two renderers computing their own would be free to disagree about where the water is.
+     *
+     * @param corners the box's 8 corners, and {@code cornerDistances} each one's SIGNED distance to the
+     *                plane (negative = submerged), already carrying {@code planeOffset}.
      */
-    public static boolean render(FluidTankBlockEntity be, float partialTicks, PoseStack ms,
-                                 MultiBufferSource buffer, int light) {
-        if (!PipesNPhysicsConfig.FLUID_TILT_ENABLED.get()) return false;
+    public record Surface(TankBounds bounds, float[][] corners, float[] cornerDistances, float[] normal,
+                          float planeOffset, float fillFraction, FluidStack fluid,
+                          int dominant, int axis1, int axis2, Pose3dc pose) {}
+
+    /**
+     * Whether {@code TankFluidVisual} is drawing tank fluid instead of us. Claiming the tank without
+     * drawing is the right answer then, not standing down: standing down would let Create draw its own
+     * hull-glued surface underneath the GPU one, and drawing anyway would put two surfaces in the same
+     * plane to z-fight. Needs the backend too — a visual never runs while Flywheel is off, and the CPU
+     * path is the fallback that has to cover exactly that case.
+     *
+     * Note the CPU path still RESOLVES a claimed tank, only to throw the answer away — that is the seam
+     * to tighten before the two are ever measured against each other. It skips the meshing, which is
+     * where all the cost actually is.
+     */
+    private static boolean drawnOnTheGpu() {
+        return PipesNPhysicsConfig.FLYWHEEL_TANK_VISUAL.get() && BackendManager.isBackendOn();
+    }
+
+    /**
+     * Resolves a tank's fluid surface, or null when this is not our case at all — the feature is off,
+     * the tank has no window or is not the controller, it is not on a Sable sub-level, or it is empty.
+     * Also advances the per-tank fill smoothing, so it wants calling once per frame per tank.
+     */
+    public static Surface resolve(FluidTankBlockEntity be, float partialTicks) {
+        return resolve(be, partialTicks, true);
+    }
+
+    /**
+     * @param advanceSmoothing false to READ the tank's fill without stepping its smoothing. The GPU path
+     *   and this one both resolve every frame — one on Flywheel's workers, one on the render thread — and
+     *   two steppers on one lerp move it twice per frame, at two different moments. That is the water
+     *   visibly jumping. Only the renderer actually DRAWING a tank may advance it.
+     */
+    private static Surface resolve(FluidTankBlockEntity be, float partialTicks, boolean advanceSmoothing) {
+        if (!PipesNPhysicsConfig.FLUID_TILT_ENABLED.get()) return null;
 
         pruneStaleWaveState();
 
         FluidTankAccessor acc = (FluidTankAccessor) be;
-        if (!be.isController() || !acc.pipesnphysics$isWindow()) return false;
+        if (!be.isController() || !acc.pipesnphysics$isWindow()) return null;
 
         // Skip tanks on Create contraptions (ContraptionWorld or any wrapped level) —
         // they use a different rendering path and our tilted renderer doesn't apply.
-        if (be.getLevel() instanceof WrappedLevel) return false;
+        if (be.getLevel() instanceof WrappedLevel) return null;
 
         // --- Sable orientation ---
         // Try BlockEntity lookup first, fall back to position-based lookup.
         // The BE lookup can return null on moving physics objects / contraptions.
         ClientSubLevelAccess subLevel = SableCompanion.INSTANCE.getContainingClient(be);
         if (subLevel == null) subLevel = SableCompanion.INSTANCE.getContainingClient(be.getBlockPos());
-        if (subLevel == null) return false;
+        if (subLevel == null) return null;
         Pose3dc pose = subLevel.renderPose(partialTicks);
-        if (pose == null) return false;
+        if (pose == null) return null;
 
         Vector3d localUp = pose.transformNormalInverse(new Vector3d(0, 1, 0), new Vector3d());
         double len = localUp.length();
-        if (len < 0.001) return false;
+        if (len < 0.001) return null;
         localUp.div(len);
 
         // --- Fluid data ---
         FluidTank tank = acc.pipesnphysics$getTankInventory();
         FluidStack fluidStack = tank.getFluid();
-        if (fluidStack.isEmpty()) return false;
+        if (fluidStack.isEmpty()) return null;
 
         // A lighter-than-air gas is a liquid under inverted gravity: negating local up
         // mirrors the whole pipeline — the interface solves from the ceiling down, skirts
@@ -180,11 +219,11 @@ public final class TiltedTankFluid {
         // Create's LerpedFloat may not tick on Sable sub-levels, causing laggy animation.
         // We handle our own smoothing instead.
         int capacity = tank.getCapacity();
-        if (capacity <= 0) return false;
+        if (capacity <= 0) return null;
         float targetLevel = (float) tank.getFluidAmount() / capacity;
         if (targetLevel < 0.001f) {
             SMOOTH_LEVEL.remove(be.getBlockPos());
-            return false;
+            return null;
         }
 
         // Smooth interpolation: 20% per frame → ~90% in 10 frames (~0.17s at 60fps)
@@ -197,8 +236,10 @@ public final class TiltedTankFluid {
             level = prevSmooth + (targetLevel - prevSmooth) * 0.2f;
             if (Math.abs(level - targetLevel) < 0.002f) level = targetLevel;
         }
-        SMOOTH_LEVEL.put(levelKey, level);
-        WAVE_LAST_SEEN.put(levelKey.immutable(), System.currentTimeMillis());
+        if (advanceSmoothing) {
+            SMOOTH_LEVEL.put(levelKey, level);
+            WAVE_LAST_SEEN.put(levelKey.immutable(), System.currentTimeMillis());
+        }
 
         float clampedLevel = Mth.clamp(level * totalHeight, 0, totalHeight);
 
@@ -227,6 +268,39 @@ public final class TiltedTankFluid {
                 dominant, axis1, axis2);
         for (int i = 0; i < 8; i++) dist[i] -= planeOffset;
 
+        return new Surface(bounds, corners, dist, normal, planeOffset, fillFraction, fluidStack,
+                dominant, axis1, axis2, pose);
+    }
+
+    /**
+     * Draw this tank's fluid in the WORLD's frame rather than the contraption's, at the block-local
+     * pose a block-entity renderer is handed. Returns whether it took the tank over — the caller
+     * must then suppress the tank's own fluid, which would otherwise draw a second surface glued to
+     * the hull. False means this is not our case at all (feature off, no window, not on a
+     * sub-level, empty) and the tank should render itself exactly as it always did.
+     */
+    public static boolean render(FluidTankBlockEntity be, float partialTicks, PoseStack ms,
+                                 MultiBufferSource buffer, int light) {
+        boolean onTheGpu = drawnOnTheGpu();
+        Surface surface = resolve(be, partialTicks, !onTheGpu);
+        if (surface == null) return false;
+        // Claimed but not drawn. This must come AFTER resolving, not before: resolving is also what
+        // says whether the tank is ours at all, and claiming every Create tank on the strength of the
+        // flag alone would leave every main-level tank in the world with no fluid in it.
+        if (onTheGpu) return true;
+
+        FluidStack fluidStack = surface.fluid();
+        Pose3dc pose = surface.pose();
+        TankBounds bounds = surface.bounds();
+        float[] mins = bounds.mins(), maxs = bounds.maxs();
+        float xMin = mins[0], yMin = mins[1], zMin = mins[2];
+        float xMax = maxs[0], yMax = maxs[1], zMax = maxs[2];
+        float[] normal = surface.normal();
+        float nxf = normal[0], nyf = normal[1], nzf = normal[2];
+        float[][] corners = surface.corners();
+        float[] dist = surface.cornerDistances();
+        int axis1 = surface.axis1(), axis2 = surface.axis2();
+
         // Past here the tank is OURS to draw, degenerate surface or not: the tank's own fluid must
         // stay suppressed either way, or a second surface appears glued to the hull.
         List<float[]> intersections = findPlaneEdgeIntersections(corners, dist);
@@ -234,7 +308,7 @@ public final class TiltedTankFluid {
 
         // --- Grid setup ---
         int gridRes = alignedGridRes(mins, maxs, axis1, axis2);
-        SurfacePlane plane = new SurfacePlane(normal, dominant, axis1, axis2, planeOffset);
+        SurfacePlane plane = new SurfacePlane(normal, surface.dominant(), axis1, axis2, surface.planeOffset());
         GridDims grid = new GridDims(gridRes, gridRes + 1, (gridRes + 1) * (gridRes + 1));
 
         // --- Wave simulation: 2D wave equation for fluid sloshing ---

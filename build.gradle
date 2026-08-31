@@ -49,6 +49,11 @@ neoForge {
             client()
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
             jvmArguments.addAll '-Xmx2G', '-Xms512M'
+            // Writes every shader program Flywheel actually compiles to run/flywheel_sources/. A program
+            // only appears there once something DRAWS with it, so the presence of a file is the answer to
+            // "did this material ever reach the GPU" — which a silent screen cannot distinguish from a
+            // shader that compiled fine and drew nothing. Costs a few hundred KB per launch.
+            systemProperty 'flw.dumpShaderSource', 'true'
         }
 
         server {

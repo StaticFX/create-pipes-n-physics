@@ -117,6 +117,13 @@ public final class FlowSolver {
         final Set<Integer> noHeadEdges = new HashSet<>();
         final Set<Integer> heldEdges = new HashSet<>();
         final Set<Integer> movingEdges = new HashSet<>();
+        /**
+         * The runs an earlier pass has taken for its own fluid this tick — a pipe carries one at a
+         * time, so a later pass is walled off them (the edge twin of {@code claimedEmpties}). Every
+         * pass that solves real flow claims, STALLED ones included: a stalled pass still runs its
+         * brigade over the pipes, so its column would meet the other fluid there.
+         */
+        final Set<Integer> claimedRuns = new HashSet<>();
         final Map<Integer, Solution.Reason> edgeReasons = new HashMap<>();
         final Map<Integer, Solution.PumpLoad> pumpLoads = new HashMap<>();
         final List<Solution.Transfer> transfers = new ArrayList<>();
@@ -359,9 +366,14 @@ public final class FlowSolver {
      * hold an existing column but never create one, so a dry crest above the reachable potential
      * gates instead of self-priming (wire mode, capacity 0, stores nothing and stays always-wet,
      * keeping the legacy instant behaviour).
+     *
+     * {@code carrying} is the fluid standing in the run's cells — a pipe carries ONE fluid at a
+     * time, so a pass for a different one is walled rather than driven into the column already
+     * there ({@code FluidPass.runCarriesAnotherFluid}); {@code split} marks a run holding two at
+     * once, which admits neither until the settle has cleared it.
      */
     record EdgeStatics(double throttle, double crestHeight, double crestFloor, double crestPos,
-                       boolean crestWet) {}
+                       boolean crestWet, FluidStack carrying, boolean split) {}
 
     /** Resolve every edge's fluid-independent {@link EdgeStatics} once, before the per-fluid passes. */
     private static Map<Integer, EdgeStatics> computeEdgeStatics(Level level, Graph graph) {
@@ -422,26 +434,34 @@ public final class FlowSolver {
         double crestHeight = Double.NaN;
         double crestPos = 0;
         BlockPos crestCell = null;
+        boolean crestWet = true;
+        FluidStack carrying = FluidStack.EMPTY;
+        boolean split = false;
+        boolean stores = PipeStore.capacityMb() > 0;
+        // One walk, one block-entity lookup per cell: the crest geometry and what the run is
+        // carrying are both read off the same pass over its cells.
         for (int i = 0; i < edge.pipes().size(); i++) {
-            double cellY = SableCompat.getWorldY(level, edge.pipes().get(i));
+            BlockPos pos = edge.pipes().get(i);
+            double cellY = SableCompat.getWorldY(level, pos);
+            PipeStore.Store cell = stores ? PipeStore.at(level, pos) : null;
+            int held = cell == null ? 0 : cell.amount();
             if (Double.isNaN(crestHeight) || cellY > crestHeight) {
                 crestHeight = cellY;
                 crestPos = (i + 1.0) / (edge.length() + 1);
-                crestCell = edge.pipes().get(i);
+                crestCell = pos;
+                crestWet = !stores || held > 0;
             }
+            if (held <= 0) continue;
+            if (carrying.isEmpty()) carrying = cell.fluid().copyWithAmount(1);
+            else split |= !FluidStack.isSameFluidSameComponents(carrying, cell.fluid());
         }
         // The crest cell's LIP (its outer shell bottom, the draw-lip datum) is the WEIR
         // threshold: a supply reaching it pours into the cell and over by plain gravity, so
         // a dry crest only gates below it. Same datum as the draw lip, so a tank resting AT
         // its lip sits exactly at the gate boundary, never walled a hair above it.
         double crestFloor = crestCell != null ? PipeWindow.lipY(level, crestCell) : Double.NaN;
-        boolean crestWet = true;
-        if (crestCell != null && PipeStore.capacityMb() > 0) {
-            PipeStore.Store cell = PipeStore.at(level, crestCell);
-            crestWet = cell != null && cell.amount() > 0;
-        }
-        return new EdgeStatics(
-                runThrottle(level, graph, edge), crestHeight, crestFloor, crestPos, crestWet);
+        return new EdgeStatics(runThrottle(level, graph, edge),
+                crestHeight, crestFloor, crestPos, crestWet, carrying, split);
     }
 
     /**

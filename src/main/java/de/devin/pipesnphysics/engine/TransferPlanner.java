@@ -232,9 +232,9 @@ final class TransferPlanner {
         }
         if (Double.isNaN(minLip)) return Double.MAX_VALUE;
 
-        // The RENDERED surface, like the canDrawFrom wall and Reservoir.capDrawAtLip — gate and
+        // The DRAW surface, like the canDrawFrom wall and Reservoir.capDrawAtLip — gate and
         // cap must share one surface or an open gate meets a zero cap and the line stalls.
-        double surface = column.renderedSurface();
+        double surface = column.drawSurface();
         double aboveLipMb = column.capacitance() * (surface - minLip);
         if (aboveLipMb <= 0) return 0;
         return Math.max(Math.min(aboveLipMb, LIP_DREGS_MB), LIP_DRAIN_RATE * aboveLipMb);

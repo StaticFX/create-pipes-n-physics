@@ -55,7 +55,9 @@ public final class PipeStatusText {
                 && data.statusDetail() != PipeStatusPayload.DETAIL_BELOW_OPENING
                 && data.statusDetail() != PipeStatusPayload.DETAIL_CHECK_VALVE
                 // A turbine's stop is about the FALL it is given, not about lift left to spend.
-                && data.statusDetail() != PipeStatusPayload.DETAIL_TURBINE_FALL;
+                && data.statusDetail() != PipeStatusPayload.DETAIL_TURBINE_FALL
+                // Waiting behind another fluid says nothing about lift either.
+                && data.statusDetail() != PipeStatusPayload.DETAIL_OTHER_FLUID;
     }
 
     private static String noFlowKey(PipeStatusPayload data) {
@@ -79,6 +81,7 @@ public final class PipeStatusText {
             case PipeStatusPayload.DETAIL_SINK_FULL -> "gui.goggles.detail.sink_full";
             case PipeStatusPayload.DETAIL_SOURCE_DRY -> "gui.goggles.detail.source_dry";
             case PipeStatusPayload.DETAIL_CHECK_VALVE -> "gui.goggles.detail.check_valve";
+            case PipeStatusPayload.DETAIL_OTHER_FLUID -> "gui.goggles.detail.other_fluid";
             default -> data.status() == PipeStatusPayload.STATUS_STALLED
                     ? "gui.goggles.stalled" : "gui.goggles.blocked";
         };

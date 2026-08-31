@@ -283,11 +283,8 @@ final class SettlingRun {
         if (!present.isEmpty()) return present;
         FluidStack rest = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
         if (!rest.isEmpty()) return rest;
-        Reservoir a = network.reservoirAt(edge.a());
-        if (a != null && a.isFiniteReservoir() && a.holdsFluid()) return a.contents();
-        Reservoir b = network.reservoirAt(edge.b());
-        if (b != null && b.isFiniteReservoir() && b.holdsFluid()) return b.contents();
-        return FluidStack.EMPTY;
+        FluidStack offered = offeredAt(edge.a());
+        return offered.isEmpty() ? offeredAt(edge.b()) : offered;
     }
 
     private boolean isCrestBroken() {
@@ -835,7 +832,7 @@ final class SettlingRun {
         BlockPos opening = PipeGeometry.adjacentCell(
                 network.graph, supply, supply.other(pumpIndex));
         return opening != null
-                && source.surface() > PipeWindow.drawLipY(network.level, opening, true);
+                && source.drawSurface() > PipeWindow.drawLipY(network.level, opening, true);
     }
 
     /** What one supply side of a pump has to offer: its reservoir's contents, or its feed cell's. */
@@ -1058,7 +1055,32 @@ final class SettlingRun {
         if (!present.isEmpty()) return present;
         FluidStack rest = solution.restFluids().getOrDefault(edge.index(), FluidStack.EMPTY);
         if (!rest.isEmpty()) return rest;
-        return reservoir.contents();
+        return offeredTo(reservoir);
+    }
+
+    /**
+     * What a reservoir may press into a DRY run: nothing while it holds several fluids. Which one
+     * it would offer is an arbitrary pick (the column's representative), and pressing an arbitrary
+     * fluid into a pipe is a real move with real consequences — it walls the ingredient that
+     * belongs there ({@code FluidPass.runCarriesAnotherFluid}) until the settle has drained it
+     * back out again.
+     *
+     * A narrow guard: the solve names the fluid for every run it can reach ({@code restFluids},
+     * keyed on which endpoints actually participate) and answers first, so this fallback only ever
+     * guesses where the solve had nothing to say at all — no rig here reaches it, which is why it
+     * carries no test of its own. Deliberately NOT applied to {@code FlowSolver.settleBlockedRuns},
+     * whose representative stamp only decides how a blocked run RENDERS: leaving that blank is its
+     * own wrong answer, and nothing moves on it.
+     */
+    private static FluidStack offeredTo(Reservoir reservoir) {
+        return reservoir.holdsOneFluid() ? reservoir.contents() : FluidStack.EMPTY;
+    }
+
+    /** What the reservoir at one end offers a dry run (nothing at a pump, junction or mouth end). */
+    private FluidStack offeredAt(int nodeIndex) {
+        Reservoir reservoir = network.reservoirAt(nodeIndex);
+        return reservoir != null && reservoir.isFiniteReservoir() && reservoir.holdsFluid()
+                ? offeredTo(reservoir) : FluidStack.EMPTY;
     }
 
     private FluidStack presentFluid() {

@@ -249,10 +249,11 @@ final class FluidPass {
         if (!column.isFiniteReservoir()) return new NodeSpec(column.capacitance(), head);
         double span = column.heightBlocks() * column.fillScale();
         double ceiling = NetworkSolver.surfaceHead(column.baseY(), column.baseY() + span, span, gas);
-        // The crest-gating potential seeds from the RENDERED surface (a Create tank draws its
-        // fluid inset, ABOVE the liquid surface at low fills), so the weir gate agrees with the
-        // fluid the player sees — like the draw lip. The solved head stays the liquid surface.
-        double reach = gas ? head : column.renderedSurface();
+        // The crest-gating potential seeds from the DRAW surface (a Create tank draws its fluid
+        // inset, ABOVE the liquid surface at low fills; an open bowl gives from any level), so the
+        // weir gate agrees with what the column may give — like the draw lip. The solved head
+        // stays the liquid surface.
+        double reach = gas ? head : column.drawSurface();
         return new NodeSpec(column.capacitance(), head, Double.NEGATIVE_INFINITY, ceiling, reach);
     }
 
@@ -266,6 +267,11 @@ final class FluidPass {
         if (!runAcceptsFluid(edge)) {
             results.blockedEdges.add(edge.index());
             results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.VALVE);
+            return;
+        }
+        if (runCarriesAnotherFluid(edge, statics)) {
+            results.blockedEdges.add(edge.index());
+            results.edgeReasons.putIfAbsent(edge.index(), Solution.Reason.OTHER_FLUID);
             return;
         }
 
@@ -539,6 +545,30 @@ final class FluidPass {
     }
 
     /**
+     * Whether this run belongs to a DIFFERENT fluid right now — a wall for this pass, which waits
+     * its turn. A pipe carries one fluid at a time (Create's own network rule, which locks a whole
+     * network to one fluid): the column standing in the cells owns the run until it has drained,
+     * and an edge an earlier pass is already driving is claimed for the rest of this tick.
+     * A SPLIT run (two fluids already resting in it) admits neither until the settle clears it.
+     *
+     * Without this the engine drove its own passes into one another and Create's crossing-the-
+     * streams destroyed the pipe for it — {@code handlePipeFlowCollision} breaks the block for ANY
+     * two fluids, reactive or not. A basin mixing two ingredients broke every pipe touching it as
+     * soon as one supply ran dry: its emptied tank became an unclaimed empty, the other fluid's
+     * pass claimed it, and drove that fluid down a run still full of the first. Crossing the
+     * streams is now exactly what the WORLD forces — a reservoir pressing a fluid its column
+     * rejects ({@code SettlingRun.pressColumn}), a pump packing a foreign outlet — never the
+     * engine's own routing. In wire mode (cells store nothing) there is no column to own, so a
+     * run is claimed only for the tick, exactly as before.
+     */
+    private boolean runCarriesAnotherFluid(Edge edge, FlowSolver.EdgeStatics statics) {
+        if (results.claimedRuns.contains(edge.index())) return true;
+        FluidStack carried = statics.carrying();
+        if (carried.isEmpty()) return false;
+        return statics.split() || !FluidStack.isSameFluidSameComponents(carried, sample);
+    }
+
+    /**
      * The draw-lip elevation of an opening: gravity flow leaves once the surface reaches the
      * opening cell's LIP — the pipe's outer shell bottom ({@link PipeWindow#lipY}), so a tank
      * settles where its fluid stops touching the pipe the player sees — while a pump actively
@@ -551,12 +581,12 @@ final class FluidPass {
     }
 
     /**
-     * Fluid can only leave a column through an opening its surface reaches — its RENDERED
-     * surface: the player judges the lip against the fluid they SEE, and a Create tank draws
-     * its fluid inset (up to ~0.31 ABOVE the liquid surface at low fills), so gating on the
-     * liquid surface walled a tank whose visible fluid stood well over the pipe ("the fluid
-     * inside the tank is higher than the lip, like a lot higher"). Open ends are exempt: their
-     * opening is inside the fluid by construction (a pipe mouth submerged in a lake).
+     * Fluid can only leave a column through an opening its surface reaches — its DRAW surface:
+     * the player judges the lip against the fluid they SEE, and a Create tank draws its fluid
+     * inset (up to ~0.31 ABOVE the liquid surface at low fills), so gating on the liquid surface
+     * walled a tank whose visible fluid stood well over the pipe ("the fluid inside the tank is
+     * higher than the lip, like a lot higher"); an open bowl gives from any level. Open ends are
+     * exempt: their opening is inside the fluid by construction (a pipe mouth submerged in a lake).
      */
     private boolean canDrawFrom(Node handlerNode, BoundaryColumn column, BlockPos opening, double lip) {
         if (column.isOpenEnd() || column.isInfiniteSource()) return true;
@@ -565,7 +595,7 @@ final class FluidPass {
         // open gate there is a PERMANENT phantom flow (solved q, SOURCE_DRY stall, scrolling
         // pipes, nothing moving) at exactly the equilibrium every gravity drain ends on.
         double oneMb = 1.0 / Math.max(column.capacitance(), 1);
-        if (column.renderedSurface() <= lip + oneMb) return false;
+        if (column.drawSurface() <= lip + oneMb) return false;
         return SableCompat.canFluidReachPipe(level, handlerNode.pos(), opening, column.fillFraction());
     }
 
@@ -756,6 +786,15 @@ final class FluidPass {
             int rounded = (int) Math.round(Math.abs(result.flows()[b]));
             if (rounded < 1) continue;
             int edgeIndex = meta.get(b).edgeIndex();
+            // This pass drives that run, so it owns it for the rest of the tick — but ONLY if it
+            // has a source to drive: a SOURCELESS pass moves nothing into the pipes, and claiming
+            // on the solved number alone walls the fluid that really could flow there. The solve
+            // is fluid-blind about supply (a column's head and capacitance come from its TOTAL
+            // fill, so a basin holding 394 mB of diesel drives a phantom branch in the WATER pass
+            // too), and that phantom, claiming first, left the diesel permanently walled off its
+            // own line — solved=3, actual=0, the run bone dry. A pass that DOES have a source
+            // still claims while its endpoints stall, since its brigade goes on filling the run.
+            if (plan.hadSource()) results.claimedRuns.add(edgeIndex);
             if (plan.plannedMb() > 0) {
                 results.movingEdges.add(edgeIndex);
             } else {

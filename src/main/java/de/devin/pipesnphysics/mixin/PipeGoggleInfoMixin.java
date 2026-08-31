@@ -75,6 +75,11 @@ public abstract class PipeGoggleInfoMixin extends SmartBlockEntity implements IH
                 pipesnphysics$lang("gui.goggles.below_opening_fix")
                         .style(ChatFormatting.GOLD)
                         .forGoggles(tooltip, 1);
+            } else if (data.statusDetail() == PipeStatusPayload.DETAIL_OTHER_FLUID) {
+                // Nothing is broken — this fluid is queued behind another. Say what ends the wait.
+                pipesnphysics$lang("gui.goggles.other_fluid_fix")
+                        .style(ChatFormatting.GOLD)
+                        .forGoggles(tooltip, 1);
             }
         }
 

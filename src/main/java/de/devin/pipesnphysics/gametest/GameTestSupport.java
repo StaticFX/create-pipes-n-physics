@@ -113,6 +113,12 @@ public final class GameTestSupport {
         return cell == null ? 0 : cell.amount();
     }
 
+    /** What a pipe cell is carrying, or EMPTY when it is dry (or no longer a pipe at all). */
+    public static FluidStack pipeFluid(GameTestHelper helper, BlockPos rel) {
+        PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(rel));
+        return cell == null || cell.amount() <= 0 ? FluidStack.EMPTY : cell.fluid();
+    }
+
     public static IFluidHandler pipesnphysics$tankHandler(net.minecraft.server.level.ServerLevel level, BlockPos absPos) {
         IFluidHandler handler = level.getCapability(Capabilities.FluidHandler.BLOCK, absPos, null);
         return handler != null ? handler : new net.neoforged.neoforge.fluids.capability.templates.FluidTank(0);

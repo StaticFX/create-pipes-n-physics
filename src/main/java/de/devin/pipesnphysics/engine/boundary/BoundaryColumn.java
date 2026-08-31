@@ -77,7 +77,7 @@ public final class BoundaryColumn {
     private boolean hosePulley;
     /** A Create fluid tank, whose fluid is DRAWN inset (see {@link #renderedSurface()}). */
     private boolean tankRender;
-    /** An open bowl (a Create basin): its surface reads at the column TOP (see {@link #renderedSurface()}). */
+    /** An open bowl (a Create basin): it GIVES from any level (see {@link #drawSurface()}). */
     private boolean openBowl;
 
     private BoundaryColumn(BlockPos identity, BlockPos accessPos, double baseY,
@@ -270,12 +270,18 @@ public final class BoundaryColumn {
                 + MomentumField.headOffset(level, pos);
         BoundaryColumn column = finiteReservoir(pos, pos, baseY, 1, capacity, found, total,
                 SableCompat.getUpProjectionY(level, pos)).accessFace(face).heldFluids(held);
-        // A basin is an OPEN BOWL: whatever it holds is scoopable from the top, so its player-visible
-        // surface sits at the column top and a side pipe always reaches it (owner decision — basins
-        // never stall on the aperture lip the way closed tanks do). Side-specific ports (a
-        // basin-derived machine resolved per face) keep the plain surface.
+        // A basin is an OPEN BOWL: whatever it holds is scoopable from the top, so a side pipe may
+        // always DRAW it and it never stalls on the aperture lip the way a closed tank does (owner
+        // decision). A give permission only — the fluid still stands where it stands. Side-specific
+        // ports (a basin-derived machine resolved per face) keep the plain rules.
+        //
+        // Its SETTLE datum is the tank's, though — see renderedSurface(): the settle equalizes the
+        // surfaces it is given, so those surfaces must be one shared function of fill across every
+        // endpoint type, or a basin and a tank equalize to two different states and circulate
+        // between them forever.
         if (face == null && level.getBlockEntity(pos) instanceof BasinBlockEntity) {
             column.openBowl = true;
+            column.tankRender = true;
         }
         return column;
     }
@@ -662,17 +668,43 @@ public final class BoundaryColumn {
     /**
      * The surface elevation where the fluid is actually DRAWN — for a Create fluid tank the inset
      * render range (so a settled pipe's waterline meets the tank's visible fluid, which sits above
-     * {@code baseY + fill} at low fill), else the plain {@link #liquidSurface()}. Used by the
-     * settle, the {@code /pipegraph} surface marker, and every player-visible GATE (draw lip,
-     * lip drain cap, weir-crest potential) — the solve's conservation math keeps {@link #head}.
+     * {@code baseY + fill} at low fill), else the plain {@link #liquidSurface()}. This is WHERE THE
+     * FLUID STANDS: the settle's datum and the {@code /pipegraph} surface marker — the solve's
+     * conservation math keeps {@link #head}, and the give-side gates keep {@link #drawSurface()}.
+     *
+     * It is also, unavoidably, the datum the settle EQUALIZES two reservoirs on, so it must be ONE
+     * shared function of fill for every endpoint type: equal surfaces have to mean equal fill
+     * fractions, or the settle and the solve aim at different states and grind between them. A
+     * BASIN therefore borrows the tank's inset mapping rather than its own bowl geometry (Create
+     * draws a basin's fluid 2/16..14/16 on an eased curve, a third of a block BELOW a tank at the
+     * same fill): read literally, a basin beside a tank was always the low side however full it
+     * got, so the settle poured the tank back into it while the solve pumped the basin into the
+     * tank — a permanent circulation that left the last of a basin's contents shuttling up and
+     * down the pipe ("solved=1 actual=1" tick after tick with nothing arriving). The cost is only
+     * that a pipe's film beside a basin no longer lines up with the fluid in the bowl, which is a
+     * different shape at a different height anyway.
      */
     public double renderedSurface() {
-        // An open bowl holding ANY fluid reads at its top: the fluid is reachable from above, so
-        // no aperture lip or crest floor ever walls it off (empty stays empty — no phantom line).
-        if (openBowl && contentMb > 0) return baseY + heightBlocks * fillScale;
         if (!tankRender) return liquidSurface();
         double renderedFill = TANK_RENDER_FLOOR + fillFraction() * (heightBlocks - TANK_RENDER_LOSS);
         return baseY + renderedFill * fillScale;
+    }
+
+    /**
+     * The elevation an opening may DRAW this column through — every player-visible GIVE gate (the
+     * draw lip, the lip drain cap, the weir-crest potential, the "supply below opening" wording).
+     * An OPEN BOWL holding ANY fluid reads at its top: a basin's fluid is reachable from above, so
+     * no aperture lip or crest floor ever walls it off (empty stays empty — no phantom permission).
+     *
+     * This is a give PERMISSION, not an elevation, and the two must not be confused: read as a
+     * surface it says a basin's fluid STANDS at the block top, which pressed its contents into
+     * every pipe touching it up to full cells (a mixing basin bled its ingredients into the
+     * plumbing) and, being above the pipes, refused every pour back IN. Everything asking how high
+     * the fluid stands reads {@link #renderedSurface()} instead.
+     */
+    public double drawSurface() {
+        if (openBowl && contentMb > 0) return baseY + heightBlocks * fillScale;
+        return renderedSurface();
     }
 
     /**

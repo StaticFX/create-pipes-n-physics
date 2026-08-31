@@ -2,6 +2,7 @@ package de.devin.pipesnphysics.client;
 
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.client.ponder.PnpPonderPlugin;
+import de.devin.pipesnphysics.client.render.flywheel.TankFluidVisualizer;
 import net.createmod.ponder.foundation.PonderIndex;
 import net.minecraft.client.resources.model.ModelResourceLocation;
 import net.minecraft.resources.ResourceLocation;
@@ -33,6 +34,8 @@ public final class ClientEvents {
             PonderIndex.addPlugin(new PnpPonderPlugin());
             // Item tooltips are a GAME bus event; registered here so the bus is unambiguous.
             NeoForge.EVENT_BUS.register(PumpTooltip.class);
+            // A visualizer is a field on the block entity type, so any point past registry freeze does.
+            TankFluidVisualizer.register();
         });
     }
 }

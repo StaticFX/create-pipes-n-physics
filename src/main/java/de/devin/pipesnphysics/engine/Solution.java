@@ -81,7 +81,7 @@ public record Solution(
         boolean active
 ) {
     /** Why a blocked/stalled edge cannot move its fluid, when the solver knows. */
-    public enum Reason { VALVE, PUMP_OFF, CREST, SINK_FULL, SOURCE_DRY, CHECK_VALVE }
+    public enum Reason { VALVE, PUMP_OFF, CREST, SINK_FULL, SOURCE_DRY, CHECK_VALVE, OTHER_FLUID }
 
     /**
      * One fluid pass's solved flow, signed per edge index (positive = a→b), in mB/t. The transfer

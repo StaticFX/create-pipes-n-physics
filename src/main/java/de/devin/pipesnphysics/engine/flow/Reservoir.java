@@ -112,7 +112,7 @@ public final class Reservoir {
         int supply = BoundaryColumn.drainMatching(handler,
                 fluid.copyWithAmount(amount), FluidAction.SIMULATE).getAmount();
         if (drawLipY == Double.NEGATIVE_INFINITY) return supply;
-        int aboveLip = (int) Math.max(0, column.capacitance() * (surface() - drawLipY));
+        int aboveLip = (int) Math.max(0, column.capacitance() * (drawSurface() - drawLipY));
         return Math.min(supply, aboveLip);
     }
 
@@ -164,7 +164,7 @@ public final class Reservoir {
      * by every drain this tick, the settle phase included — same physical opening, same rule.
      */
     void capDrawAtLip(double lipY) {
-        double aboveLip = column.capacitance() * (surface() - lipY);
+        double aboveLip = column.capacitance() * (drawSurface() - lipY);
         double cap = aboveLip <= 0 ? 0 : Math.max(Math.min(aboveLip, DREGS_MB), 0.5 * aboveLip);
         drawLipCapMb = Math.min(drawLipCapMb, cap);
         drawLipY = lipY; // remembered for probeSupply — callers pre-merge to the lowest opening
@@ -179,6 +179,15 @@ public final class Reservoir {
      */
     double surface() {
         return column.renderedSurface();
+    }
+
+    /**
+     * The elevation this reservoir may be DRAWN through — the give-side twin of {@link #surface()},
+     * which an open bowl reads at its top ({@link BoundaryColumn#drawSurface()}). Only the lip cap
+     * and the pump's draw wall ask it: what a basin may GIVE is not where its fluid stands.
+     */
+    double drawSurface() {
+        return column.drawSurface();
     }
 
     /** The GAS interface elevation — where a lighter-than-air content ends, hanging from the top. */
@@ -209,6 +218,15 @@ public final class Reservoir {
     /** The column's representative contents — the fluid a settle step asks it for. */
     FluidStack contents() {
         return column.contents();
+    }
+
+    /**
+     * Whether {@link #contents()} is the WHOLE story — this reservoir holds at most one fluid, so
+     * its representative really is what it would press into a pipe. A multi-fluid vessel (a basin
+     * mid-recipe) has no single answer, and the representative is an arbitrary pick.
+     */
+    boolean holdsOneFluid() {
+        return column.heldFluids().size() <= 1;
     }
 
     /**

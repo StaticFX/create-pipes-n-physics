@@ -284,7 +284,7 @@ public final class PipeProbe {
             BlockPos opening = PipeGeometry.adjacentCell(graph, edge, end);
             if (opening == null) continue;
             double lip = PipeWindow.lipY(level, opening);
-            if (column.renderedSurface() > lip) continue; // reaches its opening — not this wall
+            if (column.drawSurface() > lip) continue; // reaches its opening — not this wall
             boolean risen = false;
             for (BlockPos cell : edge.pipes()) {
                 risen |= PipeWindow.lipY(level, cell) > lip + RISE_EPS;
@@ -355,6 +355,7 @@ public final class PipeProbe {
             case SINK_FULL -> PipeStatusPayload.DETAIL_SINK_FULL;
             case SOURCE_DRY -> PipeStatusPayload.DETAIL_SOURCE_DRY;
             case CHECK_VALVE -> PipeStatusPayload.DETAIL_CHECK_VALVE;
+            case OTHER_FLUID -> PipeStatusPayload.DETAIL_OTHER_FLUID;
         };
     }
 

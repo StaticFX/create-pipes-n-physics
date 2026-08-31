@@ -88,6 +88,59 @@ import static de.devin.pipesnphysics.gametest.GameTestSupport.*;
 public class EqualizationTests {
 
     /**
+     * A pipe standing above a LOW basin must drain back into it. A basin is an open bowl, which
+     * lets a side pipe DRAW it at any fill level ({@code basinGivesFromAnyFillLevel}) — but that
+     * permission is not an elevation, and reading it as one said the basin's fluid stood at the
+     * block TOP: every pour target came out full, so nothing above the bowl ever counted as excess
+     * and a pipe beside a nearly-empty basin could not give its column back. It also pressed the
+     * basin's contents into every pipe touching it up to full cells, which is the "the ingredients
+     * spill into the pipes" half of the mixing report.
+     *
+     * Rig: the two-supply basin with both tanks CAPPED off (a solid block, so no other endpoint
+     * can take the fluid), a barely-filled basin, and a full run beside it — the run must end up
+     * in the basin, and the basin below its own aperture must not put it back.
+     */
+    @GameTest(template = "physics/basin_two_supplies", templateNamespace = PipesNPhysics.ID,
+            timeoutTicks = 400)
+    public static void fullPipeDrainsBackIntoALowBasin(GameTestHelper helper) {
+        BlockPos basinPos = new BlockPos(3, 1, 0); // tank—pipe×2—basin—pipe×2—tank
+        List<BlockPos> run = List.of(new BlockPos(1, 1, 0), new BlockPos(2, 1, 0));
+        helper.setBlock(new BlockPos(0, 1, 0), Blocks.STONE); // cap both ends: the basin is the
+        helper.setBlock(new BlockPos(6, 1, 0), Blocks.STONE); // only endpoint left in the network
+
+        helper.runAfterDelay(5, () -> {
+            BasinBlockEntity be = (BasinBlockEntity) helper.getBlockEntity(basinPos);
+            var internal = (SmartFluidTankBehaviour.InternalFluidHandler) be.inputTank.getCapability();
+            internal.forceFill(new FluidStack(Fluids.WATER, 500), IFluidHandler.FluidAction.EXECUTE);
+            for (BlockPos pos : run) {
+                PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(pos));
+                if (cell == null) {
+                    helper.fail("no pipe store at " + pos.toShortString());
+                    return;
+                }
+                cell.insert(new FluidStack(Fluids.WATER, PipeStore.capacityMb()), PipeStore.capacityMb());
+                cell.flush();
+            }
+        });
+        helper.runAfterDelay(300, () -> {
+            int held = pipeAmount(helper, run.get(0)) + pipeAmount(helper, run.get(1));
+            int inBasin = basinFluid(helper, basinPos, Fluids.WATER);
+            // It settles, it does not empty: the run keeps the film standing at the basin's own
+            // (risen) waterline, ~65 mB of the 500 it started with.
+            if (held > 150) {
+                helper.fail("the run still holds " + held + " mB above a basin that is only "
+                        + inBasin + " mB full — it cannot give its column back");
+                return;
+            }
+            if (inBasin < 800) {
+                helper.fail("the basin holds " + inBasin + " mB — the run's column went somewhere else");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * Two identical tanks joined by a U-shaped pipe under them (communicating
      * vessels). One starts full; both must converge to equal fill at gameplay
      * speed, conserving fluid throughout.
