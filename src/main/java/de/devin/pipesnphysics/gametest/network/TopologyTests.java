@@ -79,6 +79,7 @@ import java.util.Optional;
 import java.util.Set;
 import de.devin.pipesnphysics.PipesNPhysics;
 import de.devin.pipesnphysics.TestSideHandlers;
+import de.devin.pipesnphysics.api.FluidHandlerApi;
 import static de.devin.pipesnphysics.gametest.GameTestSupport.*;
 
 /**
@@ -440,6 +441,79 @@ public class TopologyTests {
                 PipesNPhysicsConfig.ENABLE_NETWORK_CACHE.set(cacheWasOn);
             }
             helper.succeed();
+        });
+    }
+
+    /**
+     * A block DECLARED multi-port keeps its pipe runs in SEPARATE networks. The engine otherwise
+     * couples every run touching a handler into one graph — right for a tank or a basin, where two
+     * pipes really do open into one body of fluid, and wrong for a machine whose connections are
+     * separate internal tanks behind one combined capability: joining them is what lets a fluid
+     * enter by one port and leave by another (a TFMG engine's fuel, air and exhaust manifolds
+     * arrive as ONE network, so exhaust can back-fill a fuel tank that has run dry).
+     *
+     * Declared through {@link FluidHandlerApi} on the {@link TestSideHandlers} machine fixture,
+     * which is side-AGNOSTIC — one handler object on every face — so nothing but the declaration
+     * can decouple it, and the same rig with the declaration cleared is the control: it must come
+     * back as one network, or the test would pass against a rig that never joined up.
+     * Own batch: the declaration is global and outlives a tick.
+     */
+    @GameTest(template = "physics/collision_u_below", templateNamespace = PipesNPhysics.ID,
+            timeoutTicks = 120, batch = "separatePorts")
+    public static void declaredMultiPortMachineKeepsItsRunsApart(GameTestHelper helper) {
+        Block pipe = AllBlocks.FLUID_PIPE.get();
+        BlockPos machine = new BlockPos(3, 1, 1);
+        BlockPos westRun = new BlockPos(2, 1, 1);
+        BlockPos eastRun = new BlockPos(4, 1, 1);
+        TestSideHandlers.clear();
+        // Solid caps: Create straightens a pipe left with one connection, so a lone end pipe would
+        // open its far face and join the graph as a mouth instead of a dead end.
+        helper.setBlock(new BlockPos(0, 1, 1), Blocks.STONE);
+        helper.setBlock(new BlockPos(6, 1, 1), Blocks.STONE);
+        helper.setBlock(new BlockPos(1, 1, 1), pipeState(pipe, Direction.EAST));
+        helper.setBlock(westRun, pipeState(pipe, Direction.WEST, Direction.EAST));
+        helper.setBlock(machine, Blocks.DIAMOND_BLOCK);
+        helper.setBlock(eastRun, pipeState(pipe, Direction.WEST, Direction.EAST));
+        helper.setBlock(new BlockPos(5, 1, 1), pipeState(pipe, Direction.WEST));
+
+        helper.runAfterDelay(10, () -> {
+            var level = helper.getLevel();
+            BlockPos machinePos = helper.absolutePos(machine);
+            TestSideHandlers.machineInputAt(machinePos)
+                    .setFluid(new FluidStack(Fluids.WATER, TestSideHandlers.TANK_CAPACITY));
+            try {
+                // The CONTROL first: undeclared, this is an ordinary side-agnostic handler and both
+                // runs must land in one graph.
+                FluidHandlerApi.clearSeparatePorts(Blocks.DIAMOND_BLOCK);
+                if (!GraphBuilder.build(level, helper.absolutePos(westRun)).coverage()
+                        .contains(helper.absolutePos(eastRun))) {
+                    helper.fail("the rig never joined up undeclared — a coupled handler must put"
+                            + " both runs in one network, so the declared case proves nothing");
+                    return;
+                }
+                FluidHandlerApi.declareSeparatePorts(Blocks.DIAMOND_BLOCK);
+                Graph west = GraphBuilder.build(level, helper.absolutePos(westRun));
+                if (west.coverage().contains(helper.absolutePos(eastRun))) {
+                    helper.fail("a declared multi-port machine still coupled its runs: the west"
+                            + " network reaches the east one through the block");
+                    return;
+                }
+                // It must still be an ENDPOINT of the run that reaches it — decoupled, not dropped.
+                Node node = west.nodeAt(machinePos);
+                if (node == null || !node.isHandler()) {
+                    helper.fail("the declared machine stopped being a handler node entirely");
+                    return;
+                }
+                if (node.accessFace() != null) {
+                    helper.fail("decoupling must not make the machine side-specific (accessFace="
+                            + node.accessFace() + ") — its handler is the same object on every face");
+                    return;
+                }
+                helper.succeed();
+            } finally {
+                FluidHandlerApi.clearSeparatePorts(Blocks.DIAMOND_BLOCK);
+                TestSideHandlers.clear();
+            }
         });
     }
 }

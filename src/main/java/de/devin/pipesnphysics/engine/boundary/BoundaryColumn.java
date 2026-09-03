@@ -77,8 +77,10 @@ public final class BoundaryColumn {
     private boolean hosePulley;
     /** A Create fluid tank, whose fluid is DRAWN inset (see {@link #renderedSurface()}). */
     private boolean tankRender;
-    /** An open bowl (a Create basin): it GIVES from any level (see {@link #drawSurface()}). */
-    private boolean openBowl;
+    /** This column GIVES from any level: an open bowl, or a machine port (see {@link #drawSurface()}). */
+    private boolean givesFromAnyLevel;
+    /** More than one distinct fluid STANDS in this vessel, whether or not it hands them back. */
+    private boolean severalFluids;
 
     private BoundaryColumn(BlockPos identity, BlockPos accessPos, double baseY,
                            int heightBlocks, int capacityMb, FluidStack contents, int contentMb,
@@ -243,6 +245,10 @@ public final class BoundaryColumn {
         // for builder's tea) keeps each ingredient in its own segment, and ALL of them must be
         // enumerated so each gets a solve pass and can be drained, not only the representative found.
         List<FluidStack> held = new ArrayList<>();
+        // Everything STANDING in the vessel, drainable or not: what a machine will not hand back
+        // still occupies a port, so it still counts against offering one arbitrary fluid to a dry
+        // run (see holdsSeveralFluids / SettlingRun.offeredTo).
+        List<FluidStack> present = new ArrayList<>();
         for (int i = 0; i < cap.getTanks(); i++) {
             capacity += cap.getTankCapacity(i);
             FluidStack inTank = cap.getFluidInTank(i);
@@ -253,6 +259,7 @@ public final class BoundaryColumn {
             // reads as barely filled — its fluid then "can't reach" a side pipe (a phantom crest /
             // draw-lip wall). contentMb is therefore the TOTAL held volume.
             total += inTank.getAmount();
+            accumulate(present, inTank);
             boolean drainable = !cap.drain(inTank.copyWithAmount(1), FluidAction.SIMULATE).isEmpty();
             if (found.isEmpty() && drainable) {
                 found = inTank.copy();
@@ -270,6 +277,7 @@ public final class BoundaryColumn {
                 + MomentumField.headOffset(level, pos);
         BoundaryColumn column = finiteReservoir(pos, pos, baseY, 1, capacity, found, total,
                 SableCompat.getUpProjectionY(level, pos)).accessFace(face).heldFluids(held);
+        column.severalFluids = present.size() > 1;
         // A basin is an OPEN BOWL: whatever it holds is scoopable from the top, so a side pipe may
         // always DRAW it and it never stalls on the aperture lip the way a closed tank does (owner
         // decision). A give permission only — the fluid still stands where it stands. Side-specific
@@ -280,8 +288,16 @@ public final class BoundaryColumn {
         // endpoint type, or a basin and a tank equalize to two different states and circulate
         // between them forever.
         if (face == null && level.getBlockEntity(pos) instanceof BasinBlockEntity) {
-            column.openBowl = true;
+            column.givesFromAnyLevel = true;
             column.tankRender = true;
+        }
+        // A declared multi-port machine read through its COMBINED handler gives from any level too,
+        // for the opposite reason to a basin: not because its fluid is reachable from above but
+        // because the summed fill fraction is a fiction about ports that share nothing. Its settle
+        // datum is untouched (renderedSurface stays the plain liquid surface) — this is a give
+        // permission and nothing else.
+        if (face == null && HandlerRoles.hasSeparatePorts(level.getBlockState(pos))) {
+            column.givesFromAnyLevel = true;
         }
         return column;
     }
@@ -528,6 +544,17 @@ public final class BoundaryColumn {
      */
     public List<FluidStack> heldFluids() { return heldFluids; }
 
+    /**
+     * Whether more than one distinct fluid STANDS in this vessel — counted over every tank, not
+     * only the drainable ones {@link #heldFluids()} reports. A machine keeps its ports in separate
+     * tanks behind one combined capability and gives back only its OUTPUT, so counting drainables
+     * reads a fuelled engine as a single-fluid vessel of exhaust — and it then offers that exhaust
+     * to whichever dry run happens to touch it, its fuel line included. What a vessel WILL GIVE
+     * decides how much can leave; how many fluids it HOLDS decides whether one of them may be
+     * picked arbitrarily on its behalf.
+     */
+    public boolean holdsSeveralFluids() { return severalFluids; }
+
     /** The face a side-specific handler is resolved/transferred through, or null for side-agnostic. */
     public Direction accessFace() { return accessFace; }
 
@@ -693,8 +720,17 @@ public final class BoundaryColumn {
     /**
      * The elevation an opening may DRAW this column through — every player-visible GIVE gate (the
      * draw lip, the lip drain cap, the weir-crest potential, the "supply below opening" wording).
-     * An OPEN BOWL holding ANY fluid reads at its top: a basin's fluid is reachable from above, so
-     * no aperture lip or crest floor ever walls it off (empty stays empty — no phantom permission).
+     * Two kinds of column read at their TOP while they hold anything at all (empty stays empty — no
+     * phantom permission). An OPEN BOWL (a Create basin): its fluid is reachable from above, so no
+     * aperture lip or crest floor ever walls it off. And a DECLARED MULTI-PORT MACHINE: its fill
+     * fraction sums tanks that have nothing to do with each other, so an elevation read off it says
+     * nothing about the port a pipe actually meets — a TFMG engine is 5000 mB across a fuel, an air
+     * and an exhaust tank, and a SIDE port's lip sits at 37.5% of the block, so it refused to give
+     * its exhaust out that port until fuel + air + exhaust TOGETHER cleared ~1875 mB. Unrelated
+     * tanks emptying could wall a full exhaust tank. A machine's port is a plumbed connection, not a
+     * free surface: whether it gives is its own {@code drain()} decision, which every give path
+     * SIMULATE-clamps anyway. A SIDE-SPECIFIC port keeps the plain rules — resolved per face, its
+     * fill fraction really is that port's own.
      *
      * This is a give PERMISSION, not an elevation, and the two must not be confused: read as a
      * surface it says a basin's fluid STANDS at the block top, which pressed its contents into
@@ -703,7 +739,7 @@ public final class BoundaryColumn {
      * the fluid stands reads {@link #renderedSurface()} instead.
      */
     public double drawSurface() {
-        if (openBowl && contentMb > 0) return baseY + heightBlocks * fillScale;
+        if (givesFromAnyLevel && contentMb > 0) return baseY + heightBlocks * fillScale;
         return renderedSurface();
     }
 

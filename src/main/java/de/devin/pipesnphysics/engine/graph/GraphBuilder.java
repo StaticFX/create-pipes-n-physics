@@ -297,12 +297,18 @@ public final class GraphBuilder {
                 // tanks and belong to their own networks. face is the handler's face toward this
                 // pipe (opposite the pipe's opening direction).
                 discovery.handlerFaces.putIfAbsent(handlerPos, face.getOpposite());
-            } else if (firstSight) {
+            } else if (firstSight && !HandlerRoles.hasSeparatePorts(nState)) {
                 // A side-agnostic tank/basin couples EVERY run that touches it — fluid flows
                 // run→tank→run through the shared reservoir — so discover the OTHER runs on its
                 // footprint into this same graph. Without this a tank with two connections split
                 // into two independent networks, each solving the tank's fill blind to the other,
                 // so a full pass-through tank wrongly reported "destination full" on its inflow run.
+                //
+                // A block DECLARED multi-port is the exception: its connections are separate ports
+                // into separate internal tanks, not one body of fluid, so coupling them is what
+                // lets a fluid enter by one port and leave by another. It keeps a null access face
+                // (its handler really is the same object on every side — only the topology differs),
+                // so its endpoint resolves exactly as before and each run reaches it on its own.
                 exploreHandlerRuns(level, neighbor, frontier);
             }
             return;

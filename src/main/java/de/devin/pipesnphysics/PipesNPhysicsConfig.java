@@ -27,6 +27,7 @@ public class PipesNPhysicsConfig {
     public static final ModConfigSpec.BooleanValue ENABLE_OPEN_END_INTAKE;
     public static final ModConfigSpec.IntValue OPEN_END_INTAKE_COOLDOWN_TICKS;
     public static final ModConfigSpec.BooleanValue FORCE_OPEN_END_OUTPUT;
+    public static final ModConfigSpec.BooleanValue ALLOW_MIXED_PIPE_FLUIDS;
     public static final ModConfigSpec.BooleanValue ENABLE_HYDRO_TURBINE;
     public static final ModConfigSpec.DoubleValue TURBINE_RPM;
     public static final ModConfigSpec.DoubleValue TURBINE_HEAD_PER_RPM;
@@ -199,6 +200,17 @@ public class PipesNPhysicsConfig {
         MAX_FLOW_PER_ENDPOINT = server
                 .comment("Hard cap on fluid moved into or out of a single tank or machine per tick, in mB.")
                 .defineInRange("maxFlowPerEndpoint", 256, 1, 8192);
+        ALLOW_MIXED_PIPE_FLUIDS = server
+                .comment("Let one pipe network carry MORE THAN ONE fluid instead of breaking.",
+                        "Off (Create's own rule): two fluids driven or pressed together destroy the",
+                        "pipe block, and water + lava leave cobblestone. On: they simply stop where",
+                        "they meet, so a run may stand full of one fluid at one end and another at the",
+                        "other, and a tank of the wrong fluid beside a full pipe does nothing.",
+                        "This does NOT mix them: a pipe block still holds one fluid at a time, and a",
+                        "run still carries one fluid at a time, so the second waits its turn behind the",
+                        "first like batches in a real multi-product pipeline. What changes is that",
+                        "sharing plumbing stops being destructive.")
+                .define("allowMixedPipeFluids", false);
         PIPE_VOLUME_PER_CELL = server
                 .comment("How much fluid one pipe block holds, in mB. Fluid really resides in the pipes:",
                         "a starting flow drains the source while the pipe fills, the sink only receives",

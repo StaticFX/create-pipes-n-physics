@@ -428,4 +428,55 @@ public class EqualizationTests {
             });
         });
     }
+
+    /**
+     * A DECLARED multi-port machine gives through a side port at any fill level. Its column's fill
+     * fraction sums tanks that share nothing — a TFMG engine is 5000 mB across a fuel, an air and an
+     * exhaust tank — so the aperture lip, which sits at 37.5% of the block for a port on the
+     * machine's own level, walls it on the total rather than on the port being asked. An engine
+     * would refuse to give its exhaust out a side port until fuel + air + exhaust TOGETHER cleared
+     * ~1875 mB, so unrelated tanks emptying could wall a FULL exhaust tank. A port is a plumbed
+     * connection, not a free surface: whether it gives is its own drain() decision.
+     *
+     * Rig: the {@link TestSideHandlers} machine on a side pipe into an empty tank, its drainable
+     * OUTPUT holding 8000 of 32000 mB — 25%, comfortably under the 37.5% the lip wants — so only
+     * the exemption can let it give. Own batch: the declaration is global.
+     */
+    @GameTest(template = "physics/collision_u_below", templateNamespace = PipesNPhysics.ID,
+            timeoutTicks = 200, batch = "separatePortsLip")
+    public static void declaredMultiPortMachineGivesThroughASidePort(GameTestHelper helper) {
+        Block pipe = AllBlocks.FLUID_PIPE.get();
+        BlockPos machine = new BlockPos(3, 1, 1);
+        BlockPos sink = new BlockPos(5, 1, 1);
+        TestSideHandlers.clear();
+        helper.setBlock(machine, Blocks.DIAMOND_BLOCK);
+        helper.setBlock(new BlockPos(4, 1, 1), pipeState(pipe, Direction.WEST, Direction.EAST));
+        helper.setBlock(sink, AllBlocks.FLUID_TANK.get());
+        BlockPos machinePos = helper.absolutePos(machine);
+        FluidHandlerApi.declareSeparatePorts(Blocks.DIAMOND_BLOCK);
+
+        helper.runAfterDelay(10, () -> {
+            // 8000 of 32000 = 25% of the block: its liquid surface stands BELOW the side pipe's
+            // 6/16 aperture lip, so the plain lip rule refuses it outright.
+            TestSideHandlers.machineOutputAt(machinePos)
+                    .setFluid(new FluidStack(Fluids.WATER, 8000));
+            EngineTickHandler.markChanged(helper.getLevel(), helper.absolutePos(new BlockPos(4, 1, 1)));
+        });
+        helper.runAfterDelay(180, () -> {
+            try {
+                int received = amount(helper, sink);
+                if (received <= 0) {
+                    helper.fail("the declared machine gave nothing through its side port — its"
+                            + " summed fill (25%) sits under the aperture lip, which is exactly the"
+                            + " reading a port must not be gated on"
+                            + dump(helper, new BlockPos(4, 1, 1)));
+                    return;
+                }
+                helper.succeed();
+            } finally {
+                FluidHandlerApi.clearSeparatePorts(Blocks.DIAMOND_BLOCK);
+                TestSideHandlers.clear();
+            }
+        });
+    }
 }

@@ -83,6 +83,11 @@ final class FlowingRun {
      * where this flow's front meets a foreign fluid. Records the collision and reports it so the run
      * moves nothing this tick; the resting-adjacent case (no driven flow) is left to the settle,
      * which just blocks, exactly as two idle fluids do.
+     *
+     * With mixed contents ALLOWED the recording is a no-op and this is simply the front stopping
+     * behind the batch already in the pipe — the run still stands down for the tick, since a cell
+     * holds one fluid and nothing of ours can pass the resident plug anyway. (Deliberately not the
+     * old plug-piston that shoved the resident fluid onward: that delivered it into the wrong sink.)
      */
     private boolean reactToForeignFluid() {
         for (BlockPos pos : cells) {

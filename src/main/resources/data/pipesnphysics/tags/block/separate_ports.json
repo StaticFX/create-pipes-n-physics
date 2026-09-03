@@ -1,0 +1,10 @@
+{
+  "replace": false,
+  "values": [
+    { "id": "tfmg:large_engine", "required": false },
+    { "id": "tfmg:simple_large_engine", "required": false },
+    { "id": "tfmg:regular_engine", "required": false },
+    { "id": "tfmg:radial_engine", "required": false },
+    { "id": "tfmg:turbine_engine", "required": false }
+  ]
+}

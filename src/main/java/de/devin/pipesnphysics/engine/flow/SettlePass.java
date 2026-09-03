@@ -86,7 +86,10 @@ public final class SettlePass {
             return;
         }
         Double head = solution.nodeHeads().get(node.index());
-        if (head == null) return;
+        if (head == null) {
+            poolHeadless(node, slot, flowedEdges);
+            return;
+        }
         int target = (int) Math.round(
                 network.windowFill(node.pos(), head) * network.cellCapacity);
         int rate = SettlingRun.settleRate(network.cellCapacity);
@@ -115,6 +118,68 @@ public final class SettlePass {
                 // The mirror guard: never pull a neighbouring cell's GAS toward a liquid target.
                 exchange(edge, cell, slot, Math.min(target - slot.amount(), rate));
             }
+        }
+    }
+
+    /**
+     * The fallback for a slot the solve never reached (no node head at all — every endpoint that
+     * could name this network's fluid has stopped participating): plain gravity against each
+     * adjacent cell, in the MIRRORED frame for a gas. Fluid pours into a neighbour below, takes
+     * what drains in from one above, and equalizes with one on the LEVEL — the same trickle and
+     * anti-slosh spread a headless RUN already gets ({@link SettlingRun#gravityPool}, "fluid is
+     * never frozen in a pipe that physics says should drain").
+     *
+     * Without it a headless junction is a WALL: this method bailed on the missing head, and a
+     * settling run only ever moves within its own cells and its END RESERVOIRS — it never pushes
+     * into a slot — so fluid resting in a stub beside such a junction was sealed in with no path
+     * out at all. Liquids mostly hide it (some reservoir usually still anchors a head, and if
+     * everything empties the run drains downhill anyway); a GAS manifold whose source stops loses
+     * its head AND sits at one elevation, so a stopped exhaust line's residue stayed in the pipes
+     * for good — the reported TFMG engine rig, whose CO2 sat in the two stubs either side of an
+     * empty junction while the engines were starved of air and making none.
+     */
+    private void poolHeadless(Node node, PipeStore.Store slot, Set<Integer> flowedEdges) {
+        int rate = SettlingRun.settleRate(network.cellCapacity);
+        double slotY = network.cellCenterY(node.pos());
+        for (Edge edge : network.graph.edgesOf(node.index())) {
+            if (flowedEdges.contains(edge.index())) continue;
+            BlockPos adjacent = PipeGeometry.adjacentCell(network.graph, edge, node.index());
+            if (adjacent == null || adjacent.equals(node.pos())) continue;
+            PipeStore.Store cell = network.cellAt(adjacent);
+            if (cell == null || !crosses(node, adjacent, slot, cell)) continue;
+            // Only one of the two holds the fluid that would cross; buoyancy is gravity upside
+            // down, so a gas's "downhill" is up.
+            FluidStack moving = slot.amount() > 0 ? slot.fluid() : cell.fluid();
+            if (moving.isEmpty()) continue;
+            double drop = (slotY - network.cellCenterY(adjacent))
+                    * (SettlingRun.lighterThanAir(moving) ? -1 : 1);
+            boolean pourAllowed = node.gateFlow() == null
+                    || adjacent.equals(node.pos().relative(node.gateFlow()));
+            boolean pullAllowed = node.gateFlow() == null
+                    || adjacent.equals(node.pos().relative(node.gateFlow().getOpposite()));
+            if (drop > SettlingRun.SURFACE_EPS) {
+                if (pourAllowed) exchange(edge, slot, cell, Math.min(slot.amount(), rate));
+            } else if (drop < -SettlingRun.SURFACE_EPS) {
+                if (pullAllowed) exchange(edge, cell, slot, Math.min(cell.amount(), rate));
+            } else {
+                spreadLevel(edge, slot, cell, rate, pourAllowed, pullAllowed);
+            }
+        }
+    }
+
+    /**
+     * Equalize a slot with a neighbour standing at its own elevation, leaving the shared dregs
+     * margin at the boundary so a level pair cannot ping-pong a millibucket back and forth every
+     * tick (the run's own {@code spreadLevel} rule, applied across the node).
+     */
+    private void spreadLevel(Edge edge, PipeStore.Store slot, PipeStore.Store cell, int rate,
+                             boolean pourAllowed, boolean pullAllowed) {
+        int diff = slot.amount() - cell.amount();
+        if (Math.abs(diff) <= Reservoir.DREGS_MB) return;
+        if (diff > 0) {
+            if (pourAllowed) exchange(edge, slot, cell, Math.min(diff / 2, rate));
+        } else if (pullAllowed) {
+            exchange(edge, cell, slot, Math.min(-diff / 2, rate));
         }
     }
 

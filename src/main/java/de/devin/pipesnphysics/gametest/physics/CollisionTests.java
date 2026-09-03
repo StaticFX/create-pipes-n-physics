@@ -492,4 +492,131 @@ public class CollisionTests {
             helper.succeed();
         });
     }
+
+    /**
+     * The reported TFMG engine build: a machine whose ports are separate tanks behind ONE combined
+     * capability — a fill-only INPUT it never gives back and a drain-only OUTPUT — must not read as
+     * incompatible with the fluid standing in its own supply line. It presses its only drainable
+     * fluid (the output) at the mouth, and the incompatibility test asked "can I drain this?" of the
+     * cell's fluid: a FULL input tank answers no to both fill and drain, so the engine condemned the
+     * pipe feeding it and every diesel line beside a fuelled engine turned to cobblestone. Holding
+     * the fluid is what makes a vessel compatible with it, whether or not it will hand it back.
+     * The lava in its output tank must also stay THERE: what a machine will hand back is its output
+     * port's business, and offering it to whichever dry run happens to touch the block puts it in the
+     * supply line — which is how the collision got its second fluid in the first place.
+     * Rig: the flat run with the far tank swapped for the {@link TestSideHandlers} machine, its input
+     * brimming with the run's own water and lava in its output so it presses something at all.
+     */
+    @GameTest(template = "physics/collision_flat_run", templateNamespace = PipesNPhysics.ID, timeoutTicks = 140,
+            batch = "machinePorts")
+    public static void fullMachineInputTankDoesNotBreakItsSupplyPipe(GameTestHelper helper) {
+        BlockPos supplyTank = new BlockPos(1, 1, 1); // tank—pipe×3—machine (collision_flat_run)
+        BlockPos machine = new BlockPos(5, 1, 1);
+        BlockPos mouthCell = new BlockPos(4, 1, 1);
+        TestSideHandlers.clear();
+        helper.setBlock(machine, Blocks.DIAMOND_BLOCK);
+        BlockPos machinePos = helper.absolutePos(machine);
+
+        // Everything in ONE tick: an empty supply tank is a sink that ACCEPTS ANY fluid, so a
+        // machine holding its output while the rig is half-built legitimately drains into the line.
+        helper.runAfterDelay(5, () -> {
+            TestSideHandlers.machineInputAt(machinePos)
+                    .setFluid(new FluidStack(Fluids.WATER, TestSideHandlers.TANK_CAPACITY));
+            TestSideHandlers.machineOutputAt(machinePos).setFluid(new FluidStack(Fluids.LAVA, 1000));
+            fillFluid(helper, supplyTank, Fluids.WATER, 8000);
+            for (int x = 2; x <= 4; x++) {
+                BlockPos rel = new BlockPos(x, 1, 1);
+                PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(rel));
+                if (cell == null) {
+                    helper.fail("no pipe store at " + rel.toShortString());
+                    return;
+                }
+                cell.insert(new FluidStack(Fluids.WATER, PipeStore.capacityMb()), PipeStore.capacityMb());
+                cell.flush();
+            }
+            EngineTickHandler.markChanged(helper.getLevel(), helper.absolutePos(mouthCell));
+            // Never let this green out on a rig that simply never joined up.
+            Graph graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(mouthCell));
+            Node node = graph.nodeAt(machinePos);
+            if (node == null || !node.isHandler()) {
+                helper.fail("the machine did not join the network as a handler node");
+            }
+        });
+        helper.runAfterDelay(120, () -> {
+            if (FluidPropagator.getPipe(helper.getLevel(), helper.absolutePos(mouthCell)) == null) {
+                helper.fail("the supply pipe at the machine's full input tank broke ("
+                        + helper.getBlockState(mouthCell) + ") — holding the fluid is not a collision");
+                return;
+            }
+            for (int x = 2; x <= 4; x++) {
+                BlockPos rel = new BlockPos(x, 1, 1);
+                PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(rel));
+                if (cell != null && cell.amount() > 0 && cell.fluid().getFluid() != Fluids.WATER) {
+                    helper.fail("the machine's output tank bled " + cell.fluid()
+                            + " into the supply line at " + rel.toShortString());
+                    return;
+                }
+            }
+            TestSideHandlers.clear();
+            helper.succeed();
+        });
+    }
+
+    /**
+     * With {@code allowMixedPipeFluids} ON, one network may carry more than one fluid: two fluids
+     * pressed together STOP where they meet instead of destroying the pipe. The exact rig
+     * {@link #restingTanksOfDifferentFluidsCollide} breaks — a full water tank and a full lava tank
+     * at the ends of a water-filled run — must survive intact, with the water still standing in the
+     * cell touching the lava tank (they block, they do not mix and nothing is consumed).
+     *
+     * The flag is asked in ONE place ({@code FlowNetwork.mixingAllowed}) so all four collision sites
+     * answer alike; this rig exercises the resting-boundary one, which is the site no driven test can
+     * reach now that a run is walled off a fluid it already carries. Own batch: the pin is held
+     * across ticks, and gametests in one batch share the single global config.
+     */
+    @GameTest(template = "physics/collision_flat_run", templateNamespace = PipesNPhysics.ID,
+            timeoutTicks = 160, batch = "mixedPipeFluids")
+    public static void mixedFluidsShareAPipeInsteadOfBreakingIt(GameTestHelper helper) {
+        BlockPos waterTank = new BlockPos(1, 1, 1); // tank—pipe×3—tank flat run (collision_flat_run)
+        BlockPos lavaTank = new BlockPos(5, 1, 1);
+        BlockPos mouthCell = new BlockPos(4, 1, 1); // the pipe cell touching the lava tank
+        boolean priorMixing = PipesNPhysicsConfig.ALLOW_MIXED_PIPE_FLUIDS.get();
+        PipesNPhysicsConfig.ALLOW_MIXED_PIPE_FLUIDS.set(true);
+
+        helper.runAfterDelay(5, () -> {
+            fillFluid(helper, waterTank, Fluids.WATER, 8000);
+            fillFluid(helper, lavaTank, Fluids.LAVA, 8000);
+            for (int x = 2; x <= 4; x++) {
+                BlockPos rel = new BlockPos(x, 1, 1);
+                PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(rel));
+                if (cell == null) {
+                    helper.fail("no pipe store at " + rel.toShortString());
+                    return;
+                }
+                cell.insert(new FluidStack(Fluids.WATER, PipeStore.capacityMb()), PipeStore.capacityMb());
+                cell.flush();
+            }
+            EngineTickHandler.markChanged(helper.getLevel(), helper.absolutePos(mouthCell));
+        });
+        helper.runAfterDelay(140, () -> {
+            try {
+                if (FluidPropagator.getPipe(helper.getLevel(), helper.absolutePos(mouthCell)) == null) {
+                    helper.fail("the pipe against the lava tank still broke ("
+                            + helper.getBlockState(mouthCell)
+                            + ") — mixed contents must stop the fluids, not the pipe");
+                    return;
+                }
+                PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(mouthCell));
+                if (cell == null || cell.amount() <= 0
+                        || cell.fluid().getFluid() != Fluids.WATER) {
+                    helper.fail("the mouth cell should still be holding its water, not "
+                            + (cell == null ? "a missing store" : cell.fluid().toString()));
+                    return;
+                }
+                helper.succeed();
+            } finally {
+                PipesNPhysicsConfig.ALLOW_MIXED_PIPE_FLUIDS.set(priorMixing);
+            }
+        });
+    }
 }

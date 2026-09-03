@@ -408,9 +408,12 @@ public final class PipeGraphCommand {
      * A pump's reach, read from the range probe itself rather than re-derived, so the dump and the
      * overlay cannot disagree: how many blocks of margin each flank has AT THE PUMP (which is also
      * the span its colour ramp normalizes over) and the elevation each one runs out at — the push
-     * CEILING above and the drawable FLOOR below. A stopped pump reaches nowhere and says so.
+     * CEILING above and the drawable FLOOR below. An empty answer says WHY it is empty: the probe
+     * also returns nothing for a GAS network, whose ceiling lives in buoyancy units rather than
+     * world elevation (§7), and blaming that on a stopped pump contradicted the RPM printed on the
+     * very same line.
      */
-    private static String pumpReachLine(ServerLevel level, Node pump) {
+    private static String pumpReachLine(ServerLevel level, Graph graph, Solution solution, Node pump) {
         PumpRangePayload range = PumpRangeProbe.probe(level, pump.pos());
         Float push = null;
         Float pull = null;
@@ -423,7 +426,12 @@ public final class PipeGraphCommand {
                 push = margin;
             }
         }
-        if (push == null && pull == null) return "      §8reach: none (the pump is not turning)";
+        if (push == null && pull == null) {
+            return "      §8reach: none ("
+                    + (PumpRangeProbe.carriesGas(graph, solution, pump)
+                            ? "carrying a gas — its reach is not an elevation"
+                            : "the pump is not turning") + ")";
+        }
         double y = pump.worldY();
         return String.format("      §7reach: push §f%s §7· pull §f%s",
                 push == null ? "—" : String.format("%.2f ↑ (ceiling %.2f)", push, y + push),
@@ -452,7 +460,7 @@ public final class PipeGraphCommand {
             // surprising tint ("why is half of this red?") can only be guessed at: both bounds
             // are elevations, and no other line in the dump carries them.
             if (n.isPump()) {
-                String reach = pumpReachLine(level, n);
+                String reach = pumpReachLine(level, g, s, n);
                 if (reach != null) report.line(reach);
             }
             BoundaryColumn column = columnOf(level, mouths, n);
@@ -803,6 +811,7 @@ public final class PipeGraphCommand {
         if (!n.isHandler()) return null;
         IFluidHandler cap = BoundaryColumn.findHandler(level, n.pos(), n.accessFace());
         if (cap == null) return "probe: no live fluid capability";
+        probe = probeFor(cap, probe);
         int give = cap.drain(Integer.MAX_VALUE, FluidAction.SIMULATE).getAmount();
         int take = probe.isEmpty() ? 0 : cap.fill(probe.copyWithAmount(1000), FluidAction.SIMULATE);
         String line = String.format("probe%s: %s give=%d take=%d%s",
@@ -826,6 +835,22 @@ public final class PipeGraphCommand {
         if (!bestGive.isEmpty()) line += " | face give=" + maxGive + "@" + bestGive;
         if (!bestTake.isEmpty()) line += " | face take=" + maxTake + "@" + bestTake;
         return line;
+    }
+
+    /**
+     * The fluid to ask THIS handler about: whatever it actually holds, falling back to the
+     * network's fluid for an endpoint standing empty. The take probe used to be run with ONE fluid
+     * for the whole dump (the first present anywhere), which on a multi-fluid network reports a
+     * machine against a fluid it never touches — a TFMG engine rig printed
+     * {@code take=0 (Kerosene)} for its air intake and its exhaust, exactly the two endpoints whose
+     * own gas numbers were the thing being looked for.
+     */
+    private static FluidStack probeFor(IFluidHandler cap, FluidStack networkFluid) {
+        for (int tank = 0; tank < cap.getTanks(); tank++) {
+            FluidStack held = cap.getFluidInTank(tank);
+            if (!held.isEmpty()) return held;
+        }
+        return networkFluid;
     }
 
     /** "holds=N" for a single tank; every tank of a multi-tank port: "tanks=[Air 500/16000, 0/16000]". */
@@ -957,24 +982,30 @@ public final class PipeGraphCommand {
     }
 
     /**
-     * A per-fluid summary of everything held across the network's sources/sinks: total
-     * volume plus the physical properties that drive the engine — density (gravity/
-     * buoyancy sign), viscosity (flow rate), and temperature. Flags a lighter-than-air
-     * fluid, which inverts the gravity model.
+     * A per-fluid summary of everything on the network — what the endpoints hold AND what stands
+     * in the PIPES — with the physical properties that drive the engine: density (gravity/buoyancy
+     * sign), viscosity (flow rate), and temperature. Flags a lighter-than-air fluid, which inverts
+     * the gravity model.
+     *
+     * The pipe half is not a detail: pipes hold real fluid, and a fluid whose endpoints have all
+     * stopped participating lives ONLY in the pipes — exactly the state worth dumping. A TFMG
+     * engine rig reported "Kerosene" alone while a few hundred mB of air and CO2 sat in the runs,
+     * so the one section meant to say what is in the network omitted the two fluids in question.
      */
     private static void sendFluidStats(Report report, ServerLevel level, Graph g) {
         MouthConditions mouths = MouthConditions.of(level, g);
         List<FluidStack> totals = new ArrayList<>();
+        List<FluidStack> inPipes = new ArrayList<>();
         for (Node n : g.nodes()) {
+            accumulateStored(level, inPipes, n.pos()); // a junction/gate slot holds fluid too
             BoundaryColumn column = columnOf(level, mouths, n);
             if (column == null || column.contents().isEmpty() || column.contentMb() <= 0) continue;
-            FluidStack running = null;
-            for (FluidStack present : totals) {
-                if (FluidStack.isSameFluidSameComponents(present, column.contents())) { running = present; break; }
-            }
-            if (running != null) running.grow(column.contentMb());
-            else totals.add(column.contents().copyWithAmount(column.contentMb()));
+            accumulate(totals, column.contents().copyWithAmount(column.contentMb()));
         }
+        for (Edge e : g.edges()) {
+            for (BlockPos cell : e.pipes()) accumulateStored(level, inPipes, cell);
+        }
+        for (FluidStack stored : inPipes) accumulate(totals, stored.copy());
         if (totals.isEmpty()) return;
 
         report.line("§e--- Fluids ---");
@@ -985,11 +1016,38 @@ public final class PipeGraphCommand {
             int viscosity = (int) Math.round(FlowSolver.effectiveViscosity(level, fluid));
             String thinned = viscosity < type.getViscosity()
                     ? String.format("  §6(thinned from %d — ultrawarm)", type.getViscosity()) : "";
-            report.line(String.format("  §b%s§7: §f%d mB  §7density §f%d §7visc §f%d §7temp §f%dK%s%s",
+            int stored = amountOf(inPipes, fluid);
+            report.line(String.format("  §b%s§7: §f%d mB%s  §7density §f%d §7visc §f%d §7temp §f%dK%s%s",
                     fluid.getHoverName().getString(), fluid.getAmount(),
+                    stored > 0 ? String.format(" §7(§f%d§7 in pipes)", stored) : "",
                     type.getDensity(), viscosity, type.getTemperature(),
                     type.isLighterThanAir() ? "  §e(lighter than air ↑)" : "", thinned));
         }
+    }
+
+    /** Add one pipe cell's (or node slot's) stored content to a running per-fluid tally. */
+    private static void accumulateStored(ServerLevel level, List<FluidStack> into, BlockPos pos) {
+        PipeStore.Store cell = PipeStore.at(level, pos);
+        if (cell == null || cell.amount() <= 0) return;
+        accumulate(into, cell.fluid().copyWithAmount(cell.amount()));
+    }
+
+    /** Merge a stack into a distinct-fluid tally, summing amounts for a fluid already present. */
+    private static void accumulate(List<FluidStack> into, FluidStack stack) {
+        for (FluidStack present : into) {
+            if (FluidStack.isSameFluidSameComponents(present, stack)) {
+                present.grow(stack.getAmount());
+                return;
+            }
+        }
+        into.add(stack);
+    }
+
+    private static int amountOf(List<FluidStack> tally, FluidStack fluid) {
+        for (FluidStack present : tally) {
+            if (FluidStack.isSameFluidSameComponents(present, fluid)) return present.getAmount();
+        }
+        return 0;
     }
 
     /**

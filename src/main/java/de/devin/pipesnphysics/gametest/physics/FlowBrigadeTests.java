@@ -1109,4 +1109,86 @@ public class FlowBrigadeTests {
             helper.succeed();
         });
     }
+
+    /**
+     * A junction the solve never reached must not SEAL fluid into the runs beside it. A network
+     * with nothing participating (every endpoint stopped, or none at all) gets no node heads, and
+     * {@code SettlePass.settleSlot} used to bail on the missing head — while a settling run only
+     * ever moves within its own cells and its END reservoirs and never pushes into a slot. So a
+     * stub resting against a headless junction had no path out in either direction, and its
+     * content stayed there for good.
+     *
+     * Reported on a TFMG engine rig: the exhaust manifold's CO2 sat in the two stubs either side
+     * of an empty junction ("can't move to the exhaust because the flagged pipe is empty") while
+     * the starved engines produced none, so no CO2 pass ran to give that junction a head. Tested
+     * with WATER on a bare capped T — no reservoir anywhere, so every node is headless — because
+     * the wall is the missing head, not the fluid: the level arms must equalize through the
+     * junction like communicating vessels.
+     */
+    @GameTest(template = "physics/collision_u_below", templateNamespace = PipesNPhysics.ID,
+            timeoutTicks = 200, batch = "headlessSlot")
+    public static void headlessJunctionDoesNotSealTheRunsBesideIt(GameTestHelper helper) {
+        Block pipe = AllBlocks.FLUID_PIPE.get();
+        BlockPos centre = new BlockPos(3, 1, 1);
+        BlockPos loaded = new BlockPos(2, 1, 1);   // the stub cell holding the water
+        BlockPos across = new BlockPos(4, 1, 1);   // the far arm, past the junction
+        // A capped T: every end closed, so no mouth can anchor a head and nothing participates.
+        // The caps must be SOLID BLOCKS — Create straightens a pipe left with one connection, so
+        // a lone end pipe opens its far face and spills as a mouth (which would also anchor a head
+        // and defeat the point of the rig).
+        helper.setBlock(new BlockPos(0, 1, 1), Blocks.STONE);
+        helper.setBlock(new BlockPos(6, 1, 1), Blocks.STONE);
+        helper.setBlock(new BlockPos(3, 1, 4), Blocks.STONE);
+        helper.setBlock(new BlockPos(1, 1, 1), pipeState(pipe, Direction.EAST));
+        helper.setBlock(loaded, pipeState(pipe, Direction.WEST, Direction.EAST));
+        helper.setBlock(centre, pipeState(pipe, Direction.WEST, Direction.EAST, Direction.SOUTH));
+        helper.setBlock(across, pipeState(pipe, Direction.WEST, Direction.EAST));
+        helper.setBlock(new BlockPos(5, 1, 1), pipeState(pipe, Direction.WEST));
+        helper.setBlock(new BlockPos(3, 1, 2), pipeState(pipe, Direction.NORTH, Direction.SOUTH));
+        helper.setBlock(new BlockPos(3, 1, 3), pipeState(pipe, Direction.NORTH));
+
+        int filled = PipeStore.capacityMb();
+        helper.runAfterDelay(5, () -> {
+            PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(loaded));
+            if (cell == null) {
+                helper.fail("no pipe store at " + loaded.toShortString());
+                return;
+            }
+            cell.insert(new FluidStack(Fluids.WATER, filled), filled);
+            cell.flush();
+            EngineTickHandler.markChanged(helper.getLevel(), helper.absolutePos(centre));
+        });
+        helper.runAfterDelay(180, () -> {
+            Graph graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(centre));
+            Node node = graph.nodeAt(helper.absolutePos(centre));
+            if (node == null || !node.isJunction()) {
+                helper.fail("the centre of the T is not a junction node — the rig never built");
+                return;
+            }
+            int held = storedAt(helper, loaded);
+            int slot = storedAt(helper, centre);
+            int far = storedAt(helper, across);
+            if (slot + far <= 0) {
+                helper.fail("the headless junction sealed the water in: stub still holds " + held
+                        + " mB, junction " + slot + " mB, far arm " + far + " mB");
+                return;
+            }
+            int total = held + slot + far + storedAt(helper, new BlockPos(1, 1, 1))
+                    + storedAt(helper, new BlockPos(5, 1, 1))
+                    + storedAt(helper, new BlockPos(3, 1, 2))
+                    + storedAt(helper, new BlockPos(3, 1, 3));
+            if (total != filled) {
+                helper.fail("settling across the headless junction lost fluid: " + total
+                        + " mB of " + filled + dump(helper, centre));
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /** The mB actually stored in one pipe cell (a junction node's slot reads the same way). */
+    private static int storedAt(GameTestHelper helper, BlockPos rel) {
+        PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(rel));
+        return cell == null ? 0 : cell.amount();
+    }
 }

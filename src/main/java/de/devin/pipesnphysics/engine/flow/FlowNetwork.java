@@ -187,12 +187,23 @@ public final class FlowNetwork {
     private record Collision(FluidStack resident, FluidStack incoming) {}
 
     /**
+     * Whether pipes may hold more than one fluid instead of breaking — the config's one gate, asked
+     * HERE so all four collision sites (a driven run, a junction slot, a pump packing its outlet, a
+     * reservoir pressing its column at rest) answer alike. On, two fluids simply stop where they
+     * meet: a cell still holds one fluid and a run still carries one at a time, so the second waits
+     * behind the first, but sharing plumbing stops being destructive.
+     */
+    static boolean mixingAllowed() {
+        return PipesNPhysicsConfig.ALLOW_MIXED_PIPE_FLUIDS.get();
+    }
+
+    /**
      * Record that {@code incoming} was driven into the pipe cell at {@code pos}, which already holds
      * a different {@code resident} fluid — Create's "crossing the streams". Deduped per cell; applied
      * once after the flush ({@link #reactToCollisions}), so no pipe is broken mid-execution.
      */
     void collide(BlockPos pos, FluidStack resident, FluidStack incoming) {
-        if (resident.isEmpty() || incoming.isEmpty()
+        if (mixingAllowed() || resident.isEmpty() || incoming.isEmpty()
                 || FluidStack.isSameFluidSameComponents(resident, incoming)) {
             return;
         }
@@ -205,7 +216,7 @@ public final class FlowNetwork {
      * moves nothing. Empty or same-fluid destinations are no collision (ordinary flow / back-up).
      */
     boolean collides(BlockPos pos, PipeStore.Store cell, FluidStack incoming) {
-        if (incoming.isEmpty() || cell.amount() <= 0
+        if (mixingAllowed() || incoming.isEmpty() || cell.amount() <= 0
                 || FluidStack.isSameFluidSameComponents(cell.fluid(), incoming)) {
             return false;
         }

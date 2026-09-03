@@ -1,10 +1,13 @@
 package de.devin.pipesnphysics;
 
+import com.simibubi.create.foundation.fluid.CombinedTankWrapper;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.Blocks;
 import net.neoforged.neoforge.capabilities.Capabilities;
 import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
+import net.neoforged.neoforge.fluids.FluidStack;
+import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
 
 import java.util.EnumMap;
@@ -28,6 +31,11 @@ import java.util.Map;
  *    {@code null}-side query its lambda never expected (NeoForge allows null there), serving a tank
  *    only on real faces. The engine must degrade it to side-specific, never crash the tick
  *    ({@code FluidCaps}).
+ *  - {@link Blocks#DIAMOND_BLOCK} — the shape of TFMG's engines: SIDE-AGNOSTIC (one combined handler
+ *    on the null side and every face) but multi-PORT — a fill-only INPUT tank the machine never gives
+ *    back and a drain-only OUTPUT tank. Nothing in stock Create has it (a spout is fill-only but
+ *    single-tank, a basin drains everything it holds), and it is the shape that reads as
+ *    "incompatible with its own supply" to a naive drain probe.
  * Backing tanks are per BlockPos so a test can pre-fill a side and read it back through the engine.
  * Registration is gated to {@code !production} by the caller, so it never ships.
  */
@@ -36,6 +44,9 @@ public final class TestSideHandlers {
     private static final Map<BlockPos, EnumMap<Direction, FluidTank>> TANKS = new HashMap<>();
     private static final Map<BlockPos, FluidTank> PRIMARY = new HashMap<>();
     private static final Map<BlockPos, FluidTank> SECONDARY = new HashMap<>();
+    private static final Map<BlockPos, FluidTank> MACHINE_INPUT = new HashMap<>();
+    private static final Map<BlockPos, FluidTank> MACHINE_OUTPUT = new HashMap<>();
+    private static final Map<BlockPos, IFluidHandler> MACHINE = new HashMap<>();
 
     private TestSideHandlers() {}
 
@@ -54,6 +65,10 @@ public final class TestSideHandlers {
             if (side.getAxis().isVertical()) return null;
             return primaryAt(pos);
         }, Blocks.OBSIDIAN);
+        // Engine shape: one combined handler on every side (so it couples like a tank), holding an
+        // input tank it only ever accepts into and an output tank it only ever gives from.
+        event.registerBlock(Capabilities.FluidHandler.BLOCK,
+                (level, pos, state, be, side) -> machineAt(pos), Blocks.DIAMOND_BLOCK);
     }
 
     /** The backing tank for one face — a test fills this, then reads it through the engine. */
@@ -72,9 +87,43 @@ public final class TestSideHandlers {
         return SECONDARY.computeIfAbsent(pos.immutable(), p -> new FluidTank(TANK_CAPACITY));
     }
 
+    /** The engine-shaped machine's OUTPUT tank — the only thing it will hand back out. */
+    public static FluidTank machineOutputAt(BlockPos pos) {
+        return MACHINE_OUTPUT.computeIfAbsent(pos.immutable(), p -> new FluidTank(TANK_CAPACITY) {
+            @Override
+            public int fill(FluidStack resource, FluidAction action) {
+                return 0;
+            }
+        });
+    }
+
+    /** The engine-shaped machine's INPUT tank — it consumes what it takes and never gives it back. */
+    public static FluidTank machineInputAt(BlockPos pos) {
+        return MACHINE_INPUT.computeIfAbsent(pos.immutable(), p -> new FluidTank(TANK_CAPACITY) {
+            @Override
+            public FluidStack drain(FluidStack resource, FluidAction action) {
+                return FluidStack.EMPTY;
+            }
+
+            @Override
+            public FluidStack drain(int maxDrain, FluidAction action) {
+                return FluidStack.EMPTY;
+            }
+        });
+    }
+
+    /** The machine's one side-agnostic capability: output first, exactly as Create's basin orders its own. */
+    public static IFluidHandler machineAt(BlockPos pos) {
+        return MACHINE.computeIfAbsent(pos.immutable(),
+                p -> new CombinedTankWrapper(machineOutputAt(p), machineInputAt(p)));
+    }
+
     public static void clear() {
         TANKS.clear();
         PRIMARY.clear();
         SECONDARY.clear();
+        MACHINE_INPUT.clear();
+        MACHINE_OUTPUT.clear();
+        MACHINE.clear();
     }
 }

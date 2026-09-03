@@ -223,10 +223,13 @@ public final class Reservoir {
     /**
      * Whether {@link #contents()} is the WHOLE story — this reservoir holds at most one fluid, so
      * its representative really is what it would press into a pipe. A multi-fluid vessel (a basin
-     * mid-recipe) has no single answer, and the representative is an arbitrary pick.
+     * mid-recipe, a machine whose ports are separate tanks) has no single answer, and the
+     * representative is an arbitrary pick. Asked of what STANDS in the vessel, not of what it will
+     * hand back: a machine gives only its OUTPUT, so a drainable-only count reads a fuelled engine
+     * as a single-fluid vessel of exhaust and offers that exhaust to its own fuel line.
      */
     boolean holdsOneFluid() {
-        return column.heldFluids().size() <= 1;
+        return !column.holdsSeveralFluids() && column.heldFluids().size() <= 1;
     }
 
     /**
@@ -248,13 +251,25 @@ public final class Reservoir {
      * multi-fluid basin carrying it, is not a collision). This is the crossing-the-streams test at
      * a tank↔pipe boundary; like Create it checks no fill level, only compatibility. Budget-free:
      * it probes the live handler, so a reservoir whose per-tick budgets are spent still reads true.
+     *
+     * HOLDING the fluid is asked of the TANKS, not of a drain probe: a machine's INPUT tank is
+     * fill-only — it consumes what it takes and never hands it back — so a drain probe reads a
+     * brimming one as refusing the very fluid standing in it, and the boundary then condemned the
+     * line that had just filled it. That is every TFMG engine: a combined capability over a
+     * fill-only fuel tank, a fill-only air tank and a drain-only exhaust tank, so a running engine
+     * presses its exhaust at each port, finds its full fuel tank "incompatible" with the diesel in
+     * the supply pipe, and turns that pipe to cobblestone ("pipes still break because of fluid
+     * mixing"). Whether a vessel gives a fluid back is a question about its PORTS; whether it can
+     * be in contact with it is a question about what it holds.
      */
     boolean rejects(FluidStack fluid) {
         if (fluid.isEmpty()) return false;
         IFluidHandler handler = column.handler(level);
         if (handler == null) return false; // can't tell → never break a pipe on a hunch
         if (handler.fill(fluid.copyWithAmount(1), FluidAction.SIMULATE) > 0) return false;
-        return BoundaryColumn.drainMatching(handler, fluid.copyWithAmount(1), FluidAction.SIMULATE)
-                .isEmpty();
+        for (int tank = 0; tank < handler.getTanks(); tank++) {
+            if (FluidStack.isSameFluidSameComponents(handler.getFluidInTank(tank), fluid)) return false;
+        }
+        return true;
     }
 }

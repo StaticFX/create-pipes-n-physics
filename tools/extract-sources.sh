@@ -27,4 +27,7 @@ extract neoforge         "*net.neoforged/neoforge/$(prop neo_version)/*"
 extract ponder           "*net.createmod.ponder/ponder-neoforge/$(prop ponder_version)+*/*"
 extract sable            "*dev.ryanhcode.sable/sable-*/$(prop sable_version)/*"
 extract sable-companion  "*dev.ryanhcode.sable-companion/sable-companion-*/$(prop sable_companion_version)/*"
+# Both flywheel jars land in one tree: the api is what an addon compiles against, the impl carries
+# the GLSL and the visualization internals a render question actually needs to read.
+extract flywheel         "*dev.engine-room.flywheel/flywheel-neoforge*/$(prop flywheel_version)/*"
 echo "Done — read/grep under run/sources/."

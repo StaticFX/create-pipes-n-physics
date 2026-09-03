@@ -40,8 +40,29 @@ public final class HandlerRoles {
     public static final TagKey<Block> IGNORE = tag("ignore_fluid_handler");
     public static final TagKey<Block> SINK_ONLY = tag("sink_only");
     public static final TagKey<Block> RELAY_ENDPOINT = tag("relay_endpoint");
+    public static final TagKey<Block> SEPARATE_PORTS = tag("separate_ports");
 
     private HandlerRoles() {}
+
+    /**
+     * Whether this block's pipe connections are separate PORTS rather than one shared plenum — a
+     * TOPOLOGY question, not a role, and the one thing here that changes the GRAPH instead of the
+     * endpoint's behaviour. A tank or a basin is a plenum: fluid entering by one pipe may leave by
+     * another, so {@link GraphBuilder} couples every run touching it into ONE network. A machine
+     * that keeps its ports in separate internal tanks behind one combined capability is not, and
+     * coupling it is what lets one line's fluid leave through another line's port — a TFMG engine
+     * joins its fuel, air and exhaust manifolds into a single network, so exhaust can back-fill a
+     * fuel tank that has run dry and the refuelled line then stalls on the wrong fluid.
+     *
+     * Declared, never sniffed: through {@code IFluidHandler} a plenum and a multi-port machine are
+     * indistinguishable (a Create basin is FOUR tanks and a genuine plenum, so "more than one tank"
+     * is not the test — it fails {@code multiFluidBasinSeparatesCompletely}). A block whose faces
+     * already expose DIFFERENT handler objects needs no declaration: identity alone makes it
+     * side-specific, which decouples it anyway.
+     */
+    public static boolean hasSeparatePorts(BlockState state) {
+        return state.is(SEPARATE_PORTS) || FluidHandlerApi.hasSeparatePorts(state.getBlock());
+    }
 
     private static TagKey<Block> tag(String path) {
         return TagKey.create(Registries.BLOCK,

@@ -1068,7 +1068,9 @@ final class SettlingRun {
      * A narrow guard: the solve names the fluid for every run it can reach ({@code restFluids},
      * keyed on which endpoints actually participate) and answers first, so this fallback only ever
      * guesses where the solve had nothing to say at all — no rig here reaches it, which is why it
-     * carries no test of its own. Deliberately NOT applied to {@code FlowSolver.settleBlockedRuns},
+     * carries no test of its own (nor does {@code Reservoir.holdsOneFluid} counting a machine's
+     * undrainable tanks, which is what keeps a fuelled engine from reading as a single-fluid vessel
+     * of exhaust here). Deliberately NOT applied to {@code FlowSolver.settleBlockedRuns},
      * whose representative stamp only decides how a blocked run RENDERS: leaving that blank is its
      * own wrong answer, and nothing moves on it.
      */

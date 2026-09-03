@@ -126,7 +126,7 @@ public final class PumpRangeProbe {
     }
 
     /** Whether the pump's own branches carry a lighter-than-air fluid, resting or flowing. */
-    private static boolean carriesGas(Graph graph, Solution solution, Node pump) {
+    public static boolean carriesGas(Graph graph, Solution solution, Node pump) {
         for (Edge edge : graph.edgesOf(pump.index())) {
             if (PipeProbe.isGas(solution.edgeFluids().getOrDefault(edge.index(), FluidStack.EMPTY))
                     || PipeProbe.isGas(
