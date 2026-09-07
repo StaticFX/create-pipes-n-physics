@@ -81,12 +81,22 @@ public final class SettlePass {
         // then bled its gas into an idle edge every settle tick while the brigade pushed it back,
         // an endless churn the player saw as the pipe constantly refilling from the top. Buoyant
         // exchange is monotone (gas only ever moves up), so it cannot churn.
-        if (SettlingRun.lighterThanAir(slot.fluid())) {
+        boolean gasFrame = solution.gasHeadNodes().contains(node.index());
+        // An EMPTY slot has no fluid of its own to classify by, so the FRAME of its head decides:
+        // on a gas network it must still bubble rather than pool, or the lateral spread in
+        // poolHeadless bleeds gas into a level stub — the very churn buoyant exchange prevents.
+        if (SettlingRun.lighterThanAir(slot.fluid()) || (slot.amount() <= 0 && gasFrame)) {
             bubbleUp(node, slot, flowedEdges);
             return;
         }
         Double head = solution.nodeHeads().get(node.index());
-        if (head == null) {
+        // A head published by a GAS pass is a buoyancy quantity, not a world elevation (§4), and on
+        // a network carrying both fluids the last pass to write wins. Mapped through windowFill it
+        // reads far below the cell — "drain to 0" — so a LIQUID slot handed one bleeds its contents
+        // into an idle edge every tick while the run pushes them back: an endless slosh, the mirror
+        // of the churn bubbleUp guards against, which cannot catch this because it keys on the
+        // slot's own fluid. With no usable head the slot pools by plain gravity instead.
+        if (head == null || gasFrame) {
             poolHeadless(node, slot, flowedEdges);
             return;
         }

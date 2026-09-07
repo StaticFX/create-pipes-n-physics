@@ -479,4 +479,60 @@ public class EqualizationTests {
             }
         });
     }
+
+    /**
+     * The GAS twin of the port lip above, and the mirror the buoyant draw gate has to carry with it.
+     *
+     * A lighter-than-air fluid reaches an opening by SINKING to it, so its lip is the aperture's TOP
+     * and every elevation negates — including {@code drawSurface}'s give-from-any-level exemption,
+     * whose mirror is the column's FLOOR. Miss that and the mirrored lip re-opens the exact hole the
+     * {@code separate_ports} declaration was added to close: a TFMG engine reads 38% full because of
+     * its KEROSENE, which parks its fictional "gas interface" within a hair of the pipe aperture —
+     * one engine was walled outright and its neighbours throttled to 7 mB/t while each held hundreds
+     * of mB of exhaust ({@code solved=220 actual=0} on the run, {@code give=412 take=0} on the walled
+     * engine). Reported 2026-09-06, one day after the mirrored lip shipped.
+     *
+     * Same fixture and the same 25% fill as the liquid case — which is the same wall, since the
+     * mirrored aperture also lands at 37.5% of the block — so only the exemption can let it give.
+     * Own batch: the declaration is global. Skips when no lighter-than-air fluid is registered.
+     */
+    @GameTest(template = "physics/collision_u_below", templateNamespace = PipesNPhysics.ID,
+            timeoutTicks = 200, batch = "separatePortsGasLip")
+    public static void declaredMultiPortMachineGivesItsGasThroughASidePort(GameTestHelper helper) {
+        Fluid gas = lighterThanAirFluid();
+        if (gas == null) {
+            helper.succeed();
+            return;
+        }
+        Block pipe = AllBlocks.FLUID_PIPE.get();
+        BlockPos machine = new BlockPos(3, 1, 1);
+        BlockPos sink = new BlockPos(5, 1, 1);
+        TestSideHandlers.clear();
+        helper.setBlock(machine, Blocks.DIAMOND_BLOCK);
+        helper.setBlock(new BlockPos(4, 1, 1), pipeState(pipe, Direction.WEST, Direction.EAST));
+        helper.setBlock(sink, AllBlocks.FLUID_TANK.get());
+        BlockPos machinePos = helper.absolutePos(machine);
+        FluidHandlerApi.declareSeparatePorts(Blocks.DIAMOND_BLOCK);
+
+        helper.runAfterDelay(10, () -> {
+            TestSideHandlers.machineOutputAt(machinePos).setFluid(new FluidStack(gas, 8000));
+            EngineTickHandler.markChanged(helper.getLevel(), helper.absolutePos(new BlockPos(4, 1, 1)));
+        });
+        helper.runAfterDelay(180, () -> {
+            try {
+                int received = amount(helper, sink);
+                if (received <= 0) {
+                    helper.fail("the declared machine gave no GAS through its side port — its summed"
+                            + " fill hangs the mirrored interface above the aperture, which is"
+                            + " exactly the reading a port must not be gated on"
+                            + dump(helper, new BlockPos(4, 1, 1)));
+                    return;
+                }
+                helper.succeed();
+            } finally {
+                FluidHandlerApi.clearSeparatePorts(Blocks.DIAMOND_BLOCK);
+                TestSideHandlers.clear();
+            }
+        });
+    }
 }

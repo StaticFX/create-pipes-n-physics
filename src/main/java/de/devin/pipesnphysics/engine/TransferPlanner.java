@@ -212,7 +212,7 @@ final class TransferPlanner {
      * keeping an asymptotic puddle.
      */
     private double lipDrainCap(BoundaryColumn column, int solverIdx) {
-        if (gas || column.isOpenEnd() || column.isInfiniteSource()) return Double.MAX_VALUE;
+        if (column.isOpenEnd() || column.isInfiniteSource()) return Double.MAX_VALUE;
 
         double minLip = Double.NaN;
         for (int b = 0; b < branches.size(); b++) {
@@ -233,8 +233,10 @@ final class TransferPlanner {
         if (Double.isNaN(minLip)) return Double.MAX_VALUE;
 
         // The DRAW surface, like the canDrawFrom wall and Reservoir.capDrawAtLip — gate and
-        // cap must share one surface or an open gate meets a zero cap and the line stalls.
-        double surface = column.drawSurface();
+        // cap must share one surface or an open gate meets a zero cap and the line stalls. Read
+        // in the pass's own frame, so a buoyant column settles at its opening rather than
+        // emptying past it in one tick and being walled the next.
+        double surface = column.drawHead(gas);
         double aboveLipMb = column.capacitance() * (surface - minLip);
         if (aboveLipMb <= 0) return 0;
         return Math.max(Math.min(aboveLipMb, LIP_DREGS_MB), LIP_DRAIN_RATE * aboveLipMb);

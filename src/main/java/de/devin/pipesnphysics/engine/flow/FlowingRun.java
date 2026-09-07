@@ -38,6 +38,12 @@ final class FlowingRun {
     /** Cells upstream→downstream; empty when the endpoints touch directly (or cells hold nothing). */
     private final List<BlockPos> cells;
     private int exitBudget;
+    /**
+     * Whether the whole column has ARRIVED, cached for this pass: every gate on the run asks it and
+     * the probe walks handlers, so it is answered once. Within a tick the stored column only ever
+     * moves ALONG the run, which does not change what can still reach it.
+     */
+    private Boolean arrived;
 
     FlowingRun(BrigadePass pass, FlowNetwork network, Edge edge, FluidStack fluid,
                int solvedRateMb, boolean flowsAToB) {
@@ -272,15 +278,42 @@ final class FlowingRun {
      * depth, an exhausted one cannot.
      */
     private boolean columnFullyArrived() {
-        Reservoir source = network.reservoirAt(upstreamNode());
-        if (source == null) return false;
+        if (arrived == null) arrived = probeFullyArrived();
+        return arrived;
+    }
+
+    private boolean probeFullyArrived() {
+        int stored = storedMb();
+        if (stored >= flowDepthMb) return false;
+        // Ask whatever is upstream — reservoir, junction slot, or feeding runs — rather than
+        // giving up when it is not a reservoir. That bail was the documented "a junction-fed run
+        // keeps the plain gate" gap, and in a MANIFOLD it is not a corner case but the normal
+        // shape: small sources pooling at a junction can never build the depth a fast run's solved
+        // rate demands, so the gate never opens and the line deadlocks with a full solve on it.
+        return stored + pass.arrivingSupply(upstreamNode(), fluid,
+                flowDepthMb - stored + 1, pass.freshVisitSet()) <= flowDepthMb;
+    }
+
+    /** This run's whole stored column, in mB. */
+    private int storedMb() {
         int stored = 0;
         for (BlockPos pos : cells) {
             PipeStore.Store cell = network.cellAt(pos);
             if (cell != null) stored += cell.amount();
         }
-        if (stored >= flowDepthMb) return false;
-        return stored + source.probeSupply(fluid, flowDepthMb - stored + 1) <= flowDepthMb;
+        return stored;
+    }
+
+    /**
+     * What this run could still hand on to a consumer past its downstream end: its own stored
+     * column plus whatever can still reach it. The probe half of {@link #pullFromTail}, used to
+     * decide whether a depth gate downstream is waiting for something that will never come.
+     */
+    int availableToPass(FluidStack wanted, int want, Set<Integer> visited) {
+        if (!FluidStack.isSameFluidSameComponents(fluid, wanted)) return 0;
+        int stored = storedMb();
+        if (stored >= want) return want;
+        return stored + pass.arrivingSupply(upstreamNode(), wanted, want - stored, visited);
     }
 
     /** The dual of {@link #pullFromTail}: put refused fluid back into this run's downstream end. */
@@ -296,7 +329,10 @@ final class FlowingRun {
      * freely.
      */
     private int plugMove(PipeStore.Store from, PipeStore.Store to, int amount) {
-        if (to.amount() <= 0 && from.amount() < flowDepthMb) return 0;
+        // A column that has fully ARRIVED may cross a dry boundary below the depth — otherwise the
+        // last sub-depth parcel parks one cell short of the end for good, which is the same
+        // deadlock the delivery gate has been relieved of since the arrived-column rule shipped.
+        if (to.amount() <= 0 && from.amount() < flowDepthMb && !columnFullyArrived()) return 0;
         return from.moveInto(to, amount);
     }
 

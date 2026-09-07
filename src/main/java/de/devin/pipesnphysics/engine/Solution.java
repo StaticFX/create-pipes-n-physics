@@ -33,6 +33,15 @@ import java.util.Set;
  *   nodeAnchors  — per graph node index, the supply surface head its ceiling was
  *                  seeded from (before any pump boosts); ceiling − anchor is the
  *                  total head budget, elevation above the anchor is budget spent,
+ *   gasHeadNodes — the nodes whose published head came from a lighter-than-air pass, so it is a
+ *                  BUOYANCY quantity (fill − topY) and NOT a world elevation (§4). Passes
+ *                  overwrite one another's heads, so a node on a network carrying BOTH a liquid
+ *                  and a gas can publish either; anything mapping a head onto block Y has to know
+ *                  which it got. Without the tag a kerosene junction handed a CO2 head read its
+ *                  target as "drain to 0" and bled its fuel out every settle tick while the run
+ *                  pushed it back — an endless slosh, and the mirror of the churn
+ *                  {@code SettlePass.bubbleUp} guards against (that guard keys on the SLOT's own
+ *                  fluid, so it can never catch a LIQUID slot handed a gas head),
  *   edgeFluids   — per graph edge, a sample of the fluid carrying the dominant flow,
  *   restFluids   — per graph edge, the fluid that fills it even when NOT flowing
  *                  (dominant participating fluid); lets the renderer keep a static
@@ -70,6 +79,7 @@ public record Solution(
         Map<Integer, Double> nodeHeads,
         Map<Integer, Double> nodeCeilings,
         Map<Integer, Double> nodeAnchors,
+        Set<Integer> gasHeadNodes,
         Map<Integer, FluidStack> edgeFluids,
         Map<Integer, FluidStack> restFluids,
         Set<Integer> blockedEdges,
@@ -124,7 +134,7 @@ public record Solution(
         List<EdgeFlow> flows = new ArrayList<>(graph.edges().size());
         for (Edge e : graph.edges()) flows.add(EdgeFlow.none(e.index()));
         return new Solution(flows, List.of(), List.of(), new int[graph.edges().size()],
-                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), Map.of(), Map.of(), Set.of(), Map.of(), Map.of(),
                 Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), false);
     }
 

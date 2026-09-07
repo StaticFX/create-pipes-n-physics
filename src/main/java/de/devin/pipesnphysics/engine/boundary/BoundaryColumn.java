@@ -744,6 +744,29 @@ public final class BoundaryColumn {
     }
 
     /**
+     * The give-permission datum IN THE PASS'S OWN FRAME: {@link #drawSurface()} for a liquid, the
+     * gas interface NEGATED for a lighter-than-air fluid, which reaches an opening by sinking to
+     * it rather than rising. Every draw gate — the solve's wall, the planner's cap, the executor's
+     * — reads this one method against {@code PipeWindow.drawLipY(.., gas)}, so a buoyant column
+     * gates on the gas the player SEES, exactly as a liquid does, and the two frames share one rule.
+     */
+    public double drawHead(boolean gas) {
+        if (!gas) return drawSurface();
+        // The MIRROR of drawSurface()'s give-from-any-level exemption. For a buoyant fluid the most
+        // permissive opening is the column's FLOOR, not its top, so the exemption negates with
+        // everything else. Load-bearing for a declared MULTI-PORT machine, whose summed fill
+        // fraction is a fiction about ports that share nothing: a TFMG engine reads 38% full
+        // because of its KEROSENE, which put its "gas interface" within a hair of the pipe
+        // aperture — one engine was walled outright and its neighbours throttled to 7 mB/t while
+        // holding hundreds of mB of exhaust (the /pipegraph tell: `solved=220 actual=0` on the run
+        // with `give=412 take=0` on a walled engine beside it). The liquid lip had exempted them
+        // since the tag shipped; the gas frame has to as well, or the mirror re-opens the exact
+        // hole the declaration was added to close.
+        if (givesFromAnyLevel && contentMb > 0) return -baseY;
+        return -gasSurface();
+    }
+
+    /**
      * The MIRROR of {@link #renderedSurface()} for a lighter-than-air content: a gas hangs from
      * the column ceiling, so its interface is where the gas body ENDS, measured down from the
      * top — for a Create tank the inset render range upside down (gas ceiling {@code capHeight}

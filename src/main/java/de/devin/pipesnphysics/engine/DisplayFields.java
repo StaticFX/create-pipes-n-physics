@@ -235,7 +235,14 @@ final class DisplayFields {
         for (Node node : graph.nodes()) {
             int index = solverIndex[node.index()];
             if (index < 0) continue;
-            if (known[index]) results.nodeHeads.put(node.index(), display[index]);
+            if (known[index]) {
+                results.nodeHeads.put(node.index(), display[index]);
+                // The head carries its FRAME: a gas head is fill − topY, not an elevation, and the
+                // last pass to write wins — so a node shared by a liquid and a gas pass must say
+                // which one it is publishing, or a consumer maps buoyancy onto block Y (§4).
+                if (gas) results.gasHeadNodes.add(node.index());
+                else results.gasHeadNodes.remove(node.index());
+            }
             if (!ceilingKnown[index]) continue;
             Double previous = results.nodeCeilings.get(node.index());
             if (previous == null || ceiling[index] > previous) {

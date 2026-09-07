@@ -262,6 +262,67 @@ public class GravitySiphonTests {
     }
 
     /**
+     * The GAS twin of the lip above, and the one give-gate the buoyant frame was missing: a vessel
+     * may only give through an opening its gas layer reaches DOWN to.
+     *
+     * A buoyant pocket rides the ceiling, so a tank holding a LITTLE gas cannot discharge it
+     * through a pipe below that pocket — exactly as a nearly-empty water tank cannot give through
+     * an opening above its puddle. The whole lip block used to be liquid-only, so the solve drained
+     * such a tank anyway while the settle, which DOES read the mirrored geometry, poured it back
+     * the next tick: the tank sat at a constant few mB while every single tick moved fluid, and the
+     * pipes flickered without end. Reported 2026-09-06 on a CO2 rig whose /pipegraph tell was an
+     * alternating {@code recent ·3 →3 ·3 →3} strip against an edge reading
+     * {@code idle solved=0 actual=3}.
+     *
+     * The rig is {@code own_level_drain} read upside down: for a gas the LOW tank is the giver (a
+     * lower vessel always presses its gas upward, however little it holds — which is why any trace
+     * of gas in a low tank triggered this), and its opening lies along its own base level. 100 mB
+     * of 8000 hangs the interface at ~1.74 against an aperture top of 1.625, so the tank must stand
+     * perfectly still: it may neither give the gas nor be handed it back. Skips without a gas.
+     */
+    @GameTest(template = "gravity/own_level_drain", templateNamespace = PipesNPhysics.ID, timeoutTicks = 300)
+    public static void aThinGasPocketNeverGrindsAgainstItsOwnPipe(GameTestHelper helper) {
+        Fluid gas = lighterThanAirFluid();
+        if (gas == null) {
+            helper.succeed();
+            return;
+        }
+        BlockPos lowTank = new BlockPos(4, 1, 1);   // the giver in the gas frame
+        BlockPos highTank = new BlockPos(1, 2, 1);
+        List<BlockPos> run = ownLevelDrainRun();
+        int seeded = 100;
+
+        helper.runAfterDelay(10, () -> {
+            drain(helper, lowTank);
+            drain(helper, highTank);
+            handler(helper, lowTank).fill(new FluidStack(gas, seeded), IFluidHandler.FluidAction.EXECUTE);
+            EngineTickHandler.markChanged(helper.getLevel(), helper.absolutePos(run.getFirst()));
+        });
+        // Sample EVERY tick: the grind hands the gas back on the tick after it leaves, so a sparse
+        // sample can land twice on the same phase and read a constant amount either way.
+        for (int tick = 30; tick <= 280; tick++) {
+            helper.runAfterDelay(tick, () -> {
+                int held = amount(helper, lowTank);
+                if (held != seeded) {
+                    helper.fail("the tank's thin gas pocket moved (" + held + "/" + seeded
+                            + " mB): it cannot reach its own opening, so it must neither give the"
+                            + " gas nor be handed it back" + dump(helper, run.getFirst()));
+                }
+            });
+        }
+        helper.runAfterDelay(290, () -> {
+            int inPipes = 0;
+            for (BlockPos rel : run) inPipes += pipeAmount(helper, rel);
+            if (inPipes != 0 || amount(helper, highTank) != 0) {
+                helper.fail("gas escaped a tank that cannot reach its opening (pipes " + inPipes
+                        + ", far tank " + amount(helper, highTank) + ")" + dump(helper, run.getFirst()));
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * The owner's three-tank repro (assets/ponder/physics/pipe_gravity, copied into the test
      * structures): a raised 3-tall tank feeds two lower tanks through runs leaving its BASE
      * block. Every gravity gate keys on the RENDERED surface, and the lip is the pipe's 4x4 px

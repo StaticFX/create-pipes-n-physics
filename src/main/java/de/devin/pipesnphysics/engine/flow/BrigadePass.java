@@ -6,6 +6,7 @@ import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Node;
 import de.devin.pipesnphysics.engine.graph.PipeGeometry;
 import de.devin.pipesnphysics.engine.store.PipeStore;
+import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
 import net.neoforged.neoforge.fluids.FluidStack;
 
@@ -123,8 +124,11 @@ public final class BrigadePass {
 
         PipeStore.Store slot = network.slotAt(nodeIndex);
         if (slot != null) {
+            if (slot.amount() > 0 && !FluidStack.isSameFluidSameComponents(slot.fluid(), wanted)) {
+                return 0;
+            }
             if (slotArrival.getOrDefault(nodeIndex, 0) < puller.flowDepth()
-                    || !FluidStack.isSameFluidSameComponents(slot.fluid(), wanted)) {
+                    && !nothingMoreArrivesAt(nodeIndex, wanted, puller.flowDepth())) {
                 return 0;
             }
             return slot.extract(amount).getAmount();
@@ -133,6 +137,49 @@ public final class BrigadePass {
         for (FlowingRun feeder : feedersInto.getOrDefault(nodeIndex, List.of())) {
             if (got >= amount) break;
             got += feeder.pullFromTail(wanted, amount - got, visited);
+        }
+        return got;
+    }
+
+    /**
+     * Whether a node's pooled column is all that will EVER gather there, so a depth gate demanding
+     * more would wait forever — the junction twin of {@link FlowingRun#columnFullyArrived}, and the
+     * same rule: a gate must never ask for a column the line cannot build.
+     *
+     * A MANIFOLD of small sources feeding one fast run is the shape that needs it. The depth is
+     * sized from the SOLVED rate, which is a hydraulic capability the supply need not be able to
+     * back: three engines giving 15 mB/t each into a junction whose outgoing run solved 224 mB/t
+     * were asked for a 250 mB slot, so nothing ever crossed and the line sat dead with a full
+     * solve on it. Reservoir-fed runs have been relieved of exactly this since the arrived-column
+     * rule shipped; this is that rule finally reaching the junction case it always excluded.
+     */
+    private boolean nothingMoreArrivesAt(int nodeIndex, FluidStack wanted, int depth) {
+        return arrivingSupply(nodeIndex, wanted, depth + 1, freshVisitSet()) <= depth;
+    }
+
+    /**
+     * What could still gather at a node — the non-mutating twin of {@link #pullArrivingAt}, and the
+     * answer every "can this line ever build the depth" question needs. A reservoir answers what it
+     * would give; a junction/gate slot answers its pooled contents PLUS whatever can still reach it;
+     * a slot-less pass-through forwards to its feeders, each of which answers its own stored column
+     * plus its own upstream. The visited set breaks cycles exactly as the pull does.
+     */
+    int arrivingSupply(int nodeIndex, FluidStack wanted, int want, Set<Integer> visited) {
+        if (want <= 0 || !visited.add(nodeIndex)) return 0;
+        Reservoir reservoir = network.reservoirAt(nodeIndex);
+        if (reservoir != null) return reservoir.probeSupply(wanted, want);
+
+        int got = 0;
+        PipeStore.Store slot = network.slotAt(nodeIndex);
+        if (slot != null) {
+            if (slot.amount() > 0 && !FluidStack.isSameFluidSameComponents(slot.fluid(), wanted)) {
+                return 0;
+            }
+            got = Math.min(want, slot.amount());
+        }
+        for (FlowingRun feeder : feedersInto.getOrDefault(nodeIndex, List.of())) {
+            if (got >= want) break;
+            got += feeder.availableToPass(wanted, want - got, visited);
         }
         return got;
     }
@@ -222,16 +269,18 @@ public final class BrigadePass {
         for (Node node : network.graph.nodes()) {
             Reservoir reservoir = network.reservoirAt(node.index());
             if (reservoir == null || !reservoir.isFiniteReservoir() || reservoir.isInfiniteSource()) continue;
-            FluidStack contents = reservoir.contents();
-            if (!contents.isEmpty() && contents.getFluid().getFluidType().isLighterThanAir()) continue;
+            // A buoyant column gets the MIRRORED lip rather than being exempted: its gate is the
+            // aperture's top and everything is negated, so the same "most permissive opening"
+            // merge picks the HIGHEST one — the first a ceiling pocket grows down to.
+            boolean gas = SettlingRun.lighterThanAir(reservoir.contents());
             for (Edge edge : network.graph.edgesOf(node.index())) {
                 FlowingRun run = runs.get(edge.index());
                 if (run == null || run.upstreamNode() != node.index()) continue;
                 boolean pumpPulls = pumpPullsFrom(edge, node.index());
                 if (drainAny && pumpPulls) continue;
                 BlockPos opening = PipeGeometry.adjacentCell(network.graph, edge, node.index());
-                double lip = pumpPulls ? network.cellBottomY(opening) : network.lipY(opening);
-                lowestLip.merge(reservoir, lip, Math::min);
+                lowestLip.merge(reservoir,
+                        PipeWindow.drawLipY(network.level, opening, pumpPulls, gas), Math::min);
             }
         }
         lowestLip.forEach(Reservoir::capDrawAtLip);

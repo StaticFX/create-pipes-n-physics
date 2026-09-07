@@ -10,6 +10,7 @@ import com.simibubi.create.content.fluids.pump.PumpBlock;
 import de.devin.pipesnphysics.PipesNPhysicsConfig;
 import de.devin.pipesnphysics.compat.SableCompat;
 import de.devin.pipesnphysics.engine.EdgeFlow;
+import de.devin.pipesnphysics.engine.EngineTickHandler;
 import de.devin.pipesnphysics.engine.FlowSolver;
 import de.devin.pipesnphysics.engine.FlowTrace;
 import de.devin.pipesnphysics.engine.FluidEngine;
@@ -20,6 +21,7 @@ import de.devin.pipesnphysics.engine.boundary.FluidCaps;
 import de.devin.pipesnphysics.engine.boundary.HandlerRoles;
 import de.devin.pipesnphysics.engine.boundary.OpenEndPipes;
 import de.devin.pipesnphysics.engine.boundary.RelayDetector;
+import de.devin.pipesnphysics.engine.flow.FlowNetwork;
 import de.devin.pipesnphysics.engine.graph.Edge;
 import de.devin.pipesnphysics.engine.graph.Graph;
 import de.devin.pipesnphysics.engine.graph.GraphCache;
@@ -108,7 +110,7 @@ public final class PipeGraphCommand {
         Resolved resolved = recentSolve(level, target);
         if (resolved == null) return 1; // network vanished between build and solve
 
-        sendText(report, level, resolved.graph(), resolved.solution(), target);
+        sendText(report, level, resolved.graph(), resolved.solution(), target, resolved.executed());
         report.flush();
         PacketDistributor.sendToPlayer(player,
                 buildPayload(level, resolved.graph(), resolved.solution(), target));
@@ -141,11 +143,15 @@ public final class PipeGraphCommand {
             if (graph.isEmpty()) return null;
             GraphCache.store(level, graph, now);
         }
-        if (solution == null) solution = FlowSolver.solve(level, graph);
-        return new Resolved(graph, solution);
+        if (solution != null) return new Resolved(graph, solution, true);
+        // Nothing recent enough: solve FRESH. Such a solution was never executed, so its
+        // actualFlow is all zeros BY CONSTRUCTION — the report has to say so, or every edge reads
+        // a damning "solved=N actual=0" that means only "this number was never measured".
+        return new Resolved(graph, FlowSolver.solve(level, graph), false);
     }
 
-    private record Resolved(Graph graph, Solution solution) {}
+    /** A graph plus a solution, and whether that solution is one the engine actually EXECUTED. */
+    private record Resolved(Graph graph, Solution solution, boolean executed) {}
 
     /**
      * "What the engine sees" for a block that is NOT a pipe seed — a foreign tank/machine, or an
@@ -205,7 +211,7 @@ public final class PipeGraphCommand {
             if (!g.isEmpty()) {
                 Solution s = FluidEngine.solveFresh(level, seed);
                 report.line("§7— network it connects to (seed " + seed.toShortString() + ") —");
-                sendText(report, level, g, s, pos);
+                sendText(report, level, g, s, pos, false); // solveFresh: never executed either
                 PacketDistributor.sendToPlayer(report.player(), buildPayload(level, g, s, seed));
             }
         }
@@ -335,9 +341,18 @@ public final class PipeGraphCommand {
         return seed;
     }
 
-    private static void sendText(Report report, ServerLevel level, Graph g, Solution s, BlockPos target) {
+    private static void sendText(Report report, ServerLevel level, Graph g, Solution s, BlockPos target,
+                                 boolean executed) {
         report.line("§e--- Pipe Graph ---");
         report.line("§7Nodes: §f" + g.nodes().size() + "  §7Edges: §f" + g.edges().size());
+        // The engine had nothing recent to show, so this is a solve run FOR the dump and never
+        // executed: every actual= below is structurally zero, not a measurement.
+        if (!executed) {
+            report.line("§6Fresh solve — the engine had not solved this network within "
+                    + SOLUTION_MAX_AGE_TICKS + " ticks, so every §factual=§6 below is UNMEASURED"
+                    + " (structurally 0). Read the §frecent§6 strip for what really moved.");
+        }
+        report.line(engineCadence(level, g));
         report.line(locateTarget(g, target));
         String reached = targetReach(level, g, target);
         if (reached != null) report.line(reached);
@@ -510,7 +525,10 @@ public final class PipeGraphCommand {
                 case B_TO_A -> "b→a";
                 case NONE -> "idle";
             };
-            if (rate == 0) dir = "idle";
+            // Keep the SOLVED direction visible on a run that moved nothing: "which way did the
+            // solve want to go" is exactly what a solved=N actual=0 report needs, and overwriting
+            // it with a bare "idle" threw it away.
+            if (rate == 0) dir = flow.direction() == EdgeFlow.Direction.NONE ? "idle" : "idle " + dir;
             if (s.stalledEdges().contains(e.index())) dir = "§6stalled§7";
             if (s.noHeadEdges().contains(e.index())) dir = "§cno head§7";
             if (s.heldEdges().contains(e.index())) {
@@ -545,6 +563,8 @@ public final class PipeGraphCommand {
                     e.pipes().contains(target) ? " §6← flagged" : ""));
             String holds = holdsLine(level, e);
             if (holds != null) report.line("      " + holds);
+            String gate = gateLine(level, g, s, e);
+            if (gate != null) report.line("      " + gate);
             String lips = lipLine(level, g, e);
             if (lips != null) report.line("      " + lips);
             String recent = recentLine(level, g, e);
@@ -580,6 +600,62 @@ public final class PipeGraphCommand {
      * {@code mB:Fluid} per cell once the run is MIXED (a collision front, a switched fluid mid-flow),
      * so "what each pipe holds in terms of fluid" is legible rather than a single run-wide label.
      */
+    /**
+     * Whether the engine is actually DRIVING this network, and how often — the question no gate or
+     * flow readout can answer, because a network that is never ticked never consults them. A network
+     * holding a running pump is ARMED and re-solves every few ticks; a settled one rides the slow
+     * heartbeat. A last-solve age far past both means the tick driver is not reaching it at all,
+     * which looks exactly like "the pipes are stuck" while every per-edge number reads healthy.
+     */
+    private static String engineCadence(ServerLevel level, Graph g) {
+        long now = level.getGameTime();
+        long age = GraphCache.ticksSinceSolve(g, now);
+        boolean armed = EngineTickHandler.hasRunningPump(level, g);
+        BlockPos anyCell = g.coverage().iterator().hasNext() ? g.coverage().iterator().next() : null;
+        boolean quiet = anyCell != null && EngineTickHandler.isQuiet(level, anyCell, now);
+        return String.format("§7engine: last solve §f%s§7 · %s · %s",
+                age < 0 ? "NEVER (not driven by the tick loop)" : age + " ticks ago",
+                armed ? "§aarmed§7 (running pump, ~4-tick recheck)" : "§7idle heartbeat (~20 ticks)",
+                quiet ? "§6sleeping" : "§aawake");
+    }
+
+    /**
+     * The PLUG GATE of a run the solve gave flow to: the exact comparison the brigade makes before
+     * anything may cross its downstream end, and the one thing a {@code solved=N actual=0} line
+     * could never explain. A run hands fluid on only once its TAIL cell carries the flow DEPTH
+     * (four ticks of the solved rate, clamped to one cell), and {@code columnFullyArrived} can
+     * relax that only for a run fed by a RESERVOIR — a junction- or pump-fed one keeps the hard
+     * gate, which is the documented way a sub-depth column strands with nothing to show for it.
+     */
+    private static String gateLine(ServerLevel level, Graph g, Solution s, Edge e) {
+        if (PipeStore.capacityMb() <= 0 || e.pipes().isEmpty()) return null;
+        EdgeFlow flow = s.edgeFlows().get(e.index());
+        if (flow.direction() == EdgeFlow.Direction.NONE || flow.mbPerTick() < 1) return null;
+
+        boolean aToB = flow.direction() == EdgeFlow.Direction.A_TO_B;
+        int depth = FlowNetwork.flowDepthMb(flow.mbPerTick(), PipeStore.capacityMb());
+        BlockPos tailPos = aToB ? e.pipes().getLast() : e.pipes().getFirst();
+        PipeStore.Store tail = PipeStore.at(level, tailPos);
+        int held = tail == null ? 0 : tail.amount();
+        int stored = 0;
+        for (BlockPos cell : e.pipes()) {
+            PipeStore.Store store = PipeStore.at(level, cell);
+            if (store != null) stored += store.amount();
+        }
+        Node upstream = g.node(aToB ? e.a() : e.b());
+        // The relief is keyed on the run's TOTAL against the depth, the gate on its TAIL cell — so
+        // a column holding at least the depth but spread thin across the cells satisfies NEITHER,
+        // and that window is invisible unless both numbers are printed side by side.
+        String verdict = held >= depth ? "§aopen"
+                : stored >= depth ? "§cSHUT — and the column counts as arrived, so no relief either"
+                : "§eSHUT — waiting on the column (relief applies if no more can arrive)";
+        return String.format("§7gate §7depth=§f%d§7 tail=§f%d§7 stored=§f%d§7 at %s §8(%s-fed) §7%s",
+                depth, held, stored, tailPos.toShortString(),
+                upstream.isHandler() || upstream.isOpenEnd() ? "reservoir"
+                        : upstream.isPump() ? "pump" : "junction",
+                verdict);
+    }
+
     private static String holdsLine(ServerLevel level, Edge e) {
         if (PipeStore.capacityMb() <= 0 || e.pipes().isEmpty()) return null;
         int count = e.pipes().size();

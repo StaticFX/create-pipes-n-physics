@@ -430,41 +430,45 @@ final class FluidPass {
             return;
         }
 
-        if (!gas) {
-            // A pump actively drawing from a tank can lift its fluid out of a connection above the
-            // waterline (a dip tube), so pumpDrainAnyLevel exempts that column from the draw lip: no
-            // give-only wall here, and a bottomless lip (−inf) below so lipDrainCap never settles the
-            // tank at the opening. The suction limit (crest gate) still bounds the lift.
-            boolean drainAny = PipesNPhysicsConfig.PUMP_DRAIN_ANY_LEVEL.get();
-            if (columnA != null) {
-                BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.a());
-                if (drainAny && pumpPullsA) {
-                    lipA = Double.NEGATIVE_INFINITY;
-                } else {
-                    lipA = openingLip(opening, pumpPullsA);
-                    if (!canDrawFrom(graph.node(edge.a()), columnA, opening, lipA)) {
-                        allowedSign = combineSign(allowedSign, -1);
-                    }
+        // The DRAW LIP runs in BOTH frames (see PipeWindow.drawLipY / BoundaryColumn.drawHead): a
+        // buoyant column reaches an opening by sinking to it, and without the mirrored gate the
+        // solve drained a gas vessel through an opening its gas never touched while the settle,
+        // which does read the mirrored geometry, poured it right back — an every-tick grind.
+        // A pump actively drawing from a tank can lift its fluid out of a connection above the
+        // waterline (a dip tube), so pumpDrainAnyLevel exempts that column from the draw lip: no
+        // give-only wall here, and a bottomless lip (−inf) below so lipDrainCap never settles the
+        // tank at the opening. The suction limit (crest gate) still bounds the lift.
+        boolean drainAny = PipesNPhysicsConfig.PUMP_DRAIN_ANY_LEVEL.get();
+        if (columnA != null) {
+            BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.a());
+            if (drainAny && pumpPullsA) {
+                lipA = Double.NEGATIVE_INFINITY;
+            } else {
+                lipA = openingLip(opening, pumpPullsA);
+                if (!canDrawFrom(graph.node(edge.a()), columnA, opening, lipA)) {
+                    allowedSign = combineSign(allowedSign, -1);
                 }
             }
-            if (columnB != null) {
-                BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.b());
-                if (drainAny && pumpPullsB) {
-                    lipB = Double.NEGATIVE_INFINITY;
-                } else {
-                    lipB = openingLip(opening, pumpPullsB);
-                    if (!canDrawFrom(graph.node(edge.b()), columnB, opening, lipB)) {
-                        allowedSign = combineSign(allowedSign, +1);
-                    }
+        }
+        if (columnB != null) {
+            BlockPos opening = PipeGeometry.adjacentCell(graph, edge, edge.b());
+            if (drainAny && pumpPullsB) {
+                lipB = Double.NEGATIVE_INFINITY;
+            } else {
+                lipB = openingLip(opening, pumpPullsB);
+                if (!canDrawFrom(graph.node(edge.b()), columnB, opening, lipB)) {
+                    allowedSign = combineSign(allowedSign, +1);
                 }
             }
-            // A lip conflict (e.g. a pump trying to draw from below a tank's
-            // waterline) is "no supply", not a fault — unless a check valve is one party.
-            if (allowedSign == Integer.MIN_VALUE) {
-                flagCheckValveConflict(edge, gateSign);
-                return;
-            }
+        }
+        // A lip conflict (e.g. a pump trying to draw from below a tank's
+        // waterline) is "no supply", not a fault — unless a check valve is one party.
+        if (allowedSign == Integer.MIN_VALUE) {
+            flagCheckValveConflict(edge, gateSign);
+            return;
+        }
 
+        if (!gas) {
             crestHeight = statics.crestHeight();
             crestFloor = statics.crestFloor();
             crestPos = statics.crestPos();
@@ -577,7 +581,7 @@ final class FluidPass {
      * pumpDrainAnyLevel.
      */
     private double openingLip(BlockPos opening, boolean pumpPulls) {
-        return PipeWindow.drawLipY(level, opening, pumpPulls);
+        return PipeWindow.drawLipY(level, opening, pumpPulls, gas);
     }
 
     /**
@@ -595,8 +599,10 @@ final class FluidPass {
         // open gate there is a PERMANENT phantom flow (solved q, SOURCE_DRY stall, scrolling
         // pipes, nothing moving) at exactly the equilibrium every gravity drain ends on.
         double oneMb = 1.0 / Math.max(column.capacitance(), 1);
-        if (column.drawSurface() <= lip + oneMb) return false;
-        return SableCompat.canFluidReachPipe(level, handlerNode.pos(), opening, column.fillFraction());
+        if (column.drawHead(gas) <= lip + oneMb) return false;
+        // The tilt check is a LIQUID geometry question (can the pool still reach the pipe as the
+        // hull rolls); a buoyant pocket rides the ceiling instead, so it is left to the mirrored lip.
+        return gas || SableCompat.canFluidReachPipe(level, handlerNode.pos(), opening, column.fillFraction());
     }
 
     // ------------------------------------------------------------------ governed solve
@@ -758,10 +764,14 @@ final class FluidPass {
                 results.edgeFluids.put(edgeIndex, sample);
             }
 
-            recordPumpLoad(meta.get(b), branches.get(b), flow, result.active()[b]);
+            recordPumpLoad(meta.get(b), branches.get(b).conductance(), flow, result.active()[b]);
         }
         return active;
     }
+
+
+
+
 
     /** The brigade executes this pass's flows through the pipes' stored volume at apply time. */
     private void recordPass(NetworkSolver.Result result) {
@@ -815,10 +825,10 @@ final class FluidPass {
      * fluid passes could claim one pump, the busiest (highest flow) wins so the
      * readout is deterministic.
      */
-    private void recordPumpLoad(BranchMeta branchMeta, BranchSpec branch, double flow, boolean branchActive) {
+    private void recordPumpLoad(BranchMeta branchMeta, double branchConductance, double flow,
+                                boolean branchActive) {
         if (branchMeta.driveNode() < 0 || !branchActive) return;
         double emf = branchMeta.driveHead();
-        double branchConductance = branch.conductance();
         double drivenFlow = Math.abs(flow);
         if (emf <= 1e-6 || branchConductance <= 1e-9 || drivenFlow <= FlowSolver.ACTIVE_FLOW_EPS) return;
         double against = emf - drivenFlow / branchConductance;

@@ -95,7 +95,7 @@ public final class FlowSolver {
         return new Solution(toEdgeFlows(graph, results.edgeFlow), results.transfers,
                 results.passes, new int[graph.edges().size()],
                 results.nodeHeads, results.nodeCeilings, results.nodeAnchors,
-                results.edgeFluids, results.restFluids, blocked, stalled, noHead, held,
+                results.gasHeadNodes, results.edgeFluids, results.restFluids, blocked, stalled, noHead, held,
                 results.edgeReasons, results.pumpLoads, active);
     }
 
@@ -110,6 +110,8 @@ public final class FlowSolver {
         final Map<Integer, Double> nodeHeads = new HashMap<>();
         final Map<Integer, Double> nodeCeilings = new HashMap<>();
         final Map<Integer, Double> nodeAnchors = new HashMap<>();
+        /** Nodes whose published head is a GAS (buoyancy) quantity rather than a world elevation. */
+        final Set<Integer> gasHeadNodes = new HashSet<>();
         final Map<Integer, FluidStack> edgeFluids = new HashMap<>();
         final Map<Integer, FluidStack> restFluids = new HashMap<>();
         final Set<Integer> blockedEdges = new HashSet<>();
@@ -154,9 +156,15 @@ public final class FlowSolver {
             boolean gas = supply.contents().getFluid().getFluidType().isLighterThanAir();
             double head = supply.head(gas);
             results.restFluids.put(edgeIndex, supply.contents().copyWithAmount(1));
-            results.nodeHeads.putIfAbsent(edge.a(), head);
-            results.nodeHeads.putIfAbsent(edge.b(), head);
+            tagHead(results, edge.a(), head, gas);
+            tagHead(results, edge.b(), head, gas);
         }
+    }
+
+    /** Publish a fallback head for a node that has none, remembering whether it is a GAS quantity. */
+    private static void tagHead(GroupResults results, int node, double head, boolean gas) {
+        if (results.nodeHeads.putIfAbsent(node, head) != null) return;
+        if (gas) results.gasHeadNodes.add(node);
     }
 
     /** The finite reservoir column at a graph node if it currently HOLDS fluid, else null. */

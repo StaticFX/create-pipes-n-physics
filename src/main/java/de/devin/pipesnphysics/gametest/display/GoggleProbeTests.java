@@ -126,7 +126,7 @@ public class GoggleProbeTests {
             int[] actualFlow = new int[g.edges().size()];
             actualFlow[edge.index()] = 37;
             Solution sol = new Solution(flows, List.of(), List.of(), actualFlow,
-                    Map.of(), Map.of(), Map.of(), Map.of(),
+                    Map.of(), Map.of(), Map.of(), Set.of(), Map.of(),
                     Map.of(), Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), true);
 
             int actual = PipeProbe.actualEdgeFlow(g, sol, edge);

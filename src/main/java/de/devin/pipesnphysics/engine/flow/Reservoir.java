@@ -112,7 +112,7 @@ public final class Reservoir {
         int supply = BoundaryColumn.drainMatching(handler,
                 fluid.copyWithAmount(amount), FluidAction.SIMULATE).getAmount();
         if (drawLipY == Double.NEGATIVE_INFINITY) return supply;
-        int aboveLip = (int) Math.max(0, column.capacitance() * (drawSurface() - drawLipY));
+        int aboveLip = (int) Math.max(0, column.capacitance() * (drawHead() - drawLipY));
         return Math.min(supply, aboveLip);
     }
 
@@ -164,7 +164,7 @@ public final class Reservoir {
      * by every drain this tick, the settle phase included — same physical opening, same rule.
      */
     void capDrawAtLip(double lipY) {
-        double aboveLip = column.capacitance() * (drawSurface() - lipY);
+        double aboveLip = column.capacitance() * (drawHead() - lipY);
         double cap = aboveLip <= 0 ? 0 : Math.max(Math.min(aboveLip, DREGS_MB), 0.5 * aboveLip);
         drawLipCapMb = Math.min(drawLipCapMb, cap);
         drawLipY = lipY; // remembered for probeSupply — callers pre-merge to the lowest opening
@@ -188,6 +188,16 @@ public final class Reservoir {
      */
     double drawSurface() {
         return column.drawSurface();
+    }
+
+    /**
+     * The same, read in the frame of whatever this reservoir HOLDS — mirrored for a buoyant
+     * content, which reaches an opening by sinking to it. The lip cap installed on it is mirrored
+     * to match ({@code PipeWindow.drawLipY(.., gas)}), so the cap's {@code drawHead − lip} stays
+     * the volume that may actually leave in either frame.
+     */
+    private double drawHead() {
+        return column.drawHead(SettlingRun.lighterThanAir(column.contents()));
     }
 
     /** The GAS interface elevation — where a lighter-than-air content ends, hanging from the top. */

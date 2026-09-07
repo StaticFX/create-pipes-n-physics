@@ -411,7 +411,7 @@ public class RenderingTests {
             reasons.put(edgeIndex, Solution.Reason.SINK_FULL);
         }
         return new Solution(flows, List.of(), List.of(), new int[graph.edges().size()],
-                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), Map.of(), Map.of(), Set.of(), Map.of(), Map.of(),
                 Set.of(), stalled, noHeadEdges, Set.of(), reasons, Map.of(), true);
     }
 

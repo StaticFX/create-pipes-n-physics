@@ -48,6 +48,26 @@ public final class PipeWindow {
         return pumpPulls ? SableCompat.getWorldY(level, opening) - 0.5 : lipY(level, opening);
     }
 
+    /**
+     * The same threshold IN THE PASS'S OWN FRAME, mirrored for a lighter-than-air fluid: a buoyant
+     * column reaches an opening by sinking DOWN to it, not by rising to it, so its gate is the
+     * aperture's TOP and the comparison runs upside down (negated, like the solver's gas head).
+     * Read against {@code BoundaryColumn.drawHead(gas)}, which mirrors to match.
+     *
+     * Without this the gas frame had NO give gate at all — the solve drained a gas vessel through
+     * an opening its gas layer never reached, while the settle, which does read the mirrored
+     * geometry, poured it straight back every tick. A nearly-empty CO2 tank whose pipe left below
+     * its ceiling pocket ground 3 mB back and forth forever ("the fluid flickers a lot inside the
+     * pipes"; the /pipegraph tell is an alternating {@code recent ·3 →3 ·3 →3} strip on an edge
+     * reading {@code idle solved=0 actual=3}).
+     */
+    public static double drawLipY(Level level, BlockPos opening, boolean pumpPulls, boolean gas) {
+        if (!gas) return drawLipY(level, opening, pumpPulls);
+        double cellTop = SableCompat.getWorldY(level, opening) + 0.5;
+        if (pumpPulls) return -cellTop;
+        return -(fillsFullBlock(level, opening) ? cellTop : cellTop - LIP_BOTTOM);
+    }
+
     /** Whether this cell is a VERTICAL straight pipe — its fluid fills the full block height. */
     public static boolean fillsFullBlock(Level level, BlockPos pos) {
         BlockState state = level.getBlockState(pos);
@@ -70,4 +90,5 @@ public final class PipeWindow {
     public static double fill(Level level, BlockPos pos, double line) {
         return Math.clamp((line - bottomY(level, pos)) / height(level, pos), 0, 1);
     }
+
 }

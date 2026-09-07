@@ -491,7 +491,7 @@ public class FlowBrigadeTests {
             FluidStack water = new FluidStack(Fluids.WATER, 1);
             Solution flowing = new Solution(flows, List.of(),
                     List.of(new Solution.FlowPass(water, passFlow)), new int[graph.edges().size()],
-                    Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                    Map.of(), Map.of(), Map.of(), Set.of(), Map.of(), Map.of(),
                     Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), true);
 
             int capacity = PipeStore.capacityMb();
@@ -609,7 +609,7 @@ public class FlowBrigadeTests {
             Solution trickle = new Solution(flows, List.of(),
                     List.of(new Solution.FlowPass(new FluidStack(Fluids.WATER, 1), passFlow)),
                     new int[graph.edges().size()],
-                    Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                    Map.of(), Map.of(), Map.of(), Set.of(), Map.of(), Map.of(),
                     Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), true);
 
             // Drive the executor tick by tick, all inside THIS server tick. The tail cell is
@@ -666,6 +666,103 @@ public class FlowBrigadeTests {
                     + pipeAmount(helper, stubRel);
             if (total != 6000) {
                 helper.fail("fluid not conserved through depth-gated flow: " + total + "/6000");
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
+     * A line whose SUPPLY cannot back its solved rate still delivers, instead of buffering its whole
+     * volume first.
+     *
+     * The plug depth is four ticks of the solved rate, and the solved rate is a hydraulic CAPABILITY
+     * — the solve is deliberately blind to supply, so a big head across a nearly-dry source asks for
+     * a rate nothing can sustain. Sized off that, every gate demanded a FULL cell while the source
+     * trickled, so the run had to fill cell by cell to the brim before one mB crossed: reported
+     * 2026-09-06 as "it works for a few seconds, then stops" on a CO2 rig solving 224 mB/t out of
+     * engines making ~18. The depth is now capped by what the line can actually supply.
+     *
+     * Same rig and the same synchronous drive as {@link #trickleFlowsAtItsPartialDepth}, which pins
+     * the WELL-SUPPLIED semantics this must not disturb — but with the source holding far less than
+     * one cell while the rate demands a full one, so the nominal gate is unreachable by construction
+     * and only the cap lets the fluid through.
+     */
+    @GameTest(template = "physics/trickle_rig", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void aStarvedLineDeliversWithoutBufferingItsWholeVolume(GameTestHelper helper) {
+        BlockPos sourceRel = new BlockPos(0, 1, 1);
+        BlockPos feederCell = new BlockPos(1, 1, 1);
+        BlockPos junctionRel = new BlockPos(2, 1, 1);
+        BlockPos pumpRel = new BlockPos(4, 1, 1);
+        BlockPos sinkRel = new BlockPos(6, 1, 1);
+
+        helper.runAfterDelay(10, () -> {
+            var level = helper.getLevel();
+            int cap = PipeStore.capacityMb();
+            if (cap <= 0) {
+                helper.succeed(); // wire mode: no depth to gate on
+                return;
+            }
+            // A rate whose four ticks clamp to a FULL cell, against a source holding a fraction of
+            // one: the nominal gate can never open, however long the line runs.
+            int rate = cap;
+            int seeded = cap / 5;
+            // The source must be able to give its LAST few mB, or the draw lip — not the depth —
+            // is what stops the line: a tank low enough to starve the gate sits under its own
+            // aperture and can give nothing at all (any tank that CAN give holds far more than a
+            // cell). A basin gives from any level, the same exemption the reported TFMG engines
+            // have through separate_ports, which is why they could be starved and a tank cannot.
+            helper.setBlock(sourceRel, AllBlocks.BASIN.get());
+            drain(helper, sinkRel);
+            handler(helper, sourceRel).fill(new FluidStack(Fluids.WATER, seeded),
+                    IFluidHandler.FluidAction.EXECUTE);
+
+            Graph graph = GraphBuilder.build(level, helper.absolutePos(feederCell));
+            Node source = graph.nodeAt(helper.absolutePos(sourceRel));
+            Node junction = graph.nodeAt(helper.absolutePos(junctionRel));
+            Node pump = graph.nodeAt(helper.absolutePos(pumpRel));
+            Node sink = graph.nodeAt(helper.absolutePos(sinkRel));
+            if (source == null || junction == null || pump == null || sink == null) {
+                helper.fail("rig did not resolve to tank—junction—pump—tank nodes");
+                return;
+            }
+            List<EdgeFlow> flows = new ArrayList<>();
+            double[] passFlow = new double[graph.edges().size()];
+            for (Edge e : graph.edges()) {
+                int upstream = edgeJoins(e, source.index(), junction.index()) ? source.index()
+                        : edgeJoins(e, junction.index(), pump.index()) ? junction.index()
+                        : edgeJoins(e, pump.index(), sink.index()) ? pump.index() : -1;
+                if (upstream < 0) {
+                    flows.add(EdgeFlow.none(e.index()));
+                    continue;
+                }
+                boolean aToB = e.a() == upstream;
+                flows.add(new EdgeFlow(e.index(),
+                        aToB ? EdgeFlow.Direction.A_TO_B : EdgeFlow.Direction.B_TO_A, rate));
+                passFlow[e.index()] = aToB ? rate : -rate;
+            }
+            Solution starved = new Solution(flows, List.of(),
+                    List.of(new Solution.FlowPass(new FluidStack(Fluids.WATER, 1), passFlow)),
+                    new int[graph.edges().size()],
+                    Map.of(), Map.of(), Map.of(), Set.of(), Map.of(), Map.of(),
+                    Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), true);
+
+            for (int i = 0; i < 150; i++) {
+                PipeFlowExecutor.run(level, graph, starved);
+            }
+
+            int delivered = amount(helper, sinkRel);
+            if (delivered <= 0) {
+                helper.fail("a starved line delivered nothing in 150 ticks: " + seeded
+                        + " mB against a " + rate + " mB/t solved rate means every gate wants a full "
+                        + cap + " mB cell, which this supply can never build"
+                        + dump(helper, feederCell));
+                return;
+            }
+            int held = basinFluid(helper, sourceRel, Fluids.WATER) + delivered
+                    + pipesnphysics$areaPipeContent(helper, 8, 3, 3);
+            if (held != seeded) {
+                helper.fail("fluid not conserved on the starved line: " + held + "/" + seeded);
                 return;
             }
             helper.succeed();

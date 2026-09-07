@@ -134,6 +134,17 @@ public final class GraphCache {
         entry.activeTtl = fast;
     }
 
+    /**
+     * How many ticks ago the engine last SOLVED this graph, or -1 if never. Diagnostic only: a
+     * network the engine is driving should read 0-4 ticks (the armed cadence) or up to the idle
+     * heartbeat, and anything older means it is not being ticked at all — which no gate readout
+     * can tell you, because the gates are simply never consulted.
+     */
+    public static long ticksSinceSolve(Graph graph, long now) {
+        Entry entry = entryOf(graph);
+        return entry == null || entry.solvedAt == Long.MIN_VALUE ? -1 : now - entry.solvedAt;
+    }
+
     /** The entry's last solution if it belongs to this exact graph and is at most maxAge ticks old. */
     public static Solution recentSolution(Level level, Graph graph, long now, int maxAge) {
         Entry entry = entryOf(graph);
