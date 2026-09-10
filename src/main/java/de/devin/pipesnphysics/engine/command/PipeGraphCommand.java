@@ -567,9 +567,34 @@ public final class PipeGraphCommand {
             if (gate != null) report.line("      " + gate);
             String lips = lipLine(level, g, e);
             if (lips != null) report.line("      " + lips);
+            String settle = settleLine(s, e);
+            if (settle != null) report.line("      " + settle);
             String recent = recentLine(level, g, e);
             if (recent != null) report.line("      " + recent);
         }
+    }
+
+    /**
+     * WHICH settle path examined this edge, printed only where that path did not weigh the run
+     * against a resting profile. A skipped run and a run judged to be at rest both read
+     * {@code solved=0 actual=0}, so a hole in the settle is otherwise invisible here — which is
+     * how a pump sat spinning beside 1150 mB of stranded latex with every line of this dump
+     * reading normal. The ordinary paths (PROFILE, FLOWING, a zero-cell WIRE) say nothing the
+     * edge line does not already, and a null note means the solution was never executed — a
+     * dump-only solve — so it stays quiet too.
+     */
+    private static String settleLine(Solution s, Edge e) {
+        Solution.SettleNote note = s.settleNotes()[e.index()];
+        if (note == null) return null;
+        return switch (note) {
+            case NO_DATUM -> "§6settle: §7no resting line at either end, so gravity pooling"
+                    + " and any pump pushing in, never a profile";
+            case SEALED -> "§7settle: §fsealed primed column§7, held by design";
+            case HELD_GAS -> "§6settle: §7held gas line, skipped (its packing target is a"
+                    + " liquid field the gas frame cannot read)";
+            case COLLIDED -> "§csettle: §7stood down for a fluid collision at a boundary";
+            case PROFILE, FLOWING, WIRE -> null;
+        };
     }
 
     /**

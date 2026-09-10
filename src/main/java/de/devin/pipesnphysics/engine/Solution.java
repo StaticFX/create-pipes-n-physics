@@ -23,6 +23,11 @@ import java.util.Set;
  *                  executes them through the pipes' stored volume,
  *   actualFlow   — per edge, the mB that REALLY moved this tick (strongest boundary movement),
  *                  filled in by the executor after the solve; what goggles/overlays show,
+ *   settleNotes  — per edge, WHICH settle path examined it (see {@link SettleNote}), filled in by
+ *                  the executor beside actualFlow. A run that moved nothing looks exactly like a
+ *                  run nothing looked at — both read {@code solved=0 actual=0} — so without this
+ *                  a missing code path is indistinguishable from correct rest, and only a player
+ *                  noticing an absence in-world can tell them apart,
  *   nodeHeads    — player-facing hydraulic head per graph node index (blocks):
  *                  anchored at real reservoirs and static across zero-flow branches,
  *                  so a dead-headed pump shows ambient instead of phantom vacuum;
@@ -76,6 +81,7 @@ public record Solution(
         List<Transfer> transfers,
         List<FlowPass> passes,
         int[] actualFlow,
+        SettleNote[] settleNotes,
         Map<Integer, Double> nodeHeads,
         Map<Integer, Double> nodeCeilings,
         Map<Integer, Double> nodeAnchors,
@@ -92,6 +98,37 @@ public record Solution(
 ) {
     /** Why a blocked/stalled edge cannot move its fluid, when the solver knows. */
     public enum Reason { VALVE, PUMP_OFF, CREST, SINK_FULL, SOURCE_DRY, CHECK_VALVE, OTHER_FLUID }
+
+    /**
+     * Which settle path examined an edge this tick — the difference between "the engine weighed
+     * this run and decided nothing should move" and "no code looked at it at all".
+     *
+     * Quiescence is this engine's dominant failure mode AND its most common correct answer, so the
+     * two are indistinguishable from the outside: a bail written for one reason silently swallows
+     * every other state that reaches it, and an early return emits no flow, no stall reason and no
+     * tag. Every such bail therefore names itself here, {@code /pipegraph} prints the ones that
+     * mean a run was skipped rather than judged, and the next "why does this not flow" report
+     * answers itself in the dump instead of in a code read.
+     *
+     * The values are in {@code SettlingRun.settle()}'s own order — each one is a return in that
+     * method — so the set of settle bails is enumerable rather than something to go find.
+     */
+    public enum SettleNote {
+        /** The brigade owns this edge (it flowed): top-up and shed only, no resting profile. */
+        FLOWING,
+        /** Two fluids met at a boundary; the run stood down for the reaction. */
+        COLLIDED,
+        /** A fill-only GAS line: its packing target is a display field the mirrored frame cannot read. */
+        HELD_GAS,
+        /** Zero cells — a wire has no column to settle; only a pump can cross it. */
+        WIRE,
+        /** A sealed primed column: every cell full, both ends submerged, held by design. */
+        SEALED,
+        /** Neither end offered a resting line — plain gravity pooling, plus any pump pushing in. */
+        NO_DATUM,
+        /** Settled against the full hydrostatic profile: the ordinary path. */
+        PROFILE
+    }
 
     /**
      * One fluid pass's solved flow, signed per edge index (positive = a→b), in mB/t. The transfer
@@ -134,6 +171,7 @@ public record Solution(
         List<EdgeFlow> flows = new ArrayList<>(graph.edges().size());
         for (Edge e : graph.edges()) flows.add(EdgeFlow.none(e.index()));
         return new Solution(flows, List.of(), List.of(), new int[graph.edges().size()],
+                new SettleNote[graph.edges().size()],
                 Map.of(), Map.of(), Map.of(), Set.of(), Map.of(), Map.of(),
                 Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), false);
     }

@@ -326,6 +326,204 @@ public class FlowBrigadeTests {
     }
 
     /**
+     * A junction wedged against a PUMP must never push its slot into it. A pump stores nothing by
+     * design, but its block entity carries a live {@code PipeStore} with a full cell of room (the
+     * content mixin sits on the base transport behaviour its own behaviour extends), and the slot
+     * loops resolved their neighbour with a raw {@code cellAt(adjacentCell(..))} — which on a
+     * ZERO-CELL edge answers the far NODE, not a cell. So the slot quietly filled the pump, where
+     * NOTHING drains it again: no run owns a pump, the brigade never touches it, and it renders
+     * nowhere. Measured at 150 mB of 250 on this very rig before the fix, invisible on every node
+     * and edge line of {@code /pipegraph} while the Fluids total still counted it.
+     *
+     * Mutation check: resolve the neighbour with {@code network.cellAt(adjacent)} again and the
+     * pump comes back holding ~150 mB.
+     */
+    @GameTest(template = "common/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void junctionSlotNeverFillsThePumpBesideIt(GameTestHelper helper) {
+        helper.runAfterDelay(10, () -> { // let the kinetics spin the pump up and settle its FACING
+            BlockPos pumpRel = new BlockPos(2, 1, 1);
+            Direction push = helper.getBlockState(pumpRel).getValue(PumpBlock.FACING);
+            BlockPos junctionRel = pumpRel.relative(push);
+            BlockPos tankRel = freeFaceBeside(helper, junctionRel, push, false);
+            if (tankRel == null) {
+                helper.fail("no free face beside the junction cell");
+                return;
+            }
+            // A tank flush against the push-side cell gives it a third connection: the cell becomes
+            // a junction NODE and the pump-to-junction edge carries ZERO pipe cells.
+            helper.setBlock(tankRel, AllBlocks.FLUID_TANK.get().defaultBlockState());
+            fill(helper, new BlockPos(0, 1, 1), 8000);
+            drain(helper, new BlockPos(4, 1, 1));
+
+            BlockPos sideTank = tankRel;
+            helper.runAfterDelay(200, () -> {
+                PipeStore.Store store = PipeStore.at(helper.getLevel(), helper.absolutePos(pumpRel));
+                int held = store == null ? 0 : store.amount();
+                if (held > 0) {
+                    helper.fail("the pump holds " + held + " mB: the slot beside it poured into a"
+                            + " store nothing can ever drain again" + dump(helper, junctionRel));
+                    return;
+                }
+                // Non-vacuity: the slot must really have been working past the pump, or a pump
+                // reading empty proves nothing.
+                if (amount(helper, sideTank) <= 0 && amount(helper, new BlockPos(4, 1, 1)) <= 0) {
+                    helper.fail("no fluid moved past the junction at all — the rig never exercised"
+                            + " the slot" + dump(helper, junctionRel));
+                    return;
+                }
+                helper.succeed();
+            });
+        });
+    }
+
+    /**
+     * A junction slot must drain into a reservoir standing flush against it once the solve stops
+     * driving the edge. Across a ZERO-CELL edge that vessel is the far NODE, and every slot
+     * exchange moves between STORES — a tank has none — so such a slot had no outlet in the settle
+     * at all: the brigade emptied it while a pass existed, and the moment one did not its contents
+     * stood there for good. The slot twin of the headless-run hole
+     * ({@code SettlingRun.pooledUnderPumps}), and the same "fluid frozen in a pipe that physics
+     * says should drain".
+     *
+     * Bone dry but for the slot, so no endpoint holds anything, no pass is enumerated, no node gets
+     * a head, and the slot pools headless — the only mover left is the pour this pins.
+     *
+     * Mutation check: drop the {@code pourIntoNeighbourReservoirs} call from {@code poolHeadless}
+     * and the slot keeps all 250 mB with both tanks dry.
+     */
+    @GameTest(template = "common/single_pump", templateNamespace = PipesNPhysics.ID, timeoutTicks = 400)
+    public static void headlessJunctionSlotDrainsIntoTheTankAgainstIt(GameTestHelper helper) {
+        helper.runAfterDelay(10, () -> {
+            BlockPos pumpRel = new BlockPos(2, 1, 1);
+            Direction push = helper.getBlockState(pumpRel).getValue(PumpBlock.FACING);
+            BlockPos junctionRel = pumpRel.relative(push);
+            // HORIZONTAL, so the vessel sits at the slot's own level and gravity can reach it.
+            BlockPos tankRel = freeFaceBeside(helper, junctionRel, push, true);
+            if (tankRel == null) {
+                helper.fail("no free horizontal face beside the junction cell");
+                return;
+            }
+            helper.setBlock(tankRel, AllBlocks.FLUID_TANK.get().defaultBlockState());
+            drain(helper, new BlockPos(0, 1, 1));
+            drain(helper, new BlockPos(4, 1, 1));
+
+            BlockPos sideTank = tankRel;
+            int primed = PipeStore.capacityMb();
+            helper.runAfterDelay(5, () -> {
+                drain(helper, sideTank);
+                PipeStore.Store slot = PipeStore.at(helper.getLevel(), helper.absolutePos(junctionRel));
+                if (slot == null) {
+                    helper.fail("no slot store at the junction " + junctionRel.toShortString());
+                    return;
+                }
+                slot.insert(new FluidStack(Fluids.WATER, primed), primed);
+                slot.flush();
+            });
+
+            helper.runAfterDelay(200, () -> {
+                int held = PipeStore.at(helper.getLevel(), helper.absolutePos(junctionRel)).amount();
+                int tanks = amount(helper, sideTank) + amount(helper, new BlockPos(4, 1, 1));
+                if (held + tanks != primed) {
+                    helper.fail("fluid not conserved: slot " + held + " + tanks " + tanks + " of "
+                            + primed + dump(helper, junctionRel));
+                    return;
+                }
+                // A FILM is correct and stays: the pour stops where the slot and the tank share a
+                // waterline, exactly as a headless run's equalize leaves a cell matching the tank's
+                // puddle. What must not survive is the slot holding its COLUMN.
+                if (held * 10 > primed) {
+                    helper.fail("the junction slot still holds " + held + " mB of " + primed
+                            + " with a tank flush against it and nothing else able to move it"
+                            + dump(helper, junctionRel));
+                    return;
+                }
+                helper.succeed();
+            });
+        });
+    }
+
+    /** A free face beside a cell that is not on the pump's push axis, optionally horizontal only. */
+    private static BlockPos freeFaceBeside(GameTestHelper helper, BlockPos cell, Direction push,
+                                           boolean horizontal) {
+        for (Direction side : Direction.values()) {
+            if (side.getAxis() == push.getAxis()) continue;
+            if (horizontal && side.getAxis().isVertical()) continue;
+            if (helper.getBlockState(cell.relative(side)).isAir()) return cell.relative(side);
+        }
+        return null;
+    }
+
+    /**
+     * A FLOWING run must fill the section standing below its SOURCE'S waterline, not stop at the
+     * far tank's level. A flowing pipe is a conduit under pressure: a submerged section runs full
+     * however low the sink sits. {@code topUp} flattened its target to {@code min(headA, headB)} —
+     * the RESTING profile's line, right for a free surface at rest and wrong here — so such a
+     * section was never filled at all and carried only the brigade's plug depth. Its fill then
+     * answered to the RATE instead of to how deeply it was submerged, which reads in game as a
+     * pipe flowing half empty that never packs however much you top the source up (reported on the
+     * one VERTICAL cell of a descending run, where the error is loudest: a riser's window is the
+     * FULL block, so the same miss that is a thin band on a horizontal cell is a visibly
+     * half-empty column).
+     *
+     * The rig is the plain 3-block drop, whose two glass risers stand entirely below the top
+     * tank's waterline and entirely above the bottom tank's — so the flat line targets them at
+     * ZERO and the grade line fills them.
+     *
+     * Mutation check: put {@code drawTargets(headA, headB)} back and both risers read the bare
+     * plug depth (~31 mB of 250).
+     */
+    // Own batch, and NOT the one another config-pinning test already uses: tests inside a batch
+    // run concurrently against the ONE global config, so two pins in the same batch would fight.
+    @GameTest(template = "common/2_drop_fall", templateNamespace = PipesNPhysics.ID,
+            timeoutTicks = 300, batch = "gradeTopUp")
+    public static void flowingRunFillsTheSectionBelowItsSourceWaterline(GameTestHelper helper) {
+        BlockPos top = new BlockPos(0, 4, 0);
+        BlockPos upper = new BlockPos(0, 3, 0); // the two vertical glass risers between the tanks
+        BlockPos lower = new BlockPos(0, 2, 0);
+        double prior = PipesNPhysicsConfig.PIPE_CONDUCTANCE.get();
+
+        fill(helper, top, 8000);
+        // A 3-block drop flows FAST at stock conductance, and the plug depth then clamps to a full
+        // cell on its own — which fills these risers whatever the top-up aims at, so the rig would
+        // prove nothing. Throttle the run so the depth sits at its cap/8 floor and the grade line
+        // is the only thing that can fill them.
+        PipesNPhysicsConfig.PIPE_CONDUCTANCE.set(5.0);
+
+        helper.runAfterDelay(80, () -> {
+            PipesNPhysicsConfig.PIPE_CONDUCTANCE.set(prior);
+            int cap = PipeStore.capacityMb();
+            int up = pipeAmount(helper, upper);
+            int down = pipeAmount(helper, lower);
+            if (up >= cap || down >= cap) {
+                helper.fail("a riser is packed FULL (" + up + ", " + down + ") — the plug depth"
+                        + " clamped to a whole cell and the rig cannot tell the targets apart"
+                        + dump(helper, upper));
+                return;
+            }
+            // The plug alone leaves cap/8; the grade line puts these two around 150 and 115.
+            int plugOnly = cap / 8;
+            if (up <= plugOnly * 2 || down <= plugOnly * 2) {
+                helper.fail("the risers carry only the plug depth (" + up + ", " + down + " of "
+                        + cap + "): a section submerged under the source's waterline must fill,"
+                        + " not answer to the flow rate" + dump(helper, upper));
+                return;
+            }
+            // The grade line FALLS toward the sink, so the upper riser must stand deeper than the
+            // lower one — a flat profile would read equal and is the thing being ruled out.
+            if (up <= down) {
+                helper.fail("the grade line is not falling: upper " + up + " vs lower " + down
+                        + dump(helper, upper));
+                return;
+            }
+            if (amount(helper, top) + amount(helper, new BlockPos(0, 1, 0)) + up + down != 8000) {
+                helper.fail("fluid not conserved" + dump(helper, upper));
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * A manifold's junction slots must serve their feeders FAIRLY. Several runs feeding one slot
      * used to refill its freed room in fixed tick order, so on a chained manifold (junction row,
      * one shared outlet) the first feeder monopolized the room every tick and a competing line
@@ -491,6 +689,7 @@ public class FlowBrigadeTests {
             FluidStack water = new FluidStack(Fluids.WATER, 1);
             Solution flowing = new Solution(flows, List.of(),
                     List.of(new Solution.FlowPass(water, passFlow)), new int[graph.edges().size()],
+                    new Solution.SettleNote[graph.edges().size()],
                     Map.of(), Map.of(), Map.of(), Set.of(), Map.of(), Map.of(),
                     Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), true);
 
@@ -609,6 +808,7 @@ public class FlowBrigadeTests {
             Solution trickle = new Solution(flows, List.of(),
                     List.of(new Solution.FlowPass(new FluidStack(Fluids.WATER, 1), passFlow)),
                     new int[graph.edges().size()],
+                    new Solution.SettleNote[graph.edges().size()],
                     Map.of(), Map.of(), Map.of(), Set.of(), Map.of(), Map.of(),
                     Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), true);
 
@@ -744,6 +944,7 @@ public class FlowBrigadeTests {
             Solution starved = new Solution(flows, List.of(),
                     List.of(new Solution.FlowPass(new FluidStack(Fluids.WATER, 1), passFlow)),
                     new int[graph.edges().size()],
+                    new Solution.SettleNote[graph.edges().size()],
                     Map.of(), Map.of(), Map.of(), Set.of(), Map.of(), Map.of(),
                     Set.of(), Set.of(), Set.of(), Set.of(), Map.of(), Map.of(), true);
 

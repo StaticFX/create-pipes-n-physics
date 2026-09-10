@@ -47,7 +47,7 @@ public final class PipeFlowExecutor {
 
     public static Actuals run(Level level, Graph graph, Solution solution) {
         FlowNetwork network = new FlowNetwork(level, graph);
-        FlowLedger ledger = new FlowLedger(solution.actualFlow());
+        FlowLedger ledger = new FlowLedger(solution.actualFlow(), solution.settleNotes());
 
         Set<Integer> flowed = new HashSet<>();
         for (Solution.FlowPass pass : solution.passes()) {

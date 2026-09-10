@@ -12,6 +12,7 @@ import de.devin.pipesnphysics.engine.store.PipeWindow;
 import net.minecraft.core.BlockPos;
 import net.neoforged.neoforge.fluids.FluidStack;
 
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -32,10 +33,11 @@ import java.util.List;
  * self-stabilizing and act on any excess), and dregs leave in one go.
  * {@link #primeFromPumps} lets a running pump pack its dead-headed line from its supply side and,
  * once that line is at the waterline, deliver on through it into the sink (its solved steady-state
- * flow is 0, so nothing else would move either). {@link #gravityPool} is
+ * flow is 0, so nothing else would move either). {@link #pooledUnderPumps} is
  * the fallback with no solve data at all (every reservoir gone or empty): plain gravity trickles
  * contents downhill and out of an open mouth at/below, so fluid pools in the dips instead of
- * hanging frozen in a riser.
+ * hanging frozen in a riser — and a pump pushing into such a run still packs and delivers, since
+ * gravity can never cross a pump's body.
  *
  * A HELD/backed-up run (a pump pressing a shut gate or a full sink, a dead conduit against a full
  * tank) settles FILL-ONLY: it may draw toward its reachable CEILING but never gives anything
@@ -102,7 +104,15 @@ final class SettlingRun {
         this.hysteresisMb = (int) Math.ceil(SETTLE_BAND * network.cellCapacity);
     }
 
-    /** One settle step; returns whether anything moved (the network then stays awake). */
+    /**
+     * One settle step; returns whether anything moved (the network then stays awake).
+     *
+     * Every return below names itself on the ledger ({@link Solution.SettleNote}) before it goes.
+     * A run that was weighed and left alone and a run no path examined both read
+     * {@code solved=0 actual=0}, so without the note the difference — which is the difference
+     * between correct rest and a missing code path — is visible only to a player noticing an
+     * absence in-world.
+     */
     boolean settle() {
         // Crossing the streams with NO flow: a tank joined to the run holds a fluid the mouth
         // cell's resting fluid is incompatible with — the two meet at the boundary exactly as
@@ -110,7 +120,10 @@ final class SettlingRun {
         // catches this on two idle tanks (each fluid's pass bails with a single participant, the
         // opposite endpoint walling it), so a water pipe touching a lava tank would just sit.
         // Checked BEFORE the gas/sealed bails, which would otherwise skip a full primed run.
-        if (reactToBoundaryCollision()) return false;
+        if (reactToBoundaryCollision()) {
+            ledger.note(edge, Solution.SettleNote.COLLIDED);
+            return false;
+        }
 
         // A lighter-than-air gas settles in the MIRRORED frame: the wrappers below negate world
         // Y, so the SAME target/walk machinery pools it upward and pours it into the vessel
@@ -118,24 +131,37 @@ final class SettlingRun {
         // CEILING field, which mixes heads with elevations the mirror cannot read.
         medium = settleMedium();
         mirrored = lighterThanAir(medium);
-        if (mirrored && fillOnly) return false;
+        if (mirrored && fillOnly) {
+            ledger.note(edge, Solution.SettleNote.HELD_GAS);
+            return false;
+        }
 
         // A ZERO-CELL edge is a wire: it holds no column, so there is no profile to settle toward.
         // The one thing that still has to happen across it is a running pump wedged flush against
         // its sink delivering on through ({@link #primeFromPumps} degenerates to a bare
         // {@link #deliverThroughPump} — no line to pack, so it pushes straight out).
-        if (cells.isEmpty()) return primeFromPumps(NO_TARGETS);
+        if (cells.isEmpty()) {
+            ledger.note(edge, Solution.SettleNote.WIRE);
+            return primeFromPumps(NO_TARGETS);
+        }
 
         // A sealed primed column holds: with every cell FULL and both end reservoirs still
         // reaching their openings, no air can enter the run, so an idle siphon keeps its prime
         // (a real sealed siphon holds its column indefinitely). Without this, the waterline
         // recede below drained the crest on every pause — invisible while a dry crest could
         // self-prime, a permanent break now that it cannot.
-        if (sealedPrimedColumn()) return false;
+        if (sealedPrimedColumn()) {
+            ledger.note(edge, Solution.SettleNote.SEALED);
+            return false;
+        }
 
         Double lineA = restingLine(edge.a(), edge.b());
         Double lineB = restingLine(edge.b(), edge.a());
-        if (lineA == null && lineB == null) return gravityPool();
+        if (lineA == null && lineB == null) {
+            ledger.note(edge, Solution.SettleNote.NO_DATUM);
+            return pooledUnderPumps();
+        }
+        ledger.note(edge, Solution.SettleNote.PROFILE);
         double headA = emptyFloorCap(edge.a(), lineA != null ? lineA : lineB);
         double headB = emptyFloorCap(edge.b(), lineB != null ? lineB : lineA);
 
@@ -161,6 +187,10 @@ final class SettlingRun {
      * STRICTLY fill-only and no internal redistribution: the brigade owns the moving column, and
      * leveling a flowing edge toward its resting profile would drain a working siphon's crest and
      * break the column. Bare-surface targets (no suction allowance) — never draws above the line.
+     *
+     * The line is the {@link #gradeTargets GRADE} line, NOT the flat min-line the resting profile
+     * uses: a flowing run is a conduit under pressure, and a section standing below the SOURCE's
+     * waterline is submerged and runs full, however low the far tank sits.
      */
     boolean topUp() {
         if (cells.isEmpty()) return false;
@@ -175,10 +205,44 @@ final class SettlingRun {
         if (lineA == null && lineB == null) return false;
         double headA = emptyFloorCap(edge.a(), lineA != null ? lineA : lineB);
         double headB = emptyFloorCap(edge.b(), lineB != null ? lineB : lineA);
-        int[] draw = drawTargets(headA, headB);
+        int[] draw = gradeTargets(headA, headB);
         boolean moved = drawFromReservoir(draw, false);
         moved |= drawFromReservoir(draw, true);
         return moved;
+    }
+
+    /**
+     * What each cell may be filled to while the run FLOWS: the hydraulic grade line hung between
+     * the two ends' resting surfaces, mapped onto the cell's own drawn window.
+     *
+     * NOT the flat min-line {@link #hydrostaticTargets} gives the RESTING profile, and the
+     * difference is the whole point. At rest a free surface really does stand at the lower
+     * connected level. A run that is FLOWING is a conduit under pressure: a section below the
+     * SOURCE's waterline is submerged and runs full, however low the far tank sits — and the flat
+     * line said the opposite, so nothing ever filled such a section and it carried only the
+     * brigade's plug depth, {@code clamp(4q, cap/8, cap)}. That reads as a pipe flowing half empty
+     * and never packing however much you top the source up, since its fill then answers to the
+     * RATE rather than to how deeply it is submerged. Reported on a run leaving a 3-tall tank's
+     * top block and descending into another's bottom block: at Δh ≈ 1 block the conductance gives
+     * ~25 mB/t, a depth of 99 of 250, and the one VERTICAL cell — whose window is the FULL block
+     * rather than the 6/16 bore, so the same error that is a thin band on a horizontal cell is a
+     * visibly half-empty column here — sat at 54% while the pipe below it ran full.
+     *
+     * Interpolated exactly as {@link #floodedTargets} does, which is what keeps the fill and drain
+     * halves from ping-ponging: {@code shed} raises the same line to the receiving end's own
+     * surface and floors it at the flow depth, so its target is {@code >=} this one everywhere and
+     * it can never trim what this just filled.
+     *
+     * A CREST-broken run keeps its per-leg barometric profile, but never reaches here: a broken
+     * column is BLOCKED, so the brigade does not flow it and the settle takes it instead.
+     */
+    private int[] gradeTargets(double headA, double headB) {
+        int[] target = new int[cells.size()];
+        for (int i = 0; i < cells.size(); i++) {
+            double line = headA + (headB - headA) * ((i + 1.0) / (cells.size() + 1));
+            target[i] = (int) Math.round(windowFillFrac(cells.get(i), line) * network.cellCapacity);
+        }
+        return target;
     }
 
     /**
@@ -839,6 +903,45 @@ final class SettlingRun {
     private static FluidStack offeredBy(Reservoir source, PipeStore.Store feed) {
         if (source != null) return source.contents();
         return feed != null && feed.amount() > 0 ? feed.fluid() : FluidStack.EMPTY;
+    }
+
+    /**
+     * A run with no resting line at EITHER end: gravity pools its contents, and a running pump
+     * pushing into it still packs and delivers through it.
+     *
+     * The pump half is not gravity's business, which is exactly why it was missing. Gravity only
+     * ever moves within a run's own cells and its end RESERVOIRS — a pump is neither — so a pump
+     * between a primed suction line and an EMPTY sink stranded its column for good: no endpoint
+     * holds the fluid, so the solve enumerates no pass at all ({@code FlowSolver.groupSamplesByVolume}
+     * reads endpoints, never what the pipes hold — §12) and publishes no head, while the empty sink
+     * deliberately contributes no line either ({@link #restingLine}), so BOTH ends came up null and
+     * the profile path that carries {@link #primeFromPumps} was never reached. Reported as 1150 mB
+     * of latex standing in the pipes of a manifold whose extractors had all run dry, with the pump
+     * spinning at 256 RPM beside an empty tank.
+     *
+     * The pump aims at a FULL bore rather than a waterline: there is no waterline anywhere, and a
+     * discharge line is pressure-driven, not gravity-shaped (the same reason {@link #shed} leaves a
+     * pump-adjacent run alone). Self-limiting by construction — the moment the pump delivers into a
+     * reservoir that endpoint holds fluid, the next solve enumerates a pass for it, and the run is
+     * back on the profile path. Only a mouth sink stays here, a pump evacuating a stranded column
+     * into the world, which is what a running pump against an open end should do.
+     *
+     * KNOWN LIMIT, the sub-cell residual: {@link #pumpPrime} delivers on through only once the
+     * outlet is AT its target, so with a sink ABOVE the line a column shorter than one cell packs
+     * the outlet and stops there. A sink at or below the line does not care — gravity pours the
+     * packed cell on into it, which is the reported geometry.
+     */
+    private boolean pooledUnderPumps() {
+        boolean moved = gravityPool();
+        moved |= primeFromPumps(fullTargets());
+        return moved;
+    }
+
+    /** A pressure-driven profile: with no waterline to aim at, a pump packs its discharge full-bore. */
+    private int[] fullTargets() {
+        int[] target = new int[cells.size()];
+        Arrays.fill(target, network.cellCapacity);
+        return target;
     }
 
     /**

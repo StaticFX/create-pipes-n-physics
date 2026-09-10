@@ -799,6 +799,103 @@ public class PumpTests {
     }
 
     /**
+     * The same delivery with the sink standing EMPTY — the one state the test above deliberately
+     * steps around ("the sink starts wet so it contributes a real resting line"), and the one where
+     * the settle had no path at all.
+     *
+     * With every endpoint dry the solve enumerates no fluid pass whatsoever ({@code
+     * groupSamplesByVolume} reads what ENDPOINTS hold, never what the pipes do — §12) and so
+     * publishes no head, while an empty reservoir deliberately contributes no resting line either.
+     * Both ends of the outlet run therefore came up null and {@code settle()} took its headless
+     * early return, which carries plain gravity and NOT {@code primeFromPumps}. Gravity can never
+     * cross a pump's body, so the column parked at the suction flank and stayed there: a pump
+     * spinning at 256 RPM, a tank with room in front of it, and every line of {@code /pipegraph}
+     * reading like a settled network (reported as 1150 mB of latex standing in the pipes of a
+     * manifold whose extractors had all run dry).
+     *
+     * It also pins the diagnostic that makes this whole class of hole visible: while the rig is
+     * bone dry every run must be NOTED {@code NO_DATUM}, so the dump says "no resting line at
+     * either end" rather than leaving a skipped run and a settled one both reading
+     * {@code solved=0 actual=0} — the reason this bug could only ever be found by a player
+     * noticing an absence in-world.
+     *
+     * Mutation check: restore the bare {@code return gravityPool()} and the suction cell keeps its
+     * full 250 mB with the sink still bone dry.
+     */
+    @GameTest(template = "physics/pump_dead_suction", templateNamespace = PipesNPhysics.ID, timeoutTicks = 200)
+    public static void pumpDeliversIntoAnEmptySinkWithNoRestingLineAnywhere(GameTestHelper helper) {
+        BlockPos deadEnd = new BlockPos(0, 1, 1);
+        BlockPos suction = new BlockPos(1, 1, 1);
+        BlockPos outlet = new BlockPos(3, 1, 1);
+        BlockPos sink = new BlockPos(4, 1, 1);
+        int primed = PipeStore.capacityMb();
+
+        helper.runAfterDelay(5, () -> {
+            if (amount(helper, sink) != 0) {
+                helper.fail("the sink must start EMPTY — a wet one offers a resting line and the"
+                        + " run never reaches the headless path this pins" + dump(helper, sink));
+                return;
+            }
+            // Bone dry: no endpoint holds anything, so the solve enumerates no pass and no node
+            // gets a head. Executing that solution moves nothing (every cell is empty) — it is run
+            // purely to read back WHICH settle path examined the outlet run.
+            Graph graph = GraphBuilder.build(helper.getLevel(), helper.absolutePos(outlet));
+            Solution dry = FlowSolver.solve(helper.getLevel(), graph);
+            PipeFlowExecutor.run(helper.getLevel(), graph, dry);
+            Edge run = null;
+            for (Edge e : graph.edges()) {
+                if (e.pipes().contains(helper.absolutePos(outlet))) run = e;
+            }
+            if (run == null) {
+                helper.fail("no graph edge carries the outlet cell " + outlet.toShortString()
+                        + dump(helper, outlet));
+                return;
+            }
+            Solution.SettleNote note = dry.settleNotes()[run.index()];
+            if (note != Solution.SettleNote.NO_DATUM) {
+                helper.fail("the outlet run of a bone-dry rig was noted " + note + " — with no"
+                        + " endpoint holding fluid neither end can offer a resting line, and the"
+                        + " dump must say so or a skipped run reads exactly like a settled one");
+                return;
+            }
+
+            PipeStore.Store cell = PipeStore.at(helper.getLevel(), helper.absolutePos(suction));
+            if (cell == null) {
+                helper.fail("no pipe store at " + suction.toShortString());
+                return;
+            }
+            cell.insert(new FluidStack(Fluids.WATER, primed), primed);
+            cell.flush();
+        });
+
+        helper.runAfterDelay(120, () -> {
+            int held = pipeAmount(helper, suction);
+            int tank = amount(helper, sink);
+            int total = tank + held + pipeAmount(helper, outlet) + pipeAmount(helper, deadEnd);
+            if (total != primed) {
+                helper.fail("fluid not conserved: tank " + tank + " + suction " + held
+                        + " + pipes = " + total + " of " + primed + dump(helper, suction));
+                return;
+            }
+            if (held > 0) {
+                helper.fail("the pump left " + held + " mB standing at its suction flank — with an"
+                        + " empty sink no run has a resting line, and gravity alone cannot cross a"
+                        + " pump, so nothing but the pump itself can move this" + dump(helper, suction));
+                return;
+            }
+            // Reaching the RESERVOIR is the point: merely packing the outlet cell would satisfy
+            // an empty suction line while the fluid is still stuck in the pipes.
+            if (tank * 4 < primed * 3) {
+                helper.fail("the sink holds only " + tank + " mB of " + primed + " — the column"
+                        + " moved out of the suction line but never crossed into the tank"
+                        + dump(helper, sink));
+                return;
+            }
+            helper.succeed();
+        });
+    }
+
+    /**
      * The same delivery, with the pump wedged FLUSH against its sink: its outlet edge holds no
      * cells at all. A zero-cell edge is a wire, and the settle used to bail on one before anything
      * could run — so {@code pumpPrime} never reached {@code deliverThroughPump} (it needs an outlet

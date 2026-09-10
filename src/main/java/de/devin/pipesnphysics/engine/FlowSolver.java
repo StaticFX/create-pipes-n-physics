@@ -94,6 +94,7 @@ public final class FlowSolver {
         held.removeAll(results.movingEdges);
         return new Solution(toEdgeFlows(graph, results.edgeFlow), results.transfers,
                 results.passes, new int[graph.edges().size()],
+                new Solution.SettleNote[graph.edges().size()],
                 results.nodeHeads, results.nodeCeilings, results.nodeAnchors,
                 results.gasHeadNodes, results.edgeFluids, results.restFluids, blocked, stalled, noHead, held,
                 results.edgeReasons, results.pumpLoads, active);

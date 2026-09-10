@@ -40,6 +40,7 @@ public final class SettlePass {
                 // only a run that REALLY carried fluid also sheds toward the grade line — a
                 // stalled or dead-headed line keeps its packed column.
                 boolean carried = ledger.edgeMovedMb()[edge.index()] > 0;
+                ledger.note(edge, Solution.SettleNote.FLOWING);
                 SettlingRun run = new SettlingRun(network, ledger, solution, edge, false);
                 boolean moved = run.topUp();
                 if (carried) {
@@ -109,8 +110,8 @@ public final class SettlePass {
             // depth, breaking the "a slot conducts only once at flow depth" plug gate next tick.
             if (flowedEdges.contains(edge.index())) continue;
             BlockPos adjacent = PipeGeometry.adjacentCell(network.graph, edge, node.index());
-            if (adjacent == null || adjacent.equals(node.pos())) continue;
-            PipeStore.Store cell = network.cellAt(adjacent);
+            if (adjacent == null) continue;
+            PipeStore.Store cell = neighbourStore(node, edge, adjacent);
             if (cell == null || !crosses(node, adjacent, slot, cell)) continue;
             // A one-way valve slot exchanges only ALONG its direction: pour toward the arrow,
             // pull from behind it — this is the settle's only cross-node path. Mostly shadowed
@@ -154,8 +155,8 @@ public final class SettlePass {
         for (Edge edge : network.graph.edgesOf(node.index())) {
             if (flowedEdges.contains(edge.index())) continue;
             BlockPos adjacent = PipeGeometry.adjacentCell(network.graph, edge, node.index());
-            if (adjacent == null || adjacent.equals(node.pos())) continue;
-            PipeStore.Store cell = network.cellAt(adjacent);
+            if (adjacent == null) continue;
+            PipeStore.Store cell = neighbourStore(node, edge, adjacent);
             if (cell == null || !crosses(node, adjacent, slot, cell)) continue;
             // Only one of the two holds the fluid that would cross; buoyancy is gravity upside
             // down, so a gas's "downhill" is up.
@@ -175,6 +176,8 @@ public final class SettlePass {
                 spreadLevel(edge, slot, cell, rate, pourAllowed, pullAllowed);
             }
         }
+        // A vessel flush against this junction is no store, so the loop above cannot reach it.
+        pourIntoNeighbourReservoirs(node, slot, flowedEdges);
     }
 
     /**
@@ -206,8 +209,8 @@ public final class SettlePass {
         for (Edge edge : network.graph.edgesOf(node.index())) {
             if (flowedEdges.contains(edge.index())) continue;
             BlockPos adjacent = PipeGeometry.adjacentCell(network.graph, edge, node.index());
-            if (adjacent == null || adjacent.equals(node.pos())) continue;
-            PipeStore.Store cell = network.cellAt(adjacent);
+            if (adjacent == null) continue;
+            PipeStore.Store cell = neighbourStore(node, edge, adjacent);
             if (cell == null || !crosses(node, adjacent, slot, cell)) continue;
             boolean pourAllowed = node.gateFlow() == null
                     || adjacent.equals(node.pos().relative(node.gateFlow()));
@@ -221,6 +224,93 @@ public final class SettlePass {
                 exchange(edge, cell, slot, Math.min(cell.amount(), rate));
             }
         }
+        // Buoyant exchange with a vessel flush against this junction: the gas rises INTO the tank
+        // above it, the mirror of the pour below. Monotone like the rest of this method.
+        pourIntoNeighbourReservoirs(node, slot, flowedEdges);
+    }
+
+    /**
+     * The store a node's slot exchanges with across one incident edge, or null where there is none.
+     *
+     * On an edge WITH cells that is its end cell. On a ZERO-CELL edge {@code adjacentCell} answers
+     * the far NODE's position instead, and only a junction or shut valve there is a store of its
+     * own — so the neighbour is that node's SLOT, exactly the predicate the brigade already applies
+     * ({@code BrigadePass.pullArrivingAt}). A reservoir or an open mouth has none and is reached by
+     * {@link #pourIntoNeighbourReservoirs} instead.
+     *
+     * A PUMP is the one that bit. It stores nothing by design, yet its block entity carries a live
+     * {@code PipeStore} with a full cell of room — the content mixin sits on the base
+     * {@code FluidTransportBehaviour} its own behaviour extends — so the raw {@code cellAt} these
+     * loops used happily poured into it, and NOTHING drains a pump again: no run owns it (a pump is
+     * a node, not a cell of any edge), the brigade never touches it, and it renders nowhere. Only
+     * the same junction pulling back could recover it. Measured at 150 mB of 250 standing inside
+     * the Mechanical Pump of the {@code pumpAgainstJunctionSlotStillDelivers} rig, invisible on
+     * every node and edge line of {@code /pipegraph} while the Fluids total still counted it.
+     */
+    private PipeStore.Store neighbourStore(Node node, Edge edge, BlockPos adjacent) {
+        if (adjacent.equals(node.pos())) return null; // a run looping back to its own node
+        if (!edge.pipes().isEmpty()) return network.cellAt(adjacent);
+        return network.slotAt(edge.other(node.index()));
+    }
+
+    /**
+     * A slot pours into a reservoir or open mouth sitting directly against it — the slot twin of a
+     * headless run's {@code SettlingRun.equalizeWithReservoir} and {@code pourOutOpenEnd}.
+     *
+     * Across a ZERO-CELL edge the neighbour IS that vessel (a tank flush against a junction, a tee
+     * with one arm open to the air), and every exchange above moves between STORES, so such a slot
+     * had no outlet in the settle at all: while the solve drives the edge the brigade empties it,
+     * but the moment it stops the contents stood there for good — the slot twin of the headless-run
+     * hole, and the same "fluid frozen in a pipe that physics says should drain".
+     *
+     * POUR ONLY, like the run's headless equalize: gravity may empty a slot into a vessel it stands
+     * above, but drawing the other way is the solve's business and would fight it. Called from the
+     * headless and buoyant paths only — never where a node head is driving the slot — so a slot the
+     * solve is steering keeps its target.
+     */
+    private void pourIntoNeighbourReservoirs(Node node, PipeStore.Store slot, Set<Integer> flowed) {
+        if (slot.amount() <= 0) return;
+        boolean gas = SettlingRun.lighterThanAir(slot.fluid());
+        int rate = SettlingRun.settleRate(network.cellCapacity);
+        for (Edge edge : network.graph.edgesOf(node.index())) {
+            if (flowed.contains(edge.index()) || !edge.pipes().isEmpty()) continue;
+            Reservoir reservoir = network.reservoirAt(edge.other(node.index()));
+            if (reservoir == null) continue;
+            BlockPos far = network.graph.node(edge.other(node.index())).pos();
+            // A one-way gate pours only along its arrow, and a filter walls the slot off exactly
+            // as it walls a run.
+            if (node.gateFlow() != null && !far.equals(node.pos().relative(node.gateFlow()))) continue;
+            if (!PipeGates.conducts(network.level, node.pos(), far, slot.fluid())) continue;
+            if (!standsAbove(node.pos(), slot, reservoir, far, gas)) continue;
+            int poured = reservoir.fill(slot.fluid(), Math.min(slot.amount(), rate));
+            if (poured > 0) {
+                slot.extract(poured);
+                ledger.moved(edge, poured);
+                ledger.markSettling();
+            }
+            if (slot.amount() <= 0) return;
+        }
+    }
+
+    /**
+     * Whether the slot's fluid stands above the vessel it would pour into, IN THE FLUID'S OWN
+     * frame — a buoyant gas pours UP, so every elevation reads negated (§5a gas hydrostatics). A
+     * finite reservoir is compared surface to surface; an open MOUTH is a spill threshold rather
+     * than a surface, so it takes the mid-height test the run's mouth pour uses.
+     */
+    private boolean standsAbove(BlockPos slotPos, PipeStore.Store slot, Reservoir reservoir,
+                                BlockPos far, boolean gas) {
+        if (reservoir.isOpenMouth()) {
+            double slotMid = network.cellCenterY(slotPos);
+            double mouthMid = network.cellCenterY(far);
+            return (gas ? -mouthMid : mouthMid) <= (gas ? -slotMid : slotMid) + SettlingRun.SURFACE_EPS;
+        }
+        if (!reservoir.isFiniteReservoir()) return false;
+        double height = network.windowHeight(slotPos);
+        double low = gas ? -(network.windowBottomY(slotPos) + height) : network.windowBottomY(slotPos);
+        double surface = low + slot.amount() / (double) network.cellCapacity * height;
+        double vessel = gas ? -reservoir.gasSurface() : reservoir.surface();
+        return surface > vessel + SettlingRun.SURFACE_EPS;
     }
 
     /**
